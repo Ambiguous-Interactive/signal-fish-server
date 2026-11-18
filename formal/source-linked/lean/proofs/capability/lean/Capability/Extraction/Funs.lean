@@ -368,72 +368,66 @@ def
     coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
-/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((jiff::timestamp::Timestamp, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}::call_once]:
     Source: 'src/../../../../src/session_member.rs', lines 205:17-205:43 -/
 def
-  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
   : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter)
   (c : session_member.elect_host.closure_1 T1 Clause0_IntoIter)
-  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
-  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  (tupled_args : (jiff.timestamp.Timestamp × uuid.Uuid)) :
   RustM uuid.Uuid
   := do
   let (_, player_id) := tupled_args
   ok player_id
 
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((jiff::timestamp::Timestamp, uuid::Uuid),), uuid::Uuid> for signal_fish_proof_core::session_member::elect_host::closure#1<'a, T1, Clause0_IntoIter>}]
     Source: 'src/../../../../src/session_member.rs', lines 205:17-205:43 -/
 @[reducible]
 def
-  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+  session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
   : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter) : core.ops.function.FnOnce
   (session_member.elect_host.closure_1 T1 Clause0_IntoIter)
-  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-  uuid.Uuid) uuid.Uuid := {
+  (jiff.timestamp.Timestamp × uuid.Uuid) uuid.Uuid := {
   call_once :=
-    session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once
+    session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid.call_once
     coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
-/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
+/-- [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((jiff::timestamp::Timestamp, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}::call_once]:
     Source: 'src/../../../../src/session_member.rs', lines 201:31-201:91 -/
 def
-  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool.call_once
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
   : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter) (c : session_member.elect_host.closure T1 Clause0_IntoIter)
-  (tupled_args : ((chrono.datetime.DateTime chrono.offset.utc.Utc
-  chrono.offset.utc.Utc) × uuid.Uuid)) :
+  (tupled_args : (jiff.timestamp.Timestamp × uuid.Uuid)) :
   RustM Bool
   := do
   core.Pair.Insts.CoreCmpPartialOrdPair.lt
-    (chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
-    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc
-    chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc)
+    jiff.timestamp.Timestamp.Insts.CoreCmpPartialOrdTimestamp
     uuid.Uuid.Insts.CoreCmpPartialOrdUuid (c.joined_at, c.player_id)
     tupled_args
 
-/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((chrono::datetime::DateTime<chrono::offset::utc::Utc, chrono::offset::utc::Utc>, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
+/-- Trait implementation: [signal_fish_proof_core::session_member::elect_host::{impl core::ops::function::FnOnce<((jiff::timestamp::Timestamp, uuid::Uuid),), bool> for signal_fish_proof_core::session_member::elect_host::closure<'a, '_1, T1, Clause0_IntoIter>}]
     Source: 'src/../../../../src/session_member.rs', lines 201:31-201:91 -/
 @[reducible]
 def
-  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+  session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool
   {T1 : Type} {Clause0_IntoIter : Type}
   (coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
   : core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter) : core.ops.function.FnOnce
   (session_member.elect_host.closure T1 Clause0_IntoIter)
-  ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-  uuid.Uuid) Bool := {
+  (jiff.timestamp.Timestamp × uuid.Uuid) Bool := {
   call_once :=
-    session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
+    session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool.call_once
     coreitertraitscollectIntoIteratorT1SharedASessionMemberClause0_IntoIterInst
 }
 
@@ -446,11 +440,9 @@ def session_member.elect_host_loop.body
   core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter) (authority : core.option.Option uuid.Uuid)
   (iter : Clause0_IntoIter)
-  (earliest : core.option.Option ((chrono.datetime.DateTime
-  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  (earliest : core.option.Option (jiff.timestamp.Timestamp × uuid.Uuid)) :
   RustM (ControlFlow (Clause0_IntoIter × (core.option.Option
-    ((chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc) ×
-    uuid.Uuid))) (core.option.Option uuid.Uuid))
+    (jiff.timestamp.Timestamp × uuid.Uuid))) (core.option.Option uuid.Uuid))
   := do
   let (o, iter1) ←
     coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst.iteratorIteratorInst.next
@@ -459,7 +451,7 @@ def session_member.elect_host_loop.body
   | core.option.Option.None =>
     let o1 ←
       core.option.Option.map
-        (session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid
+        (session_member.elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid
         coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
         earliest ()
     ok (done o1)
@@ -473,7 +465,7 @@ def session_member.elect_host_loop.body
     else
       let b1 ←
         core.option.Option.is_none_or
-          (session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
+          (session_member.elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool
           coreitertraitscollectIntoIteratorT1SharedSessionMemberClause0_IntoIterInst)
           earliest member
       if b1
@@ -491,8 +483,7 @@ def session_member.elect_host_loop
   core.iter.traits.collect.IntoIterator T1 session_member.SessionMember
   Clause0_IntoIter) (iter : Clause0_IntoIter)
   (authority : core.option.Option uuid.Uuid)
-  (earliest : core.option.Option ((chrono.datetime.DateTime
-  chrono.offset.utc.Utc chrono.offset.utc.Utc) × uuid.Uuid)) :
+  (earliest : core.option.Option (jiff.timestamp.Timestamp × uuid.Uuid)) :
   RustM (core.option.Option uuid.Uuid)
   := do
   loop

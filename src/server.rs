@@ -5,7 +5,7 @@ use crate::coordination::{
     DeliveryReserveError, DeliverySender, DeliveryTrySendError, ImmediateGameDataBroadcast,
     InMemoryRoomOperationCoordinator, MessageCoordinator, RelayEnqueueOutcome, RoomEventCompletion,
     RoomEventJob, RoomEventMutationGuard, RoomEventSequencer, RoomMessageTransactionOutcome,
-    RoomOperationCoordinatorTrait, RoomRecipientMessages,
+    RoomRecipientMessages,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -33,8 +33,8 @@ use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGua
 use tokio::time::Duration;
 use uuid::Uuid;
 
-fn chrono_duration_from_std(duration: Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+fn signed_duration_from_std(duration: Duration) -> jiff::SignedDuration {
+    jiff::SignedDuration::try_from(duration).unwrap_or(jiff::SignedDuration::MAX)
 }
 
 #[cfg(test)]
@@ -395,8 +395,8 @@ mod duration_conversion_tests {
 
     #[test]
     fn extreme_std_duration_saturates_without_panicking() {
-        let converted = std::panic::catch_unwind(|| chrono_duration_from_std(Duration::MAX));
-        assert_eq!(converted.ok(), Some(chrono::Duration::MAX));
+        let converted = std::panic::catch_unwind(|| signed_duration_from_std(Duration::MAX));
+        assert_eq!(converted.ok(), Some(jiff::SignedDuration::MAX));
     }
 }
 
@@ -751,7 +751,7 @@ pub mod allocation_benchmark {
                         player_id: PlayerId::from_u128(u128::from(index)),
                         player_name: format!("host-election-player-{index}"),
                         is_authority: false,
-                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        joined_at: jiff::Timestamp::UNIX_EPOCH,
                         direct_endpoint: Some(DirectEndpoint {
                             host: "127.0.0.1".to_string(),
                             port: 7777,
@@ -974,7 +974,7 @@ pub struct EnhancedGameServer {
     /// Process-local message coordinator behind a future remote-backend seam
     message_coordinator: Arc<dyn MessageCoordinator>,
     /// Process-local room operation coordinator
-    room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
+    room_coordinator: Arc<InMemoryRoomOperationCoordinator>,
     /// Process-local coordination lock
     distributed_lock: Arc<dyn DistributedLock>,
     /// Instance identifier
@@ -1478,12 +1478,11 @@ impl EnhancedGameServer {
             None
         };
 
-        let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
-            Arc::new(InMemoryRoomOperationCoordinator::new(
-                message_coordinator.clone(),
-                database.clone(),
-                reconnection_manager.clone(),
-            ));
+        let room_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            message_coordinator.clone(),
+            database.clone(),
+            reconnection_manager.clone(),
+        ));
 
         // Initialize public app-ID access policy based on configuration.
         let app_id_allowlist = if config.app_id_allowlist_enabled {
@@ -1511,7 +1510,7 @@ impl EnhancedGameServer {
         let (shutdown_drain_tx, _) = watch::channel(false);
         let spectator_service = SpectatorService::new(
             database.clone(),
-            Arc::clone(&room_coordinator),
+            room_coordinator.clone(),
             message_coordinator.clone(),
             Arc::clone(&distributed_lock),
             Arc::clone(&metrics),

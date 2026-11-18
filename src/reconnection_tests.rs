@@ -70,26 +70,25 @@ fn test_reconnection_token_creation() {
     assert!(!token.is_expired());
     assert!(token.is_valid(&player_id, &room_id));
 
-    let now = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
-        .expect("fixed test timestamp must parse")
-        .with_timezone(&Utc);
+    let now =
+        str::parse::<Timestamp>("2026-01-01T00:00:00Z").expect("fixed test timestamp must parse");
 
     assert_eq!(
         expiration_from_unsigned(now, 300),
-        now.checked_add_signed(Duration::seconds(300))
+        now.checked_add(SignedDuration::from_secs(300))
             .expect("ordinary window fits")
     );
     for window in [i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
         assert_eq!(
             expiration_from_unsigned(now, window),
-            DateTime::<Utc>::MAX_UTC,
+            Timestamp::MAX,
             "window {window} must saturate at Chrono's upper bound"
         );
     }
 
     let token = ReconnectionToken::new_with_unsigned_window(player_id, room_id, u64::MAX);
 
-    assert_eq!(token.expires_at, DateTime::<Utc>::MAX_UTC);
+    assert_eq!(token.expires_at, Timestamp::MAX);
     assert!(!token.is_expired());
     assert!(token.is_valid(&player_id, &room_id));
 }
@@ -107,7 +106,7 @@ fn reconnection_token_debug_never_exposes_the_credential() {
     let disconnected = DisconnectedPlayer {
         player_id: token.player_id,
         room_id: token.room_id,
-        disconnected_at: Utc::now(),
+        disconnected_at: Timestamp::now(),
         token: token.clone(),
         last_sequence: 4,
         was_authority: false,
@@ -1277,8 +1276,8 @@ async fn wall_clock_jumps_cannot_open_or_close_the_reconnect_window() {
             .get_mut(&player_id)
             .expect("pending record")
             .disconnected;
-        disconnected.disconnected_at = Utc::now() - Duration::days(1);
-        disconnected.token.expires_at = Utc::now() - Duration::days(1);
+        disconnected.disconnected_at = Timestamp::now() - SignedDuration::from_hours(24);
+        disconnected.token.expires_at = Timestamp::now() - SignedDuration::from_hours(24);
     }
     assert!(
         manager
@@ -1301,8 +1300,8 @@ async fn wall_clock_jumps_cannot_open_or_close_the_reconnect_window() {
             .get_mut(&player_id)
             .expect("pending record")
             .disconnected;
-        disconnected.disconnected_at = Utc::now() + Duration::days(1);
-        disconnected.token.expires_at = Utc::now() + Duration::days(1);
+        disconnected.disconnected_at = Timestamp::now() + SignedDuration::from_hours(24);
+        disconnected.token.expires_at = Timestamp::now() + SignedDuration::from_hours(24);
     }
     assert_eq!(
         manager
@@ -1394,7 +1393,7 @@ async fn same_room_reregistration_preserves_original_disconnect_deadline() {
             .get_mut(&player)
             .expect("pending disconnect")
             .disconnected;
-        disconnected.disconnected_at = Utc::now() - Duration::seconds(120);
+        disconnected.disconnected_at = Timestamp::now() - SignedDuration::from_secs(120);
         disconnected.token.expires_at = expiration_from_unsigned(disconnected.disconnected_at, 300);
         (disconnected.disconnected_at, disconnected.token.expires_at)
     };
@@ -1715,7 +1714,7 @@ async fn same_room_reregistration_preserves_disconnect_snapshot() {
         name: "Player".to_string(),
         is_authority: true,
         is_ready: false,
-        connected_at: Some(Utc::now()),
+        connected_at: Some(Timestamp::now()),
         connection_info: Some(ConnectionInfo::Direct {
             host: "old-network.example".to_string(),
             port: 7777,
@@ -2008,7 +2007,7 @@ async fn only_room_uniform_control_events_are_replayable() {
         name: "Player".to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(Utc::now()),
+        connected_at: Some(Timestamp::now()),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -2017,7 +2016,7 @@ async fn only_room_uniform_control_events_are_replayable() {
     let spectator = SpectatorInfo {
         id: player_id,
         name: "Spectator".to_string(),
-        connected_at: Some(Utc::now()),
+        connected_at: Some(Timestamp::now()),
     };
 
     // Every room-uniform control event buffers.

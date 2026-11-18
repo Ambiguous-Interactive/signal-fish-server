@@ -26,7 +26,7 @@ pub(crate) struct SessionMember {
     pub player_id: Uuid,
     pub player_name: String,
     pub is_authority: bool,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
+    pub joined_at: jiff::Timestamp,
     pub direct_endpoint: Option<DirectEndpoint>,
     pub capabilities: SessionCapabilities,
 }
@@ -193,7 +193,7 @@ pub(crate) fn elect_host<'a>(
     authority: Option<Uuid>,
     members: impl IntoIterator<Item = &'a SessionMember>,
 ) -> Option<Uuid> {
-    let mut earliest: Option<(chrono::DateTime<chrono::Utc>, Uuid)> = None;
+    let mut earliest: Option<(jiff::Timestamp, Uuid)> = None;
     for member in members {
         if Some(member.player_id) == authority {
             return Some(member.player_id);
@@ -242,7 +242,7 @@ mod tests {
             player_id,
             player_name: "peer".into(),
             is_authority: false,
-            joined_at: chrono::DateTime::UNIX_EPOCH,
+            joined_at: jiff::Timestamp::UNIX_EPOCH,
             direct_endpoint: None,
             capabilities: SessionCapabilities {
                 version,
@@ -323,7 +323,7 @@ mod tests {
                         player_id: Uuid::from_u128(1),
                         player_name: String::new(),
                         is_authority: false,
-                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        joined_at: jiff::Timestamp::UNIX_EPOCH,
                         direct_endpoint: has_endpoint.then(|| DirectEndpoint {
                             host: "127.0.0.1".into(),
                             port: 1,
@@ -377,7 +377,7 @@ mod tests {
             player_id: Uuid::from_u128(identity),
             player_name: String::new(),
             is_authority: identity == 1,
-            joined_at: chrono::DateTime::from_timestamp(seconds, 0).unwrap(),
+            joined_at: jiff::Timestamp::new(seconds, 0).unwrap(),
             direct_endpoint: has_endpoint.then(|| DirectEndpoint {
                 host: "127.0.0.1".into(),
                 port: 1,
@@ -457,14 +457,14 @@ mod tests {
     #[cfg_attr(miri, ignore)]
     fn host_election_matches_authority_and_independent_sorted_order() {
         let instants = [
-            chrono::DateTime::<chrono::Utc>::MIN_UTC,
-            chrono::DateTime::from_timestamp(-1, 999_999_999).unwrap(),
-            chrono::DateTime::UNIX_EPOCH,
-            chrono::DateTime::from_timestamp(0, 1).unwrap(),
-            chrono::DateTime::from_timestamp(1_483_228_799, 999_999_999).unwrap(),
-            chrono::DateTime::from_timestamp(1_483_228_799, 1_999_999_999).unwrap(),
-            chrono::DateTime::from_timestamp(1_483_228_800, 0).unwrap(),
-            chrono::DateTime::<chrono::Utc>::MAX_UTC,
+            jiff::Timestamp::MIN,
+            jiff::Timestamp::new(-1, 999_999_999).unwrap(),
+            jiff::Timestamp::UNIX_EPOCH,
+            jiff::Timestamp::new(0, 1).unwrap(),
+            jiff::Timestamp::new(1_483_228_799, 999_999_999).unwrap(),
+            jiff::Timestamp::new(1_483_228_799, 0).unwrap(),
+            jiff::Timestamp::new(1_483_228_800, 0).unwrap(),
+            jiff::Timestamp::MAX,
         ];
         let identities = [Uuid::nil(), Uuid::from_u128(1 << 120), Uuid::max()];
         let candidates: Vec<_> = instants
@@ -529,7 +529,7 @@ mod tests {
                     player_id: Uuid::from_bytes(higher),
                     player_name: String::new(),
                     is_authority: false,
-                    joined_at: chrono::DateTime::UNIX_EPOCH,
+                    joined_at: jiff::Timestamp::UNIX_EPOCH,
                     direct_endpoint: None,
                     capabilities: SessionCapabilities::default(),
                 };
@@ -556,17 +556,19 @@ mod tests {
             (1999, 12, 31),
             (2000, 2, 28),
         ] {
-            let date = chrono::NaiveDate::from_ymd_opt(year, month, day).unwrap();
+            let date = jiff::civil::date(year, month, day);
             let earlier = date
-                .and_hms_nano_opt(23, 59, 59, 999_999_999)
+                .at(23, 59, 59, 999_999_999)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .unwrap()
-                .and_utc();
+                .timestamp();
             let later = date
-                .succ_opt()
+                .tomorrow()
                 .unwrap()
-                .and_hms_opt(0, 0, 0)
+                .at(0, 0, 0, 0)
+                .to_zoned_datetime(jiff::tz::TimeZone::UTC)
                 .unwrap()
-                .and_utc();
+                .timestamp();
             let old = SessionMember {
                 player_id: Uuid::max(),
                 player_name: String::new(),
@@ -597,7 +599,7 @@ mod tests {
             player_id: Uuid::nil(),
             player_name: String::new(),
             is_authority: false,
-            joined_at: chrono::DateTime::UNIX_EPOCH,
+            joined_at: jiff::Timestamp::UNIX_EPOCH,
             direct_endpoint: None,
             capabilities: SessionCapabilities::default(),
         };
@@ -703,7 +705,7 @@ mod tests {
             player_id: Uuid::nil(),
             player_name: String::new(),
             is_authority: false,
-            joined_at: chrono::DateTime::UNIX_EPOCH,
+            joined_at: jiff::Timestamp::UNIX_EPOCH,
             direct_endpoint: None,
             capabilities: SessionCapabilities::default(),
         };

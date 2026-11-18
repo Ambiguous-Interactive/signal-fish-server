@@ -255,11 +255,11 @@ async fn room_gc_releases_storage_when_reconnect_view_is_busy() {
             .downcast_ref::<crate::database::InMemoryDatabase>()
             .unwrap();
         database
-            .backdate_room_activity_for_test(&empty_room, chrono::Duration::hours(1))
+            .backdate_room_activity_for_test(&empty_room, jiff::SignedDuration::from_hours(1))
             .await;
         let manager = server.reconnection_manager().unwrap();
         let cleanup = || async {
-            let timeout = chrono::Duration::minutes(1);
+            let timeout = jiff::SignedDuration::from_mins(1);
             if expired {
                 server
                     .cleanup_expired_rooms_protecting_reconnections(timeout, timeout)
@@ -1106,21 +1106,21 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
                 .unwrap();
         }
         database
-            .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(1))
+            .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_hours(1))
             .await;
         let storage = database.hold_room_writes_for_test().await;
         let mut cleanup = Box::pin(async {
             if expired {
                 server
                     .cleanup_expired_rooms_protecting_reconnections(
-                        chrono::Duration::zero(),
-                        chrono::Duration::zero(),
+                        jiff::SignedDuration::ZERO,
+                        jiff::SignedDuration::ZERO,
                     )
                     .await
                     .unwrap();
             } else {
                 server
-                    .cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero())
+                    .cleanup_empty_rooms_protecting_reconnections(jiff::SignedDuration::ZERO)
                     .await
                     .unwrap();
             }
@@ -1150,8 +1150,8 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
         if expired {
             let outcome = server
                 .cleanup_expired_rooms_protecting_reconnections(
-                    chrono::Duration::zero(),
-                    chrono::Duration::zero(),
+                    jiff::SignedDuration::ZERO,
+                    jiff::SignedDuration::ZERO,
                 )
                 .await
                 .unwrap();
@@ -1160,7 +1160,7 @@ async fn room_gc_storage_wait_does_not_block_reconnect_or_replay() {
         } else {
             assert_eq!(
                 server
-                    .cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero())
+                    .cleanup_empty_rooms_protecting_reconnections(jiff::SignedDuration::ZERO)
                     .await
                     .unwrap(),
                 vec![room_id]

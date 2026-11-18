@@ -676,10 +676,14 @@ fn reserved_room_joined_envelope(
             is_authority: false,
             is_ready: false,
             /*
-               V2 keeps the runtime join timestamp. Reserve its widest supported
-               UTC representation; v3 strips it from roster snapshots.
+               V2 keeps the timestamp. Reserve a signed year and nine fractional
+               digits. V3 strips the timestamp from roster snapshots.
             */
-            connected_at: (version < 3).then_some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            connected_at: (version < 3).then(|| {
+                jiff::Timestamp::MIN
+                    .checked_add(jiff::SignedDuration::from_nanos(1))
+                    .unwrap_or(jiff::Timestamp::MIN)
+            }),
             connection_info: None,
             /*
                V3 always carries both counters. Their widths can grow across

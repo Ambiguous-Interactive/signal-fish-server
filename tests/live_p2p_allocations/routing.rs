@@ -412,7 +412,7 @@ pub(crate) fn bus_exclusions_do_not_grow_recipient_storage() {
                 let message = signal_fish_server::distributed::SequencedMessage {
                     sequence_id: 1,
                     instance_id: Uuid::from_u128(2000),
-                    timestamp: chrono::Utc::now(),
+                    timestamp: jiff::Timestamp::now(),
                     message: ServerMessage::Pong,
                     room_id: Some(room),
                     target_player: None,

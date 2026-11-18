@@ -153,7 +153,7 @@ mod reconnect_partial_write {
     fn authentication_request(signing: &SigningKey, app_id: &str) -> ClientMessage {
         let payload = serde_json::json!({
             "app_id": app_id,
-            "exp": chrono::Utc::now().timestamp() + 300,
+            "exp": jiff::Timestamp::now().as_second() + 300,
             "nonce": "partial-write-control",
         });
         let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD

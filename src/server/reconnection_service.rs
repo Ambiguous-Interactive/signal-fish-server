@@ -2368,7 +2368,7 @@ impl EnhancedGameServer {
                         let now_unix = resolved
                             .decision
                             .uses_webrtc_signaling()
-                            .then(|| chrono::Utc::now().timestamp());
+                            .then(|| jiff::Timestamp::now().as_second());
                         let projection = resolved.decision.projection();
                         let mut turn_credentials_issued = 0_u64;
                         let mut reconnector_has_plan = false;

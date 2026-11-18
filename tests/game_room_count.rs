@@ -89,7 +89,7 @@ async fn game_room_counts_preserve_lifecycle_and_game_isolation() {
         .unwrap();
     tokio::time::advance(std::time::Duration::from_secs(10)).await;
     let removed = database
-        .cleanup_empty_rooms(chrono::Duration::seconds(1), &HashSet::new())
+        .cleanup_empty_rooms(jiff::SignedDuration::from_secs(1), &HashSet::new())
         .await
         .unwrap();
     assert_eq!(removed, vec![reused.id]);
@@ -99,8 +99,8 @@ async fn game_room_counts_preserve_lifecycle_and_game_isolation() {
     let protected = HashSet::from([other.id]);
     let retained = database
         .cleanup_expired_rooms(
-            chrono::Duration::seconds(1),
-            chrono::Duration::seconds(1),
+            jiff::SignedDuration::from_secs(1),
+            jiff::SignedDuration::from_secs(1),
             &protected,
         )
         .await
@@ -110,8 +110,8 @@ async fn game_room_counts_preserve_lifecycle_and_game_isolation() {
     assert_count(&database, "other", 1).await;
     let removed = database
         .cleanup_expired_rooms(
-            chrono::Duration::seconds(1),
-            chrono::Duration::seconds(1),
+            jiff::SignedDuration::from_secs(1),
+            jiff::SignedDuration::from_secs(1),
             &HashSet::new(),
         )
         .await

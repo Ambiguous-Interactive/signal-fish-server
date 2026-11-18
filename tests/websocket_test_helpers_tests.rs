@@ -7,8 +7,8 @@ use std::process::Command;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use chrono::Utc;
 use futures_util::{Stream, StreamExt};
+use jiff::Timestamp;
 use signal_fish_server::metrics::{DeliveryClassMetrics, DeliveryMetricsByClass};
 use signal_fish_server::protocol::{
     DeliveryClass, DeliveryCountersByClass, DeliveryGap, DeliveryGapReason, DeliveryReportPayload,
@@ -472,7 +472,7 @@ fn player_with_stamp(player_id: PlayerId, epoch: Option<u32>, seq: Option<u64>) 
         name: format!("player-{player_id}"),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(Utc::now()),
+        connected_at: Some(Timestamp::now()),
         connection_info: None,
         epoch,
         seq,

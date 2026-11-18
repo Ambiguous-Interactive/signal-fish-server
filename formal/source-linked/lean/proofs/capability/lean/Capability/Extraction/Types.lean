@@ -71,8 +71,7 @@ structure session_member.SessionMember where
   player_id : uuid.Uuid
   player_name : alloc.string.String
   is_authority : Bool
-  joined_at : chrono.datetime.DateTime chrono.offset.utc.Utc
-    chrono.offset.utc.Utc
+  joined_at : jiff.timestamp.Timestamp
   direct_endpoint : core.option.Option session_member.DirectEndpoint
   capabilities : session_capability.SessionCapabilities
 

@@ -36,17 +36,17 @@ noncomputable def uuid.Uuid.Insts.CoreCmpPartialEqUuid : core.cmp.PartialEq uuid
 }
 
 /- Trusted dependency interpretations: UUID 1.29.0 derives lexicographic order
-on its fixed [u8; 16] field. Chrono 0.4.45 DateTime::partial_cmp compares its
-NaiveDateTime, whose derived order compares signed packed date, u32 seconds,
-then u32 fraction. ElectionOrder.lean checks the encodings, not these Rust layouts. -/
+on its fixed [u8; 16] field. Jiff 1.0.1 Timestamp::cmp delegates to jiff-core's
+timestamp order, which compares signed seconds, then signed nanoseconds.
+ElectionOrder.lean checks the encodings against those modeled fields. -/
 namespace ElectionOrder
 
 def uuidKey (id : uuid.Uuid) : Nat :=
   id.bytes.val.foldl (fun key byte => key * 256 + byte.val) 0
 
-def timeKey {Tz Offset : Type} (time : chrono.datetime.DateTime Tz Offset) : Nat :=
-  (((time.packedDate.val + 2147483648).toNat * 4294967296 + time.seconds.val) *
-    4294967296 + time.fraction.val)
+def timeKey (time : jiff.timestamp.Timestamp) : Nat :=
+  ((time.seconds.val + 9223372036854775808).toNat * 4294967296 +
+    (time.fraction.val + 2147483648).toNat)
 
 noncomputable def orderBy {Left Right : Type} (leftKey : Left → Nat) (rightKey : Right → Nat) :
     core.cmp.PartialOrd Left Right := {
@@ -64,17 +64,8 @@ noncomputable def orderBy {Left Right : Type} (leftKey : Left → Nat) (rightKey
 }
 end ElectionOrder
 
-/-- Only the associated offset type is needed by the extracted UTC comparison. -/
-structure chrono.offset.TimeZone (Self : Type) where
-  Offset : Type
-
-abbrev chrono.offset.utc.Utc.Insts.ChronoOffsetTimeZoneUtc : chrono.offset.TimeZone chrono.offset.utc.Utc :=
-  ⟨chrono.offset.utc.Utc⟩
-
-noncomputable def chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime
-    {Left Right : Type} (left : chrono.offset.TimeZone Left) (right : chrono.offset.TimeZone Right) :
-    core.cmp.PartialOrd (chrono.datetime.DateTime Left left.Offset)
-      (chrono.datetime.DateTime Right right.Offset) :=
+noncomputable def jiff.timestamp.Timestamp.Insts.CoreCmpPartialOrdTimestamp :
+    core.cmp.PartialOrd jiff.timestamp.Timestamp jiff.timestamp.Timestamp :=
   ElectionOrder.orderBy ElectionOrder.timeKey ElectionOrder.timeKey
 
 noncomputable def uuid.Uuid.Insts.CoreCmpPartialOrdUuid : core.cmp.PartialOrd uuid.Uuid uuid.Uuid :=

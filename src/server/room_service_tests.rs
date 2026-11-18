@@ -7,6 +7,7 @@ use crate::config::{
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, DeliveryOutcome, DeliveryTrySendError, MessageCoordinator,
     RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
+    RoomOperationCoordinatorTrait,
 };
 use crate::database::{
     create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
@@ -123,19 +124,18 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
     } else {
         None
     };
-    let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
-        Arc::new(InMemoryRoomOperationCoordinator::new(
-            Arc::clone(&message_coordinator),
-            Arc::clone(&database),
-            reconnection_manager.clone(),
-        ));
+    let room_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+        Arc::clone(&message_coordinator),
+        Arc::clone(&database),
+        reconnection_manager.clone(),
+    ));
     let protocol_config = ProtocolConfig::default();
     let room_applications = Arc::new(DashMap::new());
     let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
     let (shutdown_drain_tx, _) = watch::channel(false);
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
-        Arc::clone(&room_coordinator),
+        room_coordinator.clone(),
         Arc::clone(&message_coordinator),
         Arc::clone(&distributed_lock),
         Arc::clone(&metrics),
@@ -1227,20 +1227,30 @@ async fn test_metrics_room_lookup_distinguishes_unavailable_storage_and_read_fai
             Arc::new(database),
         )
         .await;
-        let test_server =
-            axum_test::TestServer::new(crate::websocket::create_router("*").with_state(server));
-        let response = test_server
-            .get(&format!(
-                "/metrics/rooms/lookup?applicationId={}&gameName=game&roomCode=LOOKUP",
-                uuid::Uuid::new_v4()
-            ))
-            .await;
-        response.assert_status(if track_sessions {
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            axum::http::StatusCode::OK
-        });
-        let value = response.json::<serde_json::Value>();
+        use axum::body::{to_bytes, Body};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let path = format!(
+            "/metrics/rooms/lookup?applicationId={}&gameName=game&roomCode=LOOKUP",
+            uuid::Uuid::new_v4()
+        );
+        let request = Request::get(path).body(Body::empty()).unwrap();
+        let response = crate::websocket::create_router("*")
+            .with_state(server)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if track_sessions {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::OK
+            }
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["available"], false);
         assert!(
             value.get("room").is_none(),
@@ -1857,7 +1867,7 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn cleanup_empty_rooms(
         &self,
-        empty_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<Vec<RoomId>> {
         if self.pause_empty_cleanup_once.swap(false, Ordering::AcqRel) {
@@ -1871,8 +1881,8 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn cleanup_expired_rooms(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<RoomCleanupOutcome> {
         if self
@@ -2047,6 +2057,7 @@ struct UnregisterPause {
 
 struct DrainTriggerCoordinator {
     room_events: Arc<RoomEventSequencer>,
+    close_after_next_room_gate: StdMutex<Option<ConnectionCloseSignal>>,
     trigger: DrainTrigger,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
@@ -2082,6 +2093,7 @@ impl DrainTriggerCoordinator {
     fn new(trigger: DrainTrigger) -> Self {
         Self {
             room_events: Arc::new(RoomEventSequencer::default()),
+            close_after_next_room_gate: StdMutex::new(None),
             trigger,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
@@ -2166,7 +2178,11 @@ impl DrainTriggerCoordinator {
 #[async_trait::async_trait]
 impl MessageCoordinator for DrainTriggerCoordinator {
     async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
-        self.room_events.lock(*room_id).await
+        let guard = self.room_events.lock(*room_id).await;
+        if let Some(close) = self.close_after_next_room_gate.lock().unwrap().take() {
+            close.request_close(CloseReason::ActivityTimeout);
+        }
+        guard
     }
 
     fn enqueue_room_event(
@@ -3961,6 +3977,91 @@ async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn close_after_room_gate_acquisition_cancels_ready_handoff() {
+    check_close_at_lobby_handoff(crate::protocol::ClientMessage::PlayerReady).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_after_room_gate_acquisition_cancels_start_handoff() {
+    check_close_at_lobby_handoff(crate::protocol::ClientMessage::StartGame).await;
+}
+
+async fn check_close_at_lobby_handoff(message: crate::protocol::ClientMessage) {
+    use crate::protocol::ClientMessage;
+    use std::collections::BTreeSet;
+
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    if matches!(message, ClientMessage::StartGame) {
+        fixture.server.handle_player_ready(&fixture.leaver).await;
+        fixture.server.handle_player_ready(&fixture.survivor).await;
+    }
+    let before = fixture
+        .server
+        .room_coordinator
+        .current_ready_players(&fixture.room_id)
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        before.len(),
+        if matches!(message, ClientMessage::StartGame) {
+            2
+        } else {
+            0
+        }
+    );
+    drain_queued_messages(&mut fixture.leaver_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    let close = fixture
+        .server
+        .connection_manager
+        .close_signal_for(&fixture.leaver)
+        .unwrap();
+
+    // Close inside the successful room-lock poll, after the initial
+    // close check but before the command can start its owned worker.
+    *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+    fixture
+        .server
+        .handle_client_message(&fixture.leaver, message)
+        .await;
+    assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.lobby_state, LobbyState::Lobby);
+    let after = fixture
+        .server
+        .room_coordinator
+        .current_ready_players(&fixture.room_id)
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(after, before);
+    assert!(fixture
+        .server
+        .active_session_plan(&fixture.room_id)
+        .is_none());
+    for messages in [&mut fixture.leaver_rx, &mut fixture.survivor_rx] {
+        let queued = messages.try_recv();
+        assert!(
+            matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+            "{queued:?}"
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn old_socket_lobby_frames_cannot_toggle_ready_or_start_game() {
     use crate::protocol::{ClientMessage, LobbyState};
 
@@ -4921,7 +5022,7 @@ async fn disconnect_queued_during_leave_does_not_arm_a_reconnect() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -7852,7 +7953,7 @@ async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_even
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -7948,7 +8049,7 @@ async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_ident
         name: "reconnecting".to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: Some(jiff::Timestamp::now()),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -8414,7 +8515,7 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -9478,7 +9579,7 @@ async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
     // virtual idle is exactly zero.
     tokio::time::advance(Duration::from_millis(1)).await;
     let deleted = database
-        .cleanup_empty_rooms(chrono::Duration::zero(), &HashSet::new())
+        .cleanup_empty_rooms(jiff::SignedDuration::ZERO, &HashSet::new())
         .await
         .expect("empty cleanup after disconnected spectator");
     assert_eq!(
@@ -9646,7 +9747,7 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11090,7 +11191,7 @@ async fn empty_room_sweep_counts_rooms_deleted() {
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("test server uses in-memory storage")
-        .backdate_room_activity_for_test(&room.id, chrono::Duration::minutes(5))
+        .backdate_room_activity_for_test(&room.id, jiff::SignedDuration::from_mins(5))
         .await;
 
     let deleted_before = server.metrics.rooms_deleted.load(Ordering::Relaxed);
@@ -11544,7 +11645,7 @@ async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave()
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11676,7 +11777,7 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11759,7 +11860,7 @@ async fn missing_terminal_tail_suppresses_incomplete_player_left() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11898,7 +11999,7 @@ async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -12006,7 +12107,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -12489,7 +12590,7 @@ async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot()
     let was_authority = room.authority_player == Some(player_id);
 
     let mut cleanup =
-        Box::pin(server.cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero()));
+        Box::pin(server.cleanup_empty_rooms_protecting_reconnections(jiff::SignedDuration::ZERO));
     assert!(
         futures_util::poll!(cleanup.as_mut()).is_pending(),
         "the database gate must pause cleanup while its reconnect view is pinned"
@@ -12637,8 +12738,8 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
     tokio::time::advance(Duration::from_millis(1)).await;
 
     let mut cleanup = Box::pin(server.cleanup_expired_rooms_protecting_reconnections(
-        chrono::Duration::hours(1),
-        chrono::Duration::zero(),
+        jiff::SignedDuration::from_hours(1),
+        jiff::SignedDuration::ZERO,
     ));
     assert!(
         futures_util::poll!(cleanup.as_mut()).is_pending(),
@@ -12798,7 +12899,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("test server uses in-memory storage")
-        .backdate_room_activity_for_test(&room_id, chrono::Duration::minutes(2))
+        .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_mins(2))
         .await;
 
     let shutdown = Arc::new(Notify::new());
@@ -14282,8 +14383,8 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
     let protected = HashSet::new();
     let expired = database
         .cleanup_expired_rooms(
-            chrono::Duration::zero(),
-            chrono::Duration::zero(),
+            jiff::SignedDuration::ZERO,
+            jiff::SignedDuration::ZERO,
             &protected,
         )
         .await
@@ -14297,7 +14398,7 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
         .await
         .expect("remove creator from pending room");
     assert!(database
-        .cleanup_empty_rooms(chrono::Duration::zero(), &protected)
+        .cleanup_empty_rooms(jiff::SignedDuration::ZERO, &protected)
         .await
         .expect("empty-room cleanup succeeds")
         .is_empty());
@@ -15882,7 +15983,7 @@ async fn default_spectator_snapshot_retains_custom_backend_read_semantics() {
                     crate::protocol::SpectatorInfo {
                         id: PlayerId::from_u128(2),
                         name: name.into(),
-                        connected_at: chrono::DateTime::from_timestamp(1234, 0),
+                        connected_at: Some(jiff::Timestamp::from_second(1234).unwrap()),
                     },
                 )
                 .await

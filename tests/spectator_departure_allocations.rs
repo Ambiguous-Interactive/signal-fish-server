@@ -61,7 +61,7 @@ fn spectator_departure_copies_only_the_two_published_rosters() {
                         SpectatorInfo {
                             id: Uuid::from_u128(index + 3),
                             name: format!("Viewer-{index:023}"),
-                            connected_at: Some(chrono::DateTime::from_timestamp(1234, 0).unwrap()),
+                            connected_at: Some(jiff::Timestamp::new(1234, 0).unwrap()),
                         }
                     )
                     .await
@@ -119,7 +119,7 @@ fn spectator_departure_copies_only_the_two_published_rosters() {
                     assert_eq!(entry.name, format!("Viewer-{index:023}"));
                     assert_eq!(
                         entry.connected_at,
-                        Some(chrono::DateTime::from_timestamp(1234, 0).unwrap())
+                        Some(jiff::Timestamp::new(1234, 0).unwrap())
                     );
                 }
                 let notification = host_receiver.try_recv().unwrap();

@@ -5345,7 +5345,7 @@ async fn targeted_bus_delivery_scopes_stamped_data_to_the_recipient_room() {
     let sequenced = crate::distributed::SequencedMessage {
         sequence_id: 1,
         instance_id: uuid::Uuid::new_v4(),
-        timestamp: chrono::Utc::now(),
+        timestamp: jiff::Timestamp::now(),
         message: contended_game_data(sender_id),
         room_id: Some(room_id),
         target_player: Some(recipient_id),
@@ -5419,7 +5419,7 @@ async fn bus_room_broadcast_honors_the_sequenced_exclusion_list() {
     let sequenced = crate::distributed::SequencedMessage {
         sequence_id: 1,
         instance_id: uuid::Uuid::new_v4(),
-        timestamp: chrono::Utc::now(),
+        timestamp: jiff::Timestamp::now(),
         message: ServerMessage::Pong,
         room_id: Some(room_id),
         target_player: None,

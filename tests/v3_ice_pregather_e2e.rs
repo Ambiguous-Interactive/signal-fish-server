@@ -513,9 +513,9 @@ async fn v3_webrtc_join_carries_composed_ice_servers_with_minted_turn_credential
 
     let mut peer = connect(addr).await;
     authenticate_v3_mesh(&mut peer).await;
-    let now_before = chrono::Utc::now().timestamp();
+    let now_before = jiff::Timestamp::now().as_second();
     let joined = join_room(&mut peer, "mesh-game", None, "PeerOne").await;
-    let now_after = chrono::Utc::now().timestamp();
+    let now_after = jiff::Timestamp::now().as_second();
 
     let ice = &joined.ice_servers;
     assert_eq!(ice.len(), 3, "static + STUN + TURN expected, got {ice:?}");

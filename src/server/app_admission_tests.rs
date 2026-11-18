@@ -334,7 +334,7 @@ async fn successful_reconnect_but_not_spectator_adopts_pending_ownership_claim()
                 name: "FailedClaimant".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -1473,7 +1473,7 @@ async fn application_room_cap_is_atomic_across_games_and_independent_between_app
         .is_some());
     let cleaned = server
         .database
-        .cleanup_empty_rooms(chrono::Duration::zero(), &HashSet::new())
+        .cleanup_empty_rooms(jiff::SignedDuration::ZERO, &HashSet::new())
         .await
         .expect("clean empty application room");
     assert!(cleaned.contains(&winning_room));

@@ -2,8 +2,8 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use chrono::{DateTime, Utc};
 use getrandom::fill as fill_random;
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::convert::TryInto;
 use std::fmt;
@@ -22,9 +22,9 @@ const KEY_SIZE: usize = 32;
 /// was attacker-malleable at rest. The encoding is injective over ALL
 /// representable metadata values — a length-prefixed key id plus the
 /// `(Unix seconds, sub-second nanos)` pair, whose components are total for
-/// every `DateTime<Utc>` and together identify it exactly — so any metadata
+/// every `Timestamp` and together identify it exactly — so any metadata
 /// edit breaks GCM verification instead of decrypting successfully.
-fn metadata_aad(key_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Vec<u8> {
+fn metadata_aad(key_id: &str, created_at: jiff::Timestamp) -> Vec<u8> {
     let key_bytes = key_id.as_bytes();
     // 8-byte length prefix + key bytes + 8-byte seconds + 4-byte nanos.
     let mut aad = Vec::with_capacity(20usize.saturating_add(key_bytes.len()));
@@ -35,8 +35,15 @@ fn metadata_aad(key_id: &str, created_at: chrono::DateTime<chrono::Utc>) -> Vec<
             .to_be_bytes(),
     );
     aad.extend_from_slice(key_bytes);
-    aad.extend_from_slice(&created_at.timestamp().to_be_bytes());
-    aad.extend_from_slice(&created_at.timestamp_subsec_nanos().to_be_bytes());
+    // Keep the stored encoding for pre-epoch values. Jiff's fractional
+    // component has the sign of the duration since the epoch.
+    let fractional = created_at.subsec_nanosecond();
+    let seconds = created_at
+        .as_second()
+        .saturating_sub(i64::from(fractional < 0));
+    let nanos = fractional.rem_euclid(1_000_000_000).unsigned_abs();
+    aad.extend_from_slice(&seconds.to_be_bytes());
+    aad.extend_from_slice(&nanos.to_be_bytes());
     aad
 }
 
@@ -50,7 +57,8 @@ pub struct EncryptedSecret {
     /// Base64-encoded nonce used for the AES-GCM encryption.
     pub nonce: String,
     /// Timestamp when the secret was encrypted.
-    pub created_at: DateTime<Utc>,
+    #[serde(serialize_with = "crate::wall_time::serialize_timestamp")]
+    pub created_at: Timestamp,
 }
 
 /// Errors produced during encryption/decryption.
@@ -137,7 +145,7 @@ impl EnvelopeEncryptor {
         let nonce = Nonce::from(nonce_bytes);
         // Wall clock (durable record): authenticated (AAD) creation stamp of
         // the encrypted bundle, meaningful across process restarts.
-        let created_at = Utc::now();
+        let created_at = Timestamp::now();
 
         let ciphertext = self
             .cipher
@@ -261,12 +269,12 @@ mod tests {
         let mut bundle = encryptor.encrypt_string("value").expect("encrypt");
 
         let original_created_at = bundle.created_at;
-        bundle.created_at = original_created_at + chrono::Duration::microseconds(1);
+        bundle.created_at = original_created_at + jiff::SignedDuration::from_micros(1);
         assert!(matches!(
             encryptor.decrypt(&bundle),
             Err(EncryptionError::DecryptionFailure)
         ));
-        bundle.created_at = original_created_at - chrono::Duration::seconds(1);
+        bundle.created_at = original_created_at - jiff::SignedDuration::from_secs(1);
         assert!(matches!(
             encryptor.decrypt(&bundle),
             Err(EncryptionError::DecryptionFailure)
@@ -335,5 +343,18 @@ mod tests {
         encryptor
             .decrypt(&second)
             .expect("untouched second bundle decrypts");
+    }
+
+    #[test]
+    fn metadata_aad_preserves_pre_epoch_encoding() {
+        let timestamp: Timestamp = "1969-12-31T23:59:59.125Z".parse().unwrap();
+        let expected = [
+            1_u64.to_be_bytes().as_slice(),
+            b"k",
+            (-1_i64).to_be_bytes().as_slice(),
+            125_000_000_u32.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        assert_eq!(metadata_aad("k", timestamp), expected);
     }
 }

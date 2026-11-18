@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Use Jiff timestamps and signed durations in the Rust server API.
+  Preserve v2 and metrics timestamp bytes and the existing v2 frame budget.
 - Reduce server work and memory use for repeated disconnects and bulk reconnect cleanup that removes no records (#636).
 - Reduce server locking for repeated departures and unchanged player names or connection information (#636).
 - Reduce server work and room-table contention when checking application room limits (#636).
@@ -86,6 +88,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel pending room authority requests when the server requests a WebSocket close (#826).
+- Cancel ready and start commands waiting for room access when the server requests a WebSocket close (#826).
 - Cancel gameplay relays waiting for admission, routing, or send order when the server requests a WebSocket close
   (#826).
 - Let closing WebSockets stop waiting to refresh activity from incoming frames (#826).
