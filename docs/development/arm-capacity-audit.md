@@ -8018,7 +8018,7 @@ clocks and departure accounting. The real-removal control cancels before the
 second lock, checks unchanged state, then completes a retry with the exact
 removed record, authority clearing, readiness pruning and one counted departure.
 
-The new `player_removal` Criterion target measures full public calls through a
+The `player_removal` Criterion group measures full public calls through a
 current-thread Tokio runtime. Fixtures contain one room with one or sixteen
 players. Successful-call setup restores the removed member outside timing.
 The original creator's authority is cleared on the first removal; steady-state
@@ -8057,7 +8057,7 @@ bash scripts/dev-loop.sh --all-features \
   test_remove_player_from_room_prunes_ready_players \
   every_activity_path_refreshes_monotonic_liveness \
   readiness_storage_lease_blocks_room_invalidation_until_commit
-cargo bench --locked --bench player_removal --no-run
+cargo bench --locked --bench game_room_count --no-run
 # Save each revision's executable, then run original/candidate twice in order.
 taskset -c 0 <saved-executable> --bench player_removal \
   --warm-up-time 1 --measurement-time 2 --sample-size 30
@@ -8093,7 +8093,7 @@ The roster copy accounts for 4,080 bytes. The boxed storage future increases
 by 16 bytes, which also adds 16 bytes to the small-room and unsorted cases
 without changing their allocation counts.
 
-The `room_finalization` Criterion bench times the public storage call on an
+The `room_finalization` Criterion group times the public storage call on an
 ARM64 Linux host. It uses one room at a time and creates a fresh lobby
 outside each timed successful call. The unsorted case rotates the ordered
 roster by one position. Each run uses CPU 0, a one-second warm-up, a
@@ -8116,7 +8116,7 @@ the 255-player unsorted control. These figures measure storage calls on one
 host. The capacity targets in #636 still require live load measurements.
 
 ```bash
-cargo bench --locked --bench room_finalization --no-run
+cargo bench --locked --bench game_room_count --no-run
 # Set saved_executable to a saved binary and run_dir to a fresh result directory.
 CRITERION_HOME="$run_dir" taskset -c 0 "$saved_executable" --bench room_finalization \
   --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot

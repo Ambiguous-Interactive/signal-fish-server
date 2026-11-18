@@ -3,6 +3,11 @@ use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::PlayerId;
 use std::hint::black_box;
 
+#[path = "support/player_removal.rs"]
+mod player_removal;
+#[path = "support/room_finalization.rs"]
+mod room_finalization;
+
 fn game_room_count(c: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -44,5 +49,10 @@ fn game_room_count(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, game_room_count);
+criterion_group!(
+    benches,
+    game_room_count,
+    player_removal::player_removal,
+    room_finalization::room_finalization
+);
 criterion_main!(benches);

@@ -1,9 +1,9 @@
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion};
 use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::{PlayerId, PlayerInfo, RoomId};
 use std::hint::black_box;
 
-fn player_removal(c: &mut Criterion) {
+pub(super) fn player_removal(c: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("benchmark runtime");
@@ -98,6 +98,3 @@ fn player_removal(c: &mut Criterion) {
     }
     group.finish();
 }
-
-criterion_group!(benches, player_removal);
-criterion_main!(benches);

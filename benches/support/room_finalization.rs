@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion};
 use signal_fish_server::database::{
     FinalizeRoomGameExpectation, FinalizeRoomGameOutcome, GameDatabase, InMemoryDatabase,
 };
@@ -40,7 +40,7 @@ fn fixture(
     })
 }
 
-fn room_finalization(c: &mut Criterion) {
+pub(super) fn room_finalization(c: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -81,6 +81,3 @@ fn room_finalization(c: &mut Criterion) {
     }
     group.finish();
 }
-
-criterion_group!(benches, room_finalization);
-criterion_main!(benches);
