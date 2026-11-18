@@ -619,6 +619,29 @@ impl ConnectionCloseSignal {
         }
     }
 
+    /// Run cancel-safe admission work until the connection starts closing.
+    pub(crate) async fn while_open<T>(
+        &self,
+        work: impl std::future::Future<Output = T>,
+    ) -> Option<T> {
+        if self.requested_reason().is_some() {
+            return None;
+        }
+        tokio::pin!(work);
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut work) {
+            return Some(result);
+        }
+
+        // Only a pending admission needs a listener. Keep its future out of
+        // the allocation for every transport report task.
+        let mut close = self.subscribe();
+        tokio::select! {
+            biased;
+            _ = Box::pin(close.closed()) => None,
+            result = &mut work => Some(result),
+        }
+    }
+
     /// Create a connected signal/listener pair for one connection.
     pub fn channel() -> (Self, ConnectionCloseListener) {
         let (tx, rx) = tokio::sync::watch::channel(None);

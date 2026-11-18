@@ -2213,6 +2213,76 @@ async fn transport_report_waiting_for_room_publication_stops_on_sender_close() {
     assert_close_cancels_room_gate_wait(true).await;
 }
 
+/// #826: the routing read can wait even after the publication read succeeds.
+async fn assert_close_cancels_routing_admission(transport_report: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let routing_writer = coordinator.room_routing_gates.write(room).await;
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting for routing"}),
+        }
+    };
+
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if transport_report {
+        timeout(Duration::from_secs(1), async {
+            while server.metrics.p2p_established.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the owned report task must start");
+    }
+    let publication = coordinator.lock_room_event_mutation(&room);
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(&mut publication).is_pending());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before the routing writer releases its lock");
+    assert!(futures_util::poll!(&mut publication).is_ready());
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routing_writer);
+}
+
+#[tokio::test(start_paused = true)]
+async fn offer_waiting_for_routing_admission_stops_on_sender_close() {
+    assert_close_cancels_routing_admission(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_routing_admission_stops_on_sender_close() {
+    assert_close_cancels_routing_admission(true).await;
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {
