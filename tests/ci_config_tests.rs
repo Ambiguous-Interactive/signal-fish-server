@@ -5310,7 +5310,7 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     );
 
     assert!(
-        content_live.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+        content_live.contains(r#"echo "  npm ci""#)
             && content_live.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
         "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
          Update install guidance in {}",
@@ -5517,10 +5517,20 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
             strip_comment_lines(&raw)
         };
 
-        if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
+        if !content.contains("npm ci") {
             missing_local.push(relative_path.to_string());
         }
-        if !content.contains("npm install -g markdownlint-cli2@") {
+        let has_global_guidance = match relative_path {
+            "scripts/check-markdown.sh" => {
+                content.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+            }
+            "scripts/enable-hooks.sh" => {
+                content.contains("or global: see the Markdownlint section of docs/git-hooks-guide.md")
+            }
+            _ => content.contains(r#"npm install -g "markdownlint-cli2@$(node -p "#)
+                && content.contains(r#"require("./package.json").devDependencies["markdownlint-cli2"]"#),
+        };
+        if !has_global_guidance {
             missing_global.push(relative_path.to_string());
         }
     }

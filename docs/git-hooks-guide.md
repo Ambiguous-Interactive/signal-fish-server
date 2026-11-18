@@ -184,6 +184,12 @@ Install the pinned version locally:
 npm ci
 ```
 
+Or install the same version globally from the repository root:
+
+```bash
+npm install -g "markdownlint-cli2@$(node -p 'require("./package.json").devDependencies["markdownlint-cli2"]')"
+```
+
 ## Troubleshooting
 
 ### PowerShell Missing

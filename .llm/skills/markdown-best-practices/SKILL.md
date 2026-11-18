@@ -106,6 +106,8 @@ project-wide.
 ```bash
 # Install the pinned markdownlint version
 npm ci
+# Or install the same version globally from the repository root.
+npm install -g "markdownlint-cli2@$(node -p 'require("./package.json").devDependencies["markdownlint-cli2"]')"
 
 # Run markdown linting (uses pinned version enforcement)
 ./scripts/check-markdown.sh

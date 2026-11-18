@@ -104,7 +104,7 @@ try_auto_install_markdownlint() {
 
 print_markdownlint_install_help() {
     echo "Install the pinned version (choose one):"
-    echo "  npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
+    echo "  npm ci"
     echo "  npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
     echo "  NPM_CONFIG_PREFIX=\"$MARKDOWNLINT_BOOTSTRAP_PREFIX\" npm install -g --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"
     echo ""
