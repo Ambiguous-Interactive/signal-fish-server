@@ -989,6 +989,10 @@ socket-progress deadline rather than inheriting unresolved reliable queue age.
 
 ### Close codes
 
+After the server requests close, it can discard an inbound text command or
+WebSocket Ping or Pong that is still waiting to refresh activity. A peer can
+still receive a message that the server queued before close.
+
 Farewell `Error` frames are best-effort: on the congested socket a
 slow-consumer eviction escapes, they frequently cannot be delivered at all.
 The WebSocket close frame's code travels in the closing handshake itself, so
@@ -1953,6 +1957,7 @@ reports in that generation do not move counters. Room joins, leaves, same-room r
 and reconnects start fresh generations. The server accepts a report only from a negotiated v3 connection and
 only when `transport` is in that connection's negotiated transport set. Reports from non-v3 clients or for
 unnegotiated transports are ignored and do not update stored state or metrics.
+The server discards a report if its socket starts closing while the report waits for admission.
 
 ```json
 {

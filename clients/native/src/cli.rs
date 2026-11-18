@@ -93,6 +93,10 @@ pub struct Cli {
     #[arg(long)]
     pub exchange: bool,
 
+    /// Test-only: replace a Godot probe proven to expire before transmission.
+    #[arg(long, hide = true, requires = "exchange")]
+    pub interop_resend_expired_probe: bool,
+
     /// Test-harness coordination: when --exchange is enabled, wait until this
     /// path exists before sending the exact per-channel exchange. Channel and
     /// pair establishment continue while held.

@@ -44,8 +44,8 @@ use crate::config::SessionConfig;
 #[cfg(signal_fish_repository_tests)]
 use crate::coordination::FinalizedRoom;
 use crate::coordination::{
-    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
-    StartGamePublication, StartGamePublicationBuilder,
+    ConnectionCloseSignal, RoomEventMutationGuard, RoomMessageTransactionOutcome,
+    RoomRecipientMessages, StartGamePublication, StartGamePublicationBuilder,
 };
 use crate::protocol::{
     ConnectionInfo, DirectEndpoint, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId,
@@ -1220,20 +1220,28 @@ impl EnhancedGameServer {
         connection_info: ConnectionInfo,
         stored: ActiveSessionPlan,
         room_event_guard: RoomEventMutationGuard,
+        source_close: &ConnectionCloseSignal,
     ) -> bool {
         if let Some((host, port)) = DirectEndpoint::validated_parts(&connection_info) {
-            match self
-                .database
-                .player_direct_endpoint_matches(room_id, player_id, host, port)
+            match source_close
+                .while_open(
+                    self.database
+                        .player_direct_endpoint_matches(room_id, player_id, host, port),
+                )
                 .await
             {
-                Ok(true) => {
+                Some(Ok(true)) => {
                     return self
-                        .store_routed_connection_info(room_id, player_id, connection_info)
+                        .store_routed_connection_info(
+                            room_id,
+                            player_id,
+                            connection_info,
+                            source_close,
+                        )
                         .await;
                 }
-                Err(_) => return false,
-                _ => {}
+                Some(Ok(false)) => {}
+                Some(Err(_)) | None => return false,
             }
         }
         let host_remains_eligible = stored.host == Some(*player_id)
@@ -1243,17 +1251,21 @@ impl EnhancedGameServer {
                 stored.topology,
                 stored.transport,
             );
-        let mut room = match self
-            .database
-            .get_room_session_selection_snapshot_for_transport(room_id, !host_remains_eligible)
+        let Some(Ok(Some(mut room))) = source_close
+            .while_open(
+                self.database
+                    .get_room_session_selection_snapshot_for_transport(
+                        room_id,
+                        !host_remains_eligible,
+                    ),
+            )
             .await
-        {
-            Ok(Some(room)) => room,
-            _ => return false,
+        else {
+            return false;
         };
         if room.lobby_state != LobbyState::Finalized {
             return self
-                .store_routed_connection_info(room_id, player_id, connection_info)
+                .store_routed_connection_info(room_id, player_id, connection_info, source_close)
                 .await;
         }
         let Some(host) = room
@@ -1264,10 +1276,13 @@ impl EnhancedGameServer {
             return false;
         };
         host.direct_endpoint = DirectEndpoint::from_connection_info(&connection_info);
-        let routed = match self.message_coordinator.routed_player_ids(room_id).await {
-            Ok(ids) => ids.map(sorted_routed_player_ids),
-            Err(_) => return false,
+        let Some(Ok(routed)) = source_close
+            .while_open(self.message_coordinator.routed_player_ids(room_id))
+            .await
+        else {
+            return false;
         };
+        let routed = routed.map(sorted_routed_player_ids);
         if routed
             .as_ref()
             .is_some_and(|ids| ids.binary_search(player_id).is_err())
@@ -1280,6 +1295,11 @@ impl EnhancedGameServer {
                     .as_ref()
                     .is_none_or(|ids| ids.binary_search(&member.id).is_ok())
             }));
+        if source_close.requested_reason().is_some() {
+            return false;
+        }
+        // Once admitted, the owned publication completes its stored update
+        // and plan in room order, even if the source closes during delivery.
         self.publish_host_session(
             room_id,
             stored,
@@ -1297,15 +1317,18 @@ impl EnhancedGameServer {
         room_id: &RoomId,
         player_id: &PlayerId,
         connection_info: ConnectionInfo,
+        source_close: &ConnectionCloseSignal,
     ) -> bool {
-        let Ok(route) = self
-            .message_coordinator
-            .lease_room_member_route(room_id, player_id)
+        let Some(Ok(route)) = source_close
+            .while_open(
+                self.message_coordinator
+                    .lease_room_member_route(room_id, player_id),
+            )
             .await
         else {
             return false;
         };
-        if route.is_routed == Some(false) {
+        if route.is_routed == Some(false) || source_close.requested_reason().is_some() {
             return false;
         }
         self.database

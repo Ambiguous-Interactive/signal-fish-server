@@ -3132,7 +3132,7 @@ impl EnhancedGameServer {
             Ok(false) => {
                 tracing::debug!(
                     %player_id,
-                    "Shutdown drain room-creation rejection skipped: queue full or connection gone"
+                    "Shutdown drain room-creation rejection was not queued"
                 );
             }
             Err(err) => {

@@ -493,6 +493,11 @@ impl RoomRateLimiter {
         entries
     }
 
+    #[cfg(test)]
+    pub(crate) async fn hold_player_entries_for_test(&self) -> impl Drop + '_ {
+        self.entries.write().await
+    }
+
     /// Check if a room creation request is allowed for the given player
     pub async fn check_room_creation(&self, player_id: &Uuid) -> Result<(), RateLimitError> {
         let mut entries = self.begin_player_check(player_id).await;
