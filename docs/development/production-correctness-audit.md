@@ -19446,3 +19446,34 @@ data. A process without the pending record declines restoration. Nine
 real WebSocket and process controls pass on Linux ARM64, including
 mixed-version sequencing, reconnect, restart and directional blackholes
 (Nextest `cf2a9da8`). This advances A04 and A13. The campaign stays open.
+
+### F396 — Pending lobby commands could hold a closing socket
+
+At `0c49d3ac` under #826, `PlayerReady` and `StartGame` held the physical
+connection's lifecycle while queued for the room mutation lock. A server
+close request could reach the writer while teardown still waited for the
+reader's command. Both commands missed a 10 ms paused-clock deadline with
+the room lock held. Live commands finished after release (Linux ARM64,
+Nextest `06aad187`).
+
+The server now waits for the source lifecycle and the room lock under the
+physical socket's close signal. The original workers retain their queue order
+with other room commands and order room admission against a close request.
+Close before admission cancels the pending update. The close controls check
+stored readiness, lobby state, and both recipient queues. The live control
+checks exact readiness, member identities, and matching WebRTC plan generations.
+Dropping dispatch while the source stays open preserves the queued command.
+Removing the admission fence lets both commands change state after close
+(Nextest `bd99111a`).
+A real WebSocket receives close code 4003 and teardown reaches the held room
+lock before release. Without the close-aware wait, teardown misses the
+5-second test deadline (Nextest `9d8f9534`). The repaired controls pass on
+Linux ARM64 (Nextest `bfc84b01`).
+
+The room's home process orders commands, departures, and reconnect snapshots.
+It delays live commands while room mutation is busy. Teardown still waits
+for room access to capture and detach the seat. A peer close frame can remain
+unread while dispatch is waiting, and a partition can delay detection.
+An admitted command can publish after close. A reconnect restores the same
+membership from the home process's pending record. A process without that
+record declines restoration. This advances A04, A08, and A11.

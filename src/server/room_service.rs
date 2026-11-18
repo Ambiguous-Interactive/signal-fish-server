@@ -3,7 +3,7 @@ use super::{
     MaxRoomsExceededError, MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
     PendingApplicationClaimRollback,
 };
-use crate::coordination::RoomEventMutationGuard;
+use crate::coordination::{RoomEventMutationGuard, RoomOperationCoordinatorTrait};
 use crate::database::{CreateRoomError, PendingRoomCreation};
 use crate::distributed::{LeaseRenewalGuard, LockHandle};
 use crate::protocol::validation;

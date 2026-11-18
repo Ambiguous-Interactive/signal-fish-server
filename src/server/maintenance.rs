@@ -1,4 +1,6 @@
-use crate::coordination::{CloseReason, RoomEventCompletion, RoomEventMutationGuard};
+use crate::coordination::{
+    CloseReason, RoomEventCompletion, RoomEventMutationGuard, RoomOperationCoordinatorTrait,
+};
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
 use futures_util::FutureExt;
 use std::collections::HashSet;

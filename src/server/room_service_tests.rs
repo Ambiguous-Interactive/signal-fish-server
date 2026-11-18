@@ -7,6 +7,7 @@ use crate::config::{
 use crate::coordination::{
     ClientDeliveryHandle, CloseReason, DeliveryOutcome, DeliveryTrySendError, MessageCoordinator,
     RoomEventCompletion, RoomEventJob, RoomEventMutationGuard, RoomEventSequencer,
+    RoomOperationCoordinatorTrait,
 };
 use crate::database::{
     create_database, DatabaseConfig, GameDatabase, InMemoryDatabase, RoomCleanupOutcome,
@@ -123,19 +124,18 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
     } else {
         None
     };
-    let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
-        Arc::new(InMemoryRoomOperationCoordinator::new(
-            Arc::clone(&message_coordinator),
-            Arc::clone(&database),
-            reconnection_manager.clone(),
-        ));
+    let room_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+        Arc::clone(&message_coordinator),
+        Arc::clone(&database),
+        reconnection_manager.clone(),
+    ));
     let protocol_config = ProtocolConfig::default();
     let room_applications = Arc::new(DashMap::new());
     let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
     let (shutdown_drain_tx, _) = watch::channel(false);
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
-        Arc::clone(&room_coordinator),
+        room_coordinator.clone(),
         Arc::clone(&message_coordinator),
         Arc::clone(&distributed_lock),
         Arc::clone(&metrics),
@@ -2047,6 +2047,7 @@ struct UnregisterPause {
 
 struct DrainTriggerCoordinator {
     room_events: Arc<RoomEventSequencer>,
+    close_after_next_room_gate: StdMutex<Option<ConnectionCloseSignal>>,
     trigger: DrainTrigger,
     server: StdMutex<Option<Weak<EnhancedGameServer>>>,
     triggered: AtomicBool,
@@ -2082,6 +2083,7 @@ impl DrainTriggerCoordinator {
     fn new(trigger: DrainTrigger) -> Self {
         Self {
             room_events: Arc::new(RoomEventSequencer::default()),
+            close_after_next_room_gate: StdMutex::new(None),
             trigger,
             server: StdMutex::new(None),
             triggered: AtomicBool::new(false),
@@ -2166,7 +2168,11 @@ impl DrainTriggerCoordinator {
 #[async_trait::async_trait]
 impl MessageCoordinator for DrainTriggerCoordinator {
     async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
-        self.room_events.lock(*room_id).await
+        let guard = self.room_events.lock(*room_id).await;
+        if let Some(close) = self.close_after_next_room_gate.lock().unwrap().take() {
+            close.request_close(CloseReason::ActivityTimeout);
+        }
+        guard
     }
 
     fn enqueue_room_event(
@@ -3956,6 +3962,91 @@ async fn old_socket_frames_cannot_change_restored_metadata_or_send_pong() {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_after_room_gate_acquisition_cancels_ready_handoff() {
+    check_close_at_lobby_handoff(crate::protocol::ClientMessage::PlayerReady).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_after_room_gate_acquisition_cancels_start_handoff() {
+    check_close_at_lobby_handoff(crate::protocol::ClientMessage::StartGame).await;
+}
+
+async fn check_close_at_lobby_handoff(message: crate::protocol::ClientMessage) {
+    use crate::protocol::ClientMessage;
+    use std::collections::BTreeSet;
+
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    if matches!(message, ClientMessage::StartGame) {
+        fixture.server.handle_player_ready(&fixture.leaver).await;
+        fixture.server.handle_player_ready(&fixture.survivor).await;
+    }
+    let before = fixture
+        .server
+        .room_coordinator
+        .current_ready_players(&fixture.room_id)
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        before.len(),
+        if matches!(message, ClientMessage::StartGame) {
+            2
+        } else {
+            0
+        }
+    );
+    drain_queued_messages(&mut fixture.leaver_rx);
+    drain_queued_messages(&mut fixture.survivor_rx);
+    let close = fixture
+        .server
+        .connection_manager
+        .close_signal_for(&fixture.leaver)
+        .unwrap();
+
+    // Close inside the successful room-lock poll, after the initial
+    // close check but before the command can start its owned worker.
+    *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+    fixture
+        .server
+        .handle_client_message(&fixture.leaver, message)
+        .await;
+    assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(room.lobby_state, LobbyState::Lobby);
+    let after = fixture
+        .server
+        .room_coordinator
+        .current_ready_players(&fixture.room_id)
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(after, before);
+    assert!(fixture
+        .server
+        .active_session_plan(&fixture.room_id)
+        .is_none());
+    for messages in [&mut fixture.leaver_rx, &mut fixture.survivor_rx] {
+        let queued = messages.try_recv();
+        assert!(
+            matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+            "{queued:?}"
+        );
     }
 }
 
