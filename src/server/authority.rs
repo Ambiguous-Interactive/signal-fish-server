@@ -1,3 +1,4 @@
+use crate::coordination::RoomOperationCoordinatorTrait;
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
