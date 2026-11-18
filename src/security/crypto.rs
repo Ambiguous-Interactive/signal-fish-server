@@ -38,7 +38,9 @@ fn metadata_aad(key_id: &str, created_at: jiff::Timestamp) -> Vec<u8> {
     // Keep the stored encoding for pre-epoch values. Jiff's fractional
     // component has the sign of the duration since the epoch.
     let fractional = created_at.subsec_nanosecond();
-    let seconds = created_at.as_second() - i64::from(fractional < 0);
+    let seconds = created_at
+        .as_second()
+        .saturating_sub(i64::from(fractional < 0));
     let nanos = fractional.rem_euclid(1_000_000_000).unsigned_abs();
     aad.extend_from_slice(&seconds.to_be_bytes());
     aad.extend_from_slice(&nanos.to_be_bytes());

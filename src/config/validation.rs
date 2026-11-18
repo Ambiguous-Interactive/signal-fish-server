@@ -679,8 +679,11 @@ fn reserved_room_joined_envelope(
                V2 keeps the timestamp. Reserve a signed year and nine fractional
                digits. V3 strips the timestamp from roster snapshots.
             */
-            connected_at: (version < 3)
-                .then(|| jiff::Timestamp::MIN + jiff::SignedDuration::from_nanos(1)),
+            connected_at: (version < 3).then(|| {
+                jiff::Timestamp::MIN
+                    .checked_add(jiff::SignedDuration::from_nanos(1))
+                    .unwrap_or(jiff::Timestamp::MIN)
+            }),
             connection_info: None,
             /*
                V3 always carries both counters. Their widths can grow across
