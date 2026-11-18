@@ -1,6 +1,6 @@
 mod test_helpers;
 
-use chrono::Duration as ChronoDuration;
+use jiff::SignedDuration;
 use signal_fish_server::config::ProtocolConfig;
 use signal_fish_server::protocol::{ErrorCode, ServerMessage};
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
@@ -630,7 +630,7 @@ async fn test_concurrent_room_cleanup_and_activity() {
         for _ in 0..10 {
             let _ = server_clone
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero(), &protected)
+                .cleanup_empty_rooms(SignedDuration::ZERO, &protected)
                 .await;
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
         }
@@ -726,7 +726,7 @@ async fn test_concurrent_room_cleanup_across_instances() {
             let protected = std::collections::HashSet::new();
             server
                 .database()
-                .cleanup_empty_rooms(ChronoDuration::zero(), &protected)
+                .cleanup_empty_rooms(SignedDuration::ZERO, &protected)
                 .await
                 .expect("cleanup should succeed")
                 .len()

@@ -611,7 +611,7 @@ impl SpectatorService {
             name: spectator_name.clone(),
             // Wall clock (durable record): membership stamp on a durable
             // room-state row.
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
         };
 
         // From here until the local role is published, a panic must be

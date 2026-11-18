@@ -22,11 +22,11 @@ private theorem optional_some {F T : Type} (callback : CoreModels.core.ops.funct
     CoreModels.core.option.Option.is_none_or callback (.Some value) state = callback.call_once state value := rfl
 
 private theorem comparison_result (member : SessionMember) :
-    (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator).call_once
+    (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool iterator).call_once
       (second member) ((first member).joined_at, (first member).player_id) = RustM.ok true := by
-  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool
-  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool.call_once
-  simp only [chrono.datetime.DateTime.Insts.CoreCmpPartialOrdDateTime,
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool
+  unfold elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool.call_once
+  simp only [jiff.timestamp.Timestamp.Insts.CoreCmpPartialOrdTimestamp,
     uuid.Uuid.Insts.CoreCmpPartialOrdUuid]
   rw [pair_key_comparison]
   simp only [first, second, time_order, true_or, decide_true]
@@ -35,11 +35,11 @@ private theorem advance_step
     (iter : CoreModels.core.iter.traits.collect.IntoIterator
       (Slice SessionMember) SessionMember (Slice SessionMember))
     (members remaining : Slice SessionMember) (head : SessionMember)
-    (current : CoreModels.core.option.Option (chrono.datetime.DateTime chrono.offset.utc.Utc chrono.offset.utc.Utc × uuid.Uuid))
+    (current : CoreModels.core.option.Option (jiff.timestamp.Timestamp × uuid.Uuid))
     (replace : Bool)
     (next : iter.iteratorIteratorInst.next members = RustM.ok (.Some head, remaining))
     (comparison : CoreModels.core.option.Option.is_none_or
-      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iter) current head = RustM.ok replace) :
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool iter) current head = RustM.ok replace) :
     elect_host_loop.body iter .None members current =
       RustM.ok (if replace then .cont (remaining, .Some (head.joined_at, head.player_id))
         else .cont (remaining, current)) := by
@@ -62,7 +62,7 @@ private theorem second_step (member : SessionMember) :
       iterator .None (tail member) (.Some ((first member).joined_at, (first member).player_id)) =
         RustM.ok (.cont (empty, .Some ((winner member).joined_at, (winner member).player_id))) := by
   have comparison : CoreModels.core.option.Option.is_none_or
-      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidBool iterator)
+      (elect_host.closure.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidBool iterator)
       (.Some ((first member).joined_at, (first member).player_id)) (second member) = RustM.ok true := by
     rw [optional_some, comparison_result]
   have step := advance_step iterator (tail member) empty (second member)
@@ -75,7 +75,7 @@ private theorem last_step (member : SessionMember) :
         RustM.ok (.done (.Some highId)) := by
   simp [elect_host_loop.body, empty, next_empty,
     CoreModels.core.option.Option.map,
-    elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once,
+    elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid.call_once,
     winner, late, Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry,
     CoreModels.core.option.Option.Some, CoreModels.core.option.Option.None]
 

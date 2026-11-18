@@ -7,7 +7,7 @@
 /// - Reconnection window management
 use crate::metrics::ServerMetrics;
 use crate::protocol::{ErrorCode, PlayerId, PlayerInfo, RoomId, ServerMessage};
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -83,9 +83,9 @@ pub struct ReconnectionToken {
     /// Room ID this token is for
     pub room_id: RoomId,
     /// When the token was created
-    pub created_at: DateTime<Utc>,
+    pub created_at: Timestamp,
     /// When the token expires
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Timestamp,
 }
 
 impl std::fmt::Debug for ReconnectionToken {
@@ -105,7 +105,7 @@ impl ReconnectionToken {
     pub fn new(player_id: PlayerId, room_id: RoomId, validity_seconds: i64) -> Self {
         // Wall clock (durable record): `created_at`/`expires_at` are absolute
         // instants the token must keep across process restarts.
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             token: Uuid::new_v4().to_string(),
             player_id,
@@ -121,7 +121,7 @@ impl ReconnectionToken {
         validity_seconds: u64,
     ) -> Self {
         // Wall clock (durable record): same cross-restart semantics as `new`.
-        let now = Utc::now();
+        let now = Timestamp::now();
         Self {
             token: Uuid::new_v4().to_string(),
             player_id,
@@ -137,7 +137,7 @@ impl ReconnectionToken {
     /// the manager's monotonic deadline captured at the disconnect; this
     /// absolute-time answer exists for embedders inspecting a token.
     pub fn is_expired(&self) -> bool {
-        Utc::now() > self.expires_at
+        Timestamp::now() > self.expires_at
     }
 
     /// Check if token is valid for given player and room.
@@ -161,21 +161,18 @@ impl ReconnectionToken {
     }
 }
 
-fn expiration_from_signed(now: DateTime<Utc>, validity_seconds: i64) -> DateTime<Utc> {
-    Duration::try_seconds(validity_seconds)
-        .and_then(|validity| now.checked_add_signed(validity))
-        .unwrap_or_else(|| {
-            if validity_seconds.is_negative() {
-                DateTime::<Utc>::MIN_UTC
-            } else {
-                DateTime::<Utc>::MAX_UTC
-            }
+fn expiration_from_signed(now: Timestamp, validity_seconds: i64) -> Timestamp {
+    now.checked_add(SignedDuration::from_secs(validity_seconds))
+        .unwrap_or(if validity_seconds.is_negative() {
+            Timestamp::MIN
+        } else {
+            Timestamp::MAX
         })
 }
 
-fn expiration_from_unsigned(now: DateTime<Utc>, validity_seconds: u64) -> DateTime<Utc> {
+fn expiration_from_unsigned(now: Timestamp, validity_seconds: u64) -> Timestamp {
     let Ok(validity_seconds) = i64::try_from(validity_seconds) else {
-        return DateTime::<Utc>::MAX_UTC;
+        return Timestamp::MAX;
     };
     expiration_from_signed(now, validity_seconds)
 }
@@ -218,7 +215,7 @@ pub struct BufferedEvent {
     /// The actual server message
     pub message: ServerMessage,
     /// When the event occurred
-    pub timestamp: DateTime<Utc>,
+    pub timestamp: Timestamp,
     /// Sequence number (for ordering)
     pub sequence: u64,
 }
@@ -258,7 +255,7 @@ impl EventBuffer {
             message,
             // Wall clock (durable record): replay/diagnostic stamp on the
             // buffered event.
-            timestamp: Utc::now(),
+            timestamp: Timestamp::now(),
             sequence,
         };
 
@@ -304,7 +301,7 @@ pub struct DisconnectedPlayer {
     /// Room ID they were in
     pub room_id: RoomId,
     /// When they disconnected
-    pub disconnected_at: DateTime<Utc>,
+    pub disconnected_at: Timestamp,
     /// Reconnection token
     pub token: ReconnectionToken,
     /// Last event sequence number they saw
@@ -333,9 +330,9 @@ pub struct DisconnectedPlayer {
 struct PreservedPending {
     unpublished_authority: bool,
     token: String,
-    token_created_at: DateTime<Utc>,
-    token_expires_at: DateTime<Utc>,
-    disconnected_at: DateTime<Utc>,
+    token_created_at: Timestamp,
+    token_expires_at: Timestamp,
+    disconnected_at: Timestamp,
     identity: Option<Arc<str>>,
     last_sequence: u64,
     last_epoch: u32,
@@ -359,7 +356,7 @@ impl DisconnectedPlayer {
     /// wall-clock adjustment.
     pub fn is_expired(&self, window_seconds: i64) -> bool {
         let expiry = expiration_from_signed(self.disconnected_at, window_seconds);
-        Utc::now() > expiry
+        Timestamp::now() > expiry
     }
 }
 
@@ -417,7 +414,7 @@ struct PreIssuedCredential {
 struct ReconnectionClaimState {
     claim_id: Uuid,
     claimed_by: PlayerId,
-    claimed_at: DateTime<Utc>,
+    claimed_at: Timestamp,
 }
 
 impl ReconnectionClaimState {
@@ -425,7 +422,7 @@ impl ReconnectionClaimState {
         // Wall clock (durable record): crash-recovery/diagnostic stamp for
         // the two-phase claim; claim validity is the manager's monotonic
         // window.
-        let claimed_at = Utc::now();
+        let claimed_at = Timestamp::now();
         Self {
             claim_id: Uuid::new_v4(),
             claimed_by,
@@ -917,7 +914,7 @@ impl ReconnectionManager {
         // Both clocks are read at the same moment: the UTC captures stay the
         // human-readable durable record (wall clock), while the monotonic
         // instant anchors the only deadline that decides eligibility.
-        let now = Utc::now();
+        let now = Timestamp::now();
         let monotonic_now = Instant::now();
         // Token, in preference order: (1) the token from an existing same-room
         // pending record — the FIRST registration already consumed the

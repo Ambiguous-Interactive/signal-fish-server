@@ -173,7 +173,7 @@ fn player_info(id: PlayerId, name: &str) -> PlayerInfo {
         name: name.to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: Some(jiff::Timestamp::now()),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -4659,7 +4659,7 @@ async fn reconnect_preserves_join_time_but_clears_old_peer_endpoint() {
         reconnecting_info
             .connected_at
             .expect("fixture carries a join timestamp")
-            - chrono::Duration::hours(1),
+            - jiff::SignedDuration::from_hours(1),
     );
     let original_connected_at = reconnecting_info.connected_at;
     reconnecting_info.connection_info = Some(ConnectionInfo::Direct {

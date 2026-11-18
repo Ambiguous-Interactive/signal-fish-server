@@ -196,7 +196,7 @@ async fn application_room_counts_follow_cleanup_and_abandoned_creation() {
     let protected_ids = HashSet::from([protected.id]);
     assert_eq!(
         database
-            .cleanup_empty_rooms(chrono::Duration::seconds(1), &protected_ids)
+            .cleanup_empty_rooms(jiff::SignedDuration::from_secs(1), &protected_ids)
             .await
             .unwrap(),
         vec![empty.id]
@@ -204,8 +204,8 @@ async fn application_room_counts_follow_cleanup_and_abandoned_creation() {
     assert_counts(&database, &ids, [1, 2, 0]).await;
     let cleanup = database
         .cleanup_expired_rooms(
-            chrono::Duration::seconds(1),
-            chrono::Duration::seconds(1),
+            jiff::SignedDuration::from_secs(1),
+            jiff::SignedDuration::from_secs(1),
             &protected_ids,
         )
         .await
@@ -217,8 +217,8 @@ async fn application_room_counts_follow_cleanup_and_abandoned_creation() {
     assert_eq!(
         lease
             .cleanup_expired(
-                chrono::Duration::seconds(1),
-                chrono::Duration::seconds(1),
+                jiff::SignedDuration::from_secs(1),
+                jiff::SignedDuration::from_secs(1),
                 &HashSet::new()
             )
             .inactive_rooms_cleaned,

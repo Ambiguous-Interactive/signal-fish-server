@@ -130,9 +130,7 @@ impl SessionMember {
                 String::new()
             },
             is_authority: player.is_authority,
-            joined_at: player
-                .connected_at
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            joined_at: player.connected_at.unwrap_or(jiff::Timestamp::MAX),
             direct_endpoint: include_direct_endpoint
                 .then(|| {
                     player
@@ -153,9 +151,7 @@ impl SessionMember {
             player_id: player.id,
             player_name: player.name,
             is_authority: player.is_authority,
-            joined_at: player
-                .connected_at
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            joined_at: player.connected_at.unwrap_or(jiff::Timestamp::MAX),
             direct_endpoint: player.direct_endpoint,
             capabilities,
         }
@@ -698,7 +694,7 @@ impl EnhancedGameServer {
             // expiry instants the client sees; capture once per emission.
             let now_unix = decision
                 .uses_webrtc_signaling()
-                .then(|| chrono::Utc::now().timestamp());
+                .then(|| jiff::Timestamp::now().as_second());
             let projection = decision.projection();
             let mut turn_credentials_issued = 0u64;
             let recipient_messages = decision
@@ -1363,7 +1359,7 @@ impl EnhancedGameServer {
         // expiry instants the client sees; capture once per emission.
         let now_unix = decision
             .uses_webrtc_signaling()
-            .then(|| chrono::Utc::now().timestamp());
+            .then(|| jiff::Timestamp::now().as_second());
         let projection = decision.projection();
         let mut turn_credentials_issued = 0_u64;
         let recipient_messages: Vec<_> = decision
@@ -1503,7 +1499,7 @@ impl EnhancedGameServer {
         // Wall clock (durable record): credentials are absolute-time records.
         let now_unix = decision
             .uses_webrtc_signaling()
-            .then(|| chrono::Utc::now().timestamp());
+            .then(|| jiff::Timestamp::now().as_second());
 
         let mut turn_credentials_issued: u64 = 0;
         for member in &decision.members {
@@ -1695,7 +1691,7 @@ impl EnhancedGameServer {
 
         // Wall clock (durable record): TURN credentials carry absolute
         // expiry instants the client sees.
-        let now_unix = chrono::Utc::now().timestamp();
+        let now_unix = jiff::Timestamp::now().as_second();
         let (ice_servers, minted) = self.composed_ice_servers_for(*player_id, now_unix);
         if ice_servers.is_empty() {
             // Legitimate even when eligible: no static ICE, no STUN urls, TURN

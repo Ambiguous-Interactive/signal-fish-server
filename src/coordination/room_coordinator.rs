@@ -1573,7 +1573,7 @@ mod tests {
                     name: "claimant".to_string(),
                     is_authority: false,
                     is_ready: false,
-                    connected_at: Some(chrono::Utc::now()),
+                    connected_at: Some(jiff::Timestamp::now()),
                     connection_info: None,
                     epoch: None,
                     seq: None,
@@ -2329,7 +2329,7 @@ mod tests {
             name: name.to_string(),
             is_authority,
             is_ready: false,
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
 
             connection_info,
             epoch: None,

@@ -117,7 +117,7 @@ private theorem filtered_loop_evaluation (authority : CoreModels.core.option.Opt
     cases current <;>
       simp [elect_host_loop.body, next', electionScan, RustOption,
         CoreModels.core.option.Option.map,
-        elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairDateTimeUtcUtcUuidUuid.call_once,
+        elect_host.closure_1.Insts.CoreOpsFunctionFnOnceTuplePairTimestampUuidUuid.call_once,
         Aeneas.Std.bind, Bind.bind, Aeneas.Std.uncurry]
   | cons head tail ih =>
     obtain ⟨remaining, next, rest, predicate⟩ := filter_next state.iter state.predicate.1 state.predicate.2

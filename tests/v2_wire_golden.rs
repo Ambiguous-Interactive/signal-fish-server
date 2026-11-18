@@ -18,7 +18,7 @@
 //!   mismatch for debuggability.
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use serde::Serialize;
 use serde_json::{json, Value};
 use signal_fish_server::protocol::{
@@ -30,7 +30,7 @@ use signal_fish_server::protocol::{
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
-// Deterministic fixtures — NO Uuid::new_v4() / Utc::now() in golden values.
+// Deterministic fixtures — NO Uuid::new_v4() / Timestamp::now() in golden values.
 // ---------------------------------------------------------------------------
 
 fn player_a() -> Uuid {
@@ -49,10 +49,8 @@ const PLAYER_A_STR: &str = "00000000-0000-0000-0000-00000000000a";
 const PLAYER_B_STR: &str = "00000000-0000-0000-0000-00000000000b";
 const ROOM_STR: &str = "11111111-1111-1111-1111-111111111111";
 
-fn fixed_time() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
-        .expect("valid RFC3339 fixture")
-        .with_timezone(&Utc)
+fn fixed_time() -> Timestamp {
+    str::parse::<Timestamp>("2024-01-02T03:04:05Z").expect("valid RFC3339 fixture")
 }
 
 const TIME_STR: &str = "2024-01-02T03:04:05Z";

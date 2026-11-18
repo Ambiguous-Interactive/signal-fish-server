@@ -207,7 +207,7 @@ mod tests {
                     player_id: Uuid::from_u128(1),
                     player_name: "peer".into(),
                     is_authority: false,
-                    joined_at: chrono::DateTime::UNIX_EPOCH,
+                    joined_at: jiff::Timestamp::UNIX_EPOCH,
                     direct_endpoint: None,
                     capabilities: crate::session_capability::SessionCapabilities::from(&profile),
                 }];
@@ -261,7 +261,7 @@ mod tests {
                         player_id: second,
                         player_name: "candidate".into(),
                         is_authority: true,
-                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        joined_at: jiff::Timestamp::UNIX_EPOCH,
                         direct_endpoint: endpoint.then(|| DirectEndpoint {
                             host: "127.0.0.1".into(),
                             port: 9000,
@@ -375,7 +375,7 @@ mod tests {
                         player_id: ids[0],
                         player_name: String::new(),
                         is_authority: false,
-                        joined_at: chrono::DateTime::UNIX_EPOCH,
+                        joined_at: jiff::Timestamp::UNIX_EPOCH,
                         direct_endpoint: endpoint.then(|| DirectEndpoint {
                             host: "127.0.0.1".into(),
                             port: 9000,
@@ -392,7 +392,7 @@ mod tests {
                     };
                     let capable = SessionMember {
                         player_id: ids[1],
-                        joined_at: chrono::DateTime::UNIX_EPOCH + chrono::Duration::seconds(1),
+                        joined_at: jiff::Timestamp::UNIX_EPOCH + jiff::SignedDuration::from_secs(1),
                         direct_endpoint: Some(DirectEndpoint {
                             host: "127.0.0.1".into(),
                             port: 9001,
@@ -505,7 +505,7 @@ mod tests {
             player_id,
             player_name: String::new(),
             is_authority: false,
-            joined_at: chrono::DateTime::UNIX_EPOCH,
+            joined_at: jiff::Timestamp::UNIX_EPOCH,
             direct_endpoint: if has_endpoint {
                 Some(DirectEndpoint {
                     host: "127.0.0.1".into(),

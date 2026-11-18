@@ -1363,9 +1363,8 @@ fn accountability_message_schemas_accept_rust_wire_shapes_and_reject_hybrids() {
         .expect("protocol spec must contain one document");
     let player_id = Uuid::from_u128(1);
     let room_id = Uuid::from_u128(2);
-    let connected_at = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
-        .expect("valid timestamp fixture")
-        .with_timezone(&chrono::Utc);
+    let connected_at =
+        str::parse::<jiff::Timestamp>("2024-01-02T03:04:05Z").expect("valid timestamp fixture");
     let player = |accountable: bool| PlayerInfo {
         id: player_id,
         name: "Alice".to_string(),
@@ -2140,9 +2139,8 @@ fn populated_spectator_rosters_match_schema_boundaries() {
             "operation_id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "result":result
         }})
     };
-    let timestamp = chrono::DateTime::parse_from_rfc3339("2024-01-02T03:04:05Z")
-        .expect("spectator timestamp")
-        .with_timezone(&chrono::Utc);
+    let timestamp =
+        str::parse::<jiff::Timestamp>("2024-01-02T03:04:05Z").expect("spectator timestamp");
     let spectator = |version| {
         serde_json::to_value(SpectatorInfo {
             id: uuid::Uuid::from_u128(3),
@@ -4161,10 +4159,8 @@ mod projection_runtime {
         };
         assert_eq!(keys, expected, "v{version} spectator projection: {entry}");
         if version == 2 {
-            chrono::DateTime::parse_from_rfc3339(
-                entry["connected_at"].as_str().expect("v2 timestamp"),
-            )
-            .expect("valid v2 timestamp");
+            str::parse::<jiff::Timestamp>(entry["connected_at"].as_str().expect("v2 timestamp"))
+                .expect("valid v2 timestamp");
         }
     }
 

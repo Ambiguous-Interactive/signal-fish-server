@@ -155,7 +155,7 @@ impl From<&PlayerInfo> for PlayerInfoSnapshot {
             connected_at_micros: info
                 .connected_at
                 .unwrap_or_default()
-                .timestamp_micros(),
+                .as_microsecond(),
             has_connection_info: info.connection_info.is_some(),
             epoch: info.epoch,
             seq: info.seq,
@@ -167,9 +167,9 @@ impl From<&PlayerInfo> for PlayerInfoSnapshot {
 impl From<&DisconnectedPlayer> for PendingSnapshot {
     fn from(player: &DisconnectedPlayer) -> Self {
         Self {
-            disconnected_at_micros: player.disconnected_at.timestamp_micros(),
-            token_created_at_micros: player.token.created_at.timestamp_micros(),
-            token_expires_at_micros: player.token.expires_at.timestamp_micros(),
+            disconnected_at_micros: player.disconnected_at.as_microsecond(),
+            token_created_at_micros: player.token.created_at.as_microsecond(),
+            token_expires_at_micros: player.token.expires_at.as_microsecond(),
             last_sequence: player.last_sequence,
             last_epoch: player.last_epoch,
             was_authority: player.was_authority,
@@ -230,7 +230,7 @@ fn player_info(player: Uuid, was_authority: bool, last_epoch: u32) -> Option<Pla
         name: format!("fuzz-{player}"),
         is_authority: true,
         is_ready: last_epoch % 2 == 0,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: Some(jiff::Timestamp::now()),
         connection_info: None,
         epoch: Some(last_epoch),
         seq: Some(u64::from(last_epoch)),

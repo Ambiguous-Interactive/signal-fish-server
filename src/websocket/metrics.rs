@@ -2,6 +2,7 @@ use crate::server::{canonical_json_len as json_size, EnhancedGameServer};
 use crate::session_records::SESSIONS_RESPONSE_MAX_BYTES;
 #[cfg(test)]
 use crate::session_records::SESSION_RECORDS_ACTIVE_RESPONSE_CAP;
+use crate::wall_time::{TimestampDisplay, TimestampSuffix};
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -576,23 +577,25 @@ pub async fn metrics_handler(
     // Wall clock (durable record): the age readout is derived from the
     // snapshot's durable wall stamp for API consumers; the staleness
     // decision itself runs on monotonic time (see DashboardMetricsCache).
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
 
     let dashboard_metrics = server.dashboard_metrics_view().await;
     let rooms_by_game = dashboard_metrics.rooms_by_game;
     let player_percentiles = dashboard_metrics.player_percentiles;
     let game_percentiles = dashboard_metrics.game_percentiles;
     let active_rooms = dashboard_metrics.active_rooms;
-    let cache_fetched_at = dashboard_metrics.fetched_at.map(|ts| ts.to_rfc3339());
+    let cache_fetched_at = dashboard_metrics
+        .fetched_at
+        .map(|ts| TimestampDisplay(ts, TimestampSuffix::Offset).to_string());
     let cache_age_seconds = dashboard_metrics
         .fetched_at
-        .map(|ts| u64::try_from(now.signed_duration_since(ts).num_seconds()).unwrap_or(0));
+        .map(|ts| u64::try_from(now.duration_since(ts).as_secs()).unwrap_or(0));
     let cache_history: Vec<serde_json::Value> = dashboard_metrics
         .history
         .into_iter()
         .map(|entry| {
             let mut sample = serde_json::json!({
-                "fetchedAt": entry.fetched_at.to_rfc3339(),
+                "fetchedAt": TimestampDisplay(entry.fetched_at, TimestampSuffix::Offset).to_string(),
                 "activeRooms": entry.active_rooms,
                 "roomsByGame": entry.rooms_by_game,
                 "playerPercentiles": entry.player_percentiles,
@@ -627,7 +630,7 @@ pub async fn metrics_handler(
         "roomsByGame": rooms_by_game,
         "gamePercentiles": game_percentiles,
         "activeRooms": active_rooms,
-        "timestamp": now.to_rfc3339(),
+        "timestamp": TimestampDisplay(now, TimestampSuffix::Offset).to_string(),
         "dashboardCache": {
             "fetchedAt": cache_fetched_at,
             "ageSeconds": cache_age_seconds,
@@ -1444,8 +1447,8 @@ mod tests {
             relay_type: "mesh".to_string(),
             region_id: "R".repeat(64),
             application_id: Some(uuid::Uuid::new_v4()),
-            created_at: chrono::Utc::now(),
-            last_activity: chrono::Utc::now(),
+            created_at: jiff::Timestamp::now(),
+            last_activity: jiff::Timestamp::now(),
             spectators: std::collections::HashMap::new(),
             max_spectators: None,
             password: None,

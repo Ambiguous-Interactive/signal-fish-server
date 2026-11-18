@@ -21,6 +21,20 @@ axum = "0.8"
 
 ```
 
+## Timestamp migration
+
+Server APIs now expose `jiff::Timestamp` for UTC timestamps and
+`jiff::SignedDuration` for signed expiry intervals. Use
+`Timestamp::from_second(seconds)` for epoch seconds and
+`SignedDuration::from_secs(seconds)` for expiry arguments. Custom database
+implementations must update their cleanup method signatures.
+
+Existing UTC timestamps use the same wire format and fractional precision.
+Jiff timestamps use its supported calendar range and POSIX time. Embedders
+that supplied extended-year dates or synthetic leap-second representations
+must convert those values before passing them to the server.
+Reconnect and queue deadlines still use the monotonic clock.
+
 ## Basic Embedded Server
 
 Run this complete example with `cargo run --example embedded_server` from the

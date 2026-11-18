@@ -47,7 +47,7 @@ pub trait DistributedLock: Send + Sync {
 pub struct LockHandle {
     pub key: String,
     pub token: Uuid,
-    pub acquired_at: chrono::DateTime<chrono::Utc>,
+    pub acquired_at: jiff::Timestamp,
     pub ttl: Duration,
 }
 
@@ -59,7 +59,7 @@ impl LockHandle {
             // Wall clock (durable record): informational acquisition stamp on
             // the embedder-facing handle; the lease decision itself runs on
             // monotonic time (`try_acquire`).
-            acquired_at: chrono::Utc::now(),
+            acquired_at: jiff::Timestamp::now(),
             ttl,
         }
     }
@@ -182,7 +182,7 @@ impl DistributedLock for InMemoryDistributedLock {
             // Wall clock (durable record): informational acquisition stamp;
             // the lease expiry that decides contention is the monotonic
             // `expires_at` above.
-            acquired_at: chrono::Utc::now(),
+            acquired_at: jiff::Timestamp::now(),
             ttl,
         };
 
@@ -365,7 +365,8 @@ pub fn keep_lease_renewed(
 pub struct SequencedMessage {
     pub sequence_id: u64,
     pub instance_id: Uuid,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    #[serde(serialize_with = "crate::wall_time::serialize_timestamp")]
+    pub timestamp: jiff::Timestamp,
     pub message: crate::protocol::ServerMessage,
     pub room_id: Option<crate::protocol::RoomId>,
     pub target_player: Option<crate::protocol::PlayerId>,
@@ -391,7 +392,7 @@ impl SequencedMessage {
             sequence_id,
             instance_id,
             // Wall clock (durable record): wire/diagnostic message stamp.
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             message,
             room_id,
             target_player,

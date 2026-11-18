@@ -77,7 +77,7 @@ pub(crate) fn relay_start_skips_player_names() {
                         name: String::new(),
                         is_authority: index == 1,
                         is_ready: true,
-                        connected_at: Some(chrono::DateTime::UNIX_EPOCH),
+                        connected_at: Some(jiff::Timestamp::UNIX_EPOCH),
                         connection_info: (case == "direct").then(|| ConnectionInfo::Direct {
                             host: "192.0.2.1".into(),
                             port: 7777,

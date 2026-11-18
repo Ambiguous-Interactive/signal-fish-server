@@ -15,7 +15,7 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
             stored.authority_player = selected;
             stored.players.get_mut(&member).unwrap().is_authority = !selected_member;
         }
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         assert!(db.update_room_authority(&room.id, selected).await.unwrap());
         let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
@@ -24,8 +24,8 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
         assert!(after.last_activity > before.last_activity);
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -34,7 +34,7 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
             cleanup.is_empty(),
             "repaired flags must renew monotonic liveness"
         );
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         assert!(db.update_room_authority(&room.id, selected).await.unwrap());
         assert_eq!(
@@ -47,8 +47,8 @@ async fn authority_flag_repair_renews_both_room_clocks_once() {
         );
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -84,7 +84,7 @@ async fn finalization_membership_requires_a_permutation_without_duplicates() {
             player.id = Uuid::new_v4();
             assert!(db.add_player_to_room(&room.id, player).await.unwrap());
         }
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         let expected = FinalizeRoomGameExpectation::from_room(&before);
         for invalid in ["absent", "short", "long", "duplicate", "authority", "state"] {
@@ -205,7 +205,7 @@ async fn player_metadata_changes_renew_room_expiry() {
         if operation == "clear" {
             assert!(apply_metadata_change(&db, &room, "connection", member).await);
         }
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         assert!(apply_metadata_change(&db, &room, operation, member).await);
         let after = db.get_room_by_id(&room.id).await.unwrap().unwrap();
@@ -224,8 +224,8 @@ async fn player_metadata_changes_renew_room_expiry() {
         }
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -237,8 +237,8 @@ async fn player_metadata_changes_renew_room_expiry() {
         tokio::time::advance(std::time::Duration::from_secs(3601)).await;
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -258,7 +258,7 @@ async fn unchanged_and_absent_player_metadata_preserves_expiry() {
         let room = create_test_room(&db, "metadata", "NOCHANGE").await.unwrap();
         let member = *room.players.keys().next().unwrap();
         assert!(apply_metadata_change(&db, &room, operation, member).await);
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         assert!(apply_metadata_change(&db, &room, operation, member).await);
         assert!(!apply_metadata_change(&db, &room, operation, Uuid::nil()).await);
@@ -269,8 +269,8 @@ async fn unchanged_and_absent_player_metadata_preserves_expiry() {
         assert_eq!(after.last_activity, before.last_activity, "{operation}");
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -292,7 +292,7 @@ async fn unchanged_player_metadata_does_not_wait_for_room_liveness() {
             let room = create_test_room(&db, "metadata", "NOLOCK").await.unwrap();
             let member = *room.players.keys().next().unwrap();
             assert!(apply_metadata_change(&db, &room, operation, member).await);
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             let mut target = room.clone();
             if missing == "room" {
@@ -338,7 +338,7 @@ async fn cancelled_player_metadata_preserves_room_and_clock() {
         if operation == "clear" {
             assert!(apply_metadata_change(&db, &room, "connection", member).await);
         }
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         let liveness = db.room_liveness_monotonic.write().await;
         {
@@ -597,7 +597,7 @@ async fn spectator_snapshot_preserves_atomic_code_roster_and_read_failures() {
                     SpectatorInfo {
                         id,
                         name: format!("名称\0-{index}"),
-                        connected_at: chrono::DateTime::from_timestamp(1234, 0),
+                        connected_at: Some(jiff::Timestamp::from_second(1234).unwrap()),
                     },
                 );
             }
@@ -1133,7 +1133,7 @@ async fn canceled_cleanup_preparation_releases_partial_storage_fences() {
     drop(codes);
     let lease = database.lease_room_cleanup().await.unwrap().unwrap();
     assert!(lease
-        .cleanup_empty(chrono::Duration::zero(), &HashSet::new())
+        .cleanup_empty(jiff::SignedDuration::ZERO, &HashSet::new())
         .is_empty());
     assert!(database.room_exists(&room.id).await.unwrap());
 }
