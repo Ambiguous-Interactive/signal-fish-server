@@ -78,11 +78,11 @@ fn ice_for(
 
 /// A fixed, deterministic base instant for test fixtures.
 ///
-/// Using a constant instead of `Utc::now()` keeps the pure-logic tests
+/// Using a constant instead of `Timestamp::now()` keeps the pure-logic tests
 /// reproducible: host-election tie-breaks resolve on the fixture data alone and
-/// never depend on real-clock skew between two `Utc::now()` calls.
-fn base_time() -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp is valid")
+/// never depend on real-clock skew between two `Timestamp::now()` calls.
+fn base_time() -> jiff::Timestamp {
+    jiff::Timestamp::new(1_700_000_000, 0).expect("fixed timestamp is valid")
 }
 
 #[test]
@@ -764,7 +764,7 @@ fn host_election_prefers_authority_over_earlier_joiner() {
     let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
-    early_member.joined_at = now - chrono::Duration::seconds(100);
+    early_member.joined_at = now - jiff::SignedDuration::from_secs(100);
     let mut authority_member = v3_full(authority, "Authority");
     authority_member.joined_at = now; // joined later
     authority_member.is_authority = true;
@@ -781,7 +781,7 @@ fn host_election_uses_earliest_joiner_without_authority() {
     let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
-    early_member.joined_at = now - chrono::Duration::seconds(50);
+    early_member.joined_at = now - jiff::SignedDuration::from_secs(50);
     let mut late_member = v3_full(late, "Late");
     late_member.joined_at = now;
 
@@ -942,7 +942,7 @@ fn elect_host_prefers_explicit_authority_over_earliest_joiner() {
     let mut authority_member = v3_full(authority, "Authority");
     authority_member.joined_at = now; // joined later
     let mut early_member = v3_full(early, "Early");
-    early_member.joined_at = now - chrono::Duration::seconds(100);
+    early_member.joined_at = now - jiff::SignedDuration::from_secs(100);
 
     // `is_authority` is intentionally left false on every member to prove
     // election keys off the explicit `authority` argument, not the proxy flag.
@@ -960,7 +960,7 @@ fn elect_host_falls_through_to_earliest_joiner_when_authority_absent() {
     let now = base_time();
 
     let mut early_member = v3_full(early, "Early");
-    early_member.joined_at = now - chrono::Duration::seconds(50);
+    early_member.joined_at = now - jiff::SignedDuration::from_secs(50);
     let mut late_member = v3_full(late, "Late");
     late_member.joined_at = now;
 
@@ -1455,7 +1455,7 @@ fn membership_decision_preserves_or_replaces_host_by_session_path() {
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = base_time();
     let mut authority_member = v3_full(authority, "Authority");
-    authority_member.joined_at = base_time() + chrono::Duration::seconds(1);
+    authority_member.joined_at = base_time() + jiff::SignedDuration::from_secs(1);
 
     let cases = vec![
         (
@@ -2080,7 +2080,7 @@ async fn emit_webrtc_room_with_turn_gives_each_recipient_distinct_credentials() 
     assert_eq!(alice_expiry, bob_expiry, "all members share one expiry");
     // Expiry is in the future (now + ttl), not a wrapped/past value.
     let expiry: i64 = alice_expiry.parse().expect("expiry is an integer");
-    assert!(expiry > chrono::Utc::now().timestamp());
+    assert!(expiry > jiff::Timestamp::now().as_second());
 }
 
 /// A recipient that never negotiated this session's (topology, transport) is
@@ -2123,7 +2123,7 @@ async fn non_pairable_recipient_receives_no_minted_turn_credentials() {
         !decision.pairable(&decision.members[1]),
         "fixture precondition: the seat filler can never appear in this session's pairs"
     );
-    let now_unix = chrono::Utc::now().timestamp();
+    let now_unix = jiff::Timestamp::now().as_second();
 
     let (capable_message, capable_minted) = server
         .build_session_plan_message(&decision, capable, Some(now_unix))
@@ -2788,7 +2788,9 @@ async fn finalized_db_room_with(
         // deterministically picks the first `other`.
         info.connected_at = Some(
             base_time()
-                + chrono::Duration::seconds(i64::try_from(offset).expect("test offset fits i64")),
+                + jiff::SignedDuration::from_secs(
+                    i64::try_from(offset).expect("test offset fits i64"),
+                ),
         );
         server
             .database
@@ -3025,7 +3027,7 @@ async fn host_departure_replan_mints_fresh_turn_credentials_per_recipient() {
     assert_eq!(expiry_a, expiry_b);
     let expiry: i64 = expiry_a.parse().expect("expiry is an integer");
     assert!(
-        expiry > chrono::Utc::now().timestamp(),
+        expiry > jiff::Timestamp::now().as_second(),
         "freshly minted credentials expire in the future"
     );
 
@@ -5080,7 +5082,7 @@ mod properties {
                                 player_id: Uuid::from_u128(id),
                                 player_name: format!("p{id}"),
                                 is_authority: false,
-                                joined_at: base_time() + chrono::Duration::seconds(offset),
+                                joined_at: base_time() + jiff::SignedDuration::from_secs(offset),
                                 direct_endpoint: match endpoint_kind {
                                     1 => Some(crate::protocol::DirectEndpoint {
                                         host: "127.0.0.1".to_string(),
@@ -6051,7 +6053,7 @@ async fn replan_prefers_electable_authority_over_earliest_joiner() {
     let mut early_member = v3_full(early, "Early");
     early_member.joined_at = base_time(); // earliest joiner
     let mut authority_member = v3_full(authority, "Authority");
-    authority_member.joined_at = base_time() + chrono::Duration::seconds(100); // joined later
+    authority_member.joined_at = base_time() + jiff::SignedDuration::from_secs(100); // joined later
     authority_member.is_authority = true;
 
     let stored = ActiveSessionPlan {
@@ -7970,7 +7972,7 @@ async fn duplicate_direct_endpoint_rechecks_route_after_its_storage_read() {
         .downcast_ref::<crate::database::InMemoryDatabase>()
         .unwrap();
     database
-        .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(1))
+        .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_hours(1))
         .await;
     let before_activity = server
         .database
@@ -8272,11 +8274,7 @@ async fn missing_join_times_keep_host_election_stable_across_snapshot_paths() {
         server.connect_client(player, sender).await;
         server.set_client_protocol(&player, v3_webrtc());
     }
-    for known_time in [
-        None,
-        Some(base_time()),
-        Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
-    ] {
+    for known_time in [None, Some(base_time()), Some(jiff::Timestamp::MAX)] {
         for reverse in [true, false] {
             let mut first_player = player_info(first, "First", false);
             first_player.connected_at = known_time;
@@ -8310,7 +8308,7 @@ async fn missing_join_times_keep_host_election_stable_across_snapshot_paths() {
                         .find(|member| member.player_id == second)
                         .unwrap()
                         .joined_at,
-                    chrono::DateTime::<chrono::Utc>::MAX_UTC,
+                    jiff::Timestamp::MAX,
                     "unknown timestamps have one stable, last-place key"
                 );
             }

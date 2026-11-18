@@ -259,8 +259,7 @@ pub(crate) fn finalized_fallback_copies_only_required_endpoints() {
                     candidates.sort_by_key(|p| {
                         (
                             Some(p.id) != room.authority_player,
-                            p.connected_at
-                                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+                            p.connected_at.unwrap_or(jiff::Timestamp::MAX),
                             p.id,
                         )
                     });

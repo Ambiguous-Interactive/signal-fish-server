@@ -406,7 +406,7 @@ struct OperationLatencyHistogram {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetricsSnapshot {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub timestamp: jiff::Timestamp,
     pub connections: ConnectionMetrics,
     pub rooms: RoomMetrics,
     pub race_conditions: RaceConditionMetrics,
@@ -1263,8 +1263,8 @@ impl ServerMetrics {
         }
     }
 
-    pub fn set_dashboard_cache_last_refresh(&self, timestamp: chrono::DateTime<chrono::Utc>) {
-        let epoch = u64::try_from(timestamp.timestamp()).unwrap_or(0);
+    pub fn set_dashboard_cache_last_refresh(&self, timestamp: jiff::Timestamp) {
+        let epoch = u64::try_from(timestamp.as_second()).unwrap_or(0);
         self.dashboard_cache_last_refresh_epoch
             .store(epoch, Ordering::Relaxed);
         self.dashboard_cache_refresh_count
@@ -1589,7 +1589,7 @@ impl ServerMetrics {
         MetricsSnapshot {
             // Wall clock (durable record): absolute snapshot stamp surfaced
             // to dashboard/API consumers.
-            timestamp: chrono::Utc::now(),
+            timestamp: jiff::Timestamp::now(),
             connections: ConnectionMetrics {
                 total_connections: self.total_connections.load(Ordering::Relaxed),
                 active_connections: self.active_connections.load(Ordering::Relaxed),

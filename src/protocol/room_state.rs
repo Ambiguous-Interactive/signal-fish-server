@@ -255,8 +255,8 @@ pub struct Room {
     pub authority_player: Option<PlayerId>,
     pub lobby_state: LobbyState,
     pub ready_players: Vec<PlayerId>,
-    pub lobby_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub game_finalized_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub lobby_started_at: Option<jiff::Timestamp>,
+    pub game_finalized_at: Option<jiff::Timestamp>,
     /// Deployment-defined legacy integration label persisted with the room.
     ///
     /// Informational only: it does not select or prove an active transport.
@@ -265,8 +265,8 @@ pub struct Room {
     pub region_id: String,
     /// Owning application for per-app rate limiting and access control.
     pub application_id: Option<Uuid>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub last_activity: chrono::DateTime<chrono::Utc>,
+    pub created_at: jiff::Timestamp,
+    pub last_activity: jiff::Timestamp,
     /// Spectators watching the room (read-only observers)
     pub spectators: HashMap<PlayerId, SpectatorInfo>,
     /// Maximum number of spectators allowed (None = unlimited)
@@ -291,7 +291,7 @@ impl Room {
     ) -> Self {
         // Wall clock (durable record): creation/last-activity stamps must stay
         // meaningful across process restarts.
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         Self {
             id: Uuid::new_v4(),
             code: room_code,
@@ -323,7 +323,7 @@ impl Room {
         // which must survive process restarts; the in-process GC decision
         // pairs this stamp with a monotonic liveness stamp (see
         // `InMemoryDatabase`).
-        self.last_activity = chrono::Utc::now();
+        self.last_activity = jiff::Timestamp::now();
     }
 
     /// Check if room is expired at the given instant, based on the given
@@ -337,9 +337,9 @@ impl Room {
     #[allow(dead_code)]
     pub fn is_expired_at(
         &self,
-        now: chrono::DateTime<chrono::Utc>,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        now: jiff::Timestamp,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
     ) -> bool {
         if !self.has_occupants() {
             // Empty room - time from the LAST activity (which `remove_player_from_room`
@@ -349,10 +349,10 @@ impl Room {
             // collapsing the reconnection window (BUG-1 corollary B). This also keeps
             // the two cleanup paths (`cleanup_empty_rooms` / `cleanup_expired_rooms`)
             // consistent, since the former already keys off `last_activity`.
-            now.signed_duration_since(self.last_activity) > empty_timeout
+            now.duration_since(self.last_activity) > empty_timeout
         } else {
             // Occupied room - check against last activity
-            now.signed_duration_since(self.last_activity) > inactive_timeout
+            now.duration_since(self.last_activity) > inactive_timeout
         }
     }
 
@@ -364,10 +364,10 @@ impl Room {
     #[allow(dead_code)]
     pub fn is_expired(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
     ) -> bool {
-        self.is_expired_at(chrono::Utc::now(), empty_timeout, inactive_timeout)
+        self.is_expired_at(jiff::Timestamp::now(), empty_timeout, inactive_timeout)
     }
 
     /// Whether a player or spectator still occupies this room.
@@ -487,7 +487,7 @@ impl Room {
             self.update_activity();
             // Wall clock (durable record): lifecycle timestamps are absolute
             // by design.
-            self.lobby_started_at = Some(chrono::Utc::now());
+            self.lobby_started_at = Some(jiff::Timestamp::now());
             true
         } else {
             false
@@ -564,7 +564,7 @@ impl Room {
             self.update_activity();
             // Wall clock (durable record): lifecycle timestamps are absolute
             // by design.
-            self.game_finalized_at = Some(chrono::Utc::now());
+            self.game_finalized_at = Some(jiff::Timestamp::now());
             true
         } else {
             false
@@ -689,7 +689,7 @@ mod tests {
             seq: None,
             region_id: DEFAULT_REGION_ID.into(),
         }));
-        let stale = room.created_at - chrono::Duration::hours(2);
+        let stale = room.created_at - jiff::SignedDuration::from_hours(2);
         for operation in ["lobby", "ready", "authority", "release", "finalize"] {
             room.last_activity = stale;
             match operation {
@@ -780,7 +780,7 @@ mod tests {
                         },
                     );
                     room.ready_players = vec![member; copies];
-                    let stale = room.created_at - chrono::Duration::hours(2);
+                    let stale = room.created_at - jiff::SignedDuration::from_hours(2);
                     room.last_activity = stale;
                     assert!(room.set_player_ready(&member, ready));
                     assert_eq!(
@@ -835,7 +835,7 @@ mod tests {
                     );
                 }
                 room.authority_player = previous;
-                let stale = room.created_at - chrono::Duration::hours(2);
+                let stale = room.created_at - jiff::SignedDuration::from_hours(2);
                 room.last_activity = stale;
                 let original = serde_json::to_value(&room.players).unwrap();
                 assert!(!room.set_authority(Some(Uuid::nil())));
@@ -933,8 +933,8 @@ mod tests {
     #[test]
     /// Successful membership changes restart expiry; refused changes do not.
     fn player_membership_restarts_room_expiry_only_on_success() {
-        let stale = chrono::DateTime::from_timestamp(946_684_800, 0).unwrap();
-        let timeout = chrono::Duration::seconds(60);
+        let stale = jiff::Timestamp::new(946_684_800, 0).unwrap();
+        let timeout = jiff::SignedDuration::from_secs(60);
         for finalized in [false, true] {
             let mut room = empty_room();
             room.max_players = 1;
@@ -980,7 +980,7 @@ mod tests {
             let emptied_at = room.last_activity;
             assert!(!room.is_expired_at(emptied_at + timeout, timeout, timeout));
             assert!(room.is_expired_at(
-                emptied_at + timeout + chrono::Duration::milliseconds(1),
+                emptied_at + timeout + jiff::SignedDuration::from_millis(1),
                 timeout,
                 timeout,
             ));
@@ -1176,12 +1176,12 @@ mod tests {
     /// - the boundary is strict: exactly at the timeout the room survives.
     #[test]
     fn is_expired_at_times_windows_off_last_activity_at_the_callers_now() {
-        let empty = chrono::Duration::seconds(300);
-        let inactive = chrono::Duration::seconds(3600);
-        let now = chrono::Utc::now();
+        let empty = jiff::SignedDuration::from_secs(300);
+        let inactive = jiff::SignedDuration::from_secs(3600);
+        let now = jiff::Timestamp::now();
 
-        let created_long_ago = now - chrono::Duration::hours(2);
-        let player_room = |last_activity: chrono::DateTime<chrono::Utc>| {
+        let created_long_ago = now - jiff::SignedDuration::from_hours(2);
+        let player_room = |last_activity: jiff::Timestamp| {
             let mut room = empty_room();
             room.created_at = created_long_ago;
             room.last_activity = last_activity;
@@ -1202,7 +1202,7 @@ mod tests {
             );
             room
         };
-        let spectator_room = |last_activity: chrono::DateTime<chrono::Utc>| {
+        let spectator_room = |last_activity: jiff::Timestamp| {
             let mut room = empty_room();
             room.created_at = created_long_ago;
             room.last_activity = last_activity;
@@ -1244,7 +1244,7 @@ mod tests {
                 {
                     let mut room = empty_room();
                     room.created_at = created_long_ago;
-                    room.last_activity = now - empty - chrono::Duration::seconds(1);
+                    room.last_activity = now - empty - jiff::SignedDuration::from_secs(1);
                     room
                 },
                 true,
@@ -1261,7 +1261,7 @@ mod tests {
                 "occupied room exactly at inactive_timeout: boundary is strict",
             ),
             (
-                player_room(now - inactive - chrono::Duration::seconds(1)),
+                player_room(now - inactive - jiff::SignedDuration::from_secs(1)),
                 true,
                 "occupied room past inactive_timeout: reaped",
             ),
@@ -1271,7 +1271,7 @@ mod tests {
                 "spectator-only room is occupied: inactive_timeout, boundary strict",
             ),
             (
-                spectator_room(now - inactive - chrono::Duration::seconds(1)),
+                spectator_room(now - inactive - jiff::SignedDuration::from_secs(1)),
                 true,
                 "spectator-only room past inactive_timeout: reaped",
             ),
@@ -1290,7 +1290,7 @@ mod tests {
         SpectatorInfo {
             id,
             name: "Watcher".to_string(),
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
         }
     }
 

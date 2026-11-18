@@ -23723,7 +23723,7 @@ fn test_ci_safety_runs_miri_with_isolation_disabled() {
         content.contains("-Zmiri-disable-isolation"),
         "ci-safety.yml must run Miri with MIRIFLAGS=-Zmiri-disable-isolation so \
          wall-clock / entropy / getcwd syscalls do not abort the interpreter. \
-         Without it, any unit test reaching Utc::now()/SystemTime::now()/getrandom \
+         Without it, any unit test reaching Timestamp::now()/SystemTime::now()/getrandom \
          re-introduces the isolation failure class this flag was added to kill.\n\
          File: {}",
         workflow_path.display()
@@ -28795,10 +28795,10 @@ fn test_pinned_nightly_staleness_warning() {
     let date_part = nightly_version
         .strip_prefix("nightly-")
         .expect("nightly version must start with 'nightly-'");
-    let nightly_date = chrono::NaiveDate::parse_from_str(date_part, "%Y-%m-%d")
+    let nightly_date = date_part.parse::<jiff::civil::Date>()
         .unwrap_or_else(|error| panic!("Invalid nightly date '{date_part}': {error}"));
-    let today = chrono::Utc::now().date_naive();
-    let age_days = today.signed_duration_since(nightly_date).num_days();
+    let today = jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
+    let age_days = today.since(nightly_date).expect("days between UTC dates").get_days();
     assert!(
         age_days >= 0,
         "Pinned nightly '{nightly_version}' is {age_days} days in the future relative to {today}."
@@ -30963,7 +30963,7 @@ fn test_proptest_tests_ignored_under_miri() {
 // The Miri wall-clock guard (a discovery scanner + this blocking test) was
 // retired when the Advanced Safety (Miri) job adopted `-Zmiri-disable-isolation`.
 // With isolation disabled the interpreter services clock_gettime/getrandom/getcwd
-// directly, so a unit test reaching Utc::now()/SystemTime::now() can no longer
+// directly, so a unit test reaching Timestamp::now()/SystemTime::now() can no longer
 // abort the run — there is nothing left for a per-test annotation guard to
 // enforce. The surviving regression guard is
 // `test_ci_safety_runs_miri_with_isolation_disabled`, which pins the flag.

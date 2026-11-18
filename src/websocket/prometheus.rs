@@ -1,6 +1,6 @@
 use crate::metrics::{MetricsSnapshot, OperationLatencyMetrics};
 use crate::server::{LiveStateSample, OutboundQueueSample};
-use chrono::Utc;
+use jiff::Timestamp;
 
 /// Render unified metrics snapshot into Prometheus text exposition format.
 ///
@@ -757,7 +757,7 @@ pub(crate) fn render_prometheus_metrics(
         // Wall clock (durable record): the gauge derives its value from the
         // cache's durable unix last-refresh stamp (scrape-time age in
         // seconds); the staleness decision itself is monotonic.
-        let now = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+        let now = u64::try_from(Timestamp::now().as_second()).unwrap_or(0);
         gauge(
             &mut buf,
             "signal_fish_dashboard_cache_age_seconds",
@@ -909,7 +909,7 @@ mod tests {
         );
         assert!(failing.contains("signal_fish_dashboard_cache_refresh_failures_total 2"));
 
-        metrics.set_dashboard_cache_last_refresh(chrono::Utc::now());
+        metrics.set_dashboard_cache_last_refresh(jiff::Timestamp::now());
         let refreshed = render(&metrics.snapshot().await);
         assert!(
             refreshed.contains("signal_fish_dashboard_cache_age_seconds"),

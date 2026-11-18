@@ -11,7 +11,7 @@ use tokio::time::Duration;
 use crate::config::DashboardHistoryField;
 use crate::database::GameDatabase;
 
-use super::chrono_duration_from_std;
+use super::signed_duration_from_std;
 
 #[derive(Debug, Clone)]
 pub struct DashboardMetricsView {
@@ -19,7 +19,7 @@ pub struct DashboardMetricsView {
     pub player_percentiles: HashMap<String, f64>,
     pub game_percentiles: HashMap<String, HashMap<String, f64>>,
     pub active_rooms: usize,
-    pub fetched_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub fetched_at: Option<jiff::Timestamp>,
     pub stale: bool,
     pub last_error: Option<String>,
     pub refresh_interval_secs: u64,
@@ -31,7 +31,7 @@ pub(super) struct DashboardMetricsCache {
     inner: RwLock<DashboardMetricsCacheState>,
     refresh_interval: Duration,
     refresh_interval_secs: u64,
-    stale_after: chrono::Duration,
+    stale_after: jiff::SignedDuration,
     metrics: Arc<crate::metrics::ServerMetrics>,
     history_fields: HistoryFields,
     shutdown_tx: watch::Sender<bool>,
@@ -95,7 +95,7 @@ struct DashboardMetricsSnapshot {
     active_rooms: usize,
     /// Wall clock (durable record): the absolute sample stamp surfaced in the
     /// dashboard payload, history, and the prometheus last-refresh gauge.
-    fetched_at: chrono::DateTime<chrono::Utc>,
+    fetched_at: jiff::Timestamp,
     /// Monotonic capture instant: the only input to the staleness decision,
     /// so a wall-clock step cannot flag a fresh cache stale or keep a dead
     /// one fresh. Deterministic under paused tokio time.
@@ -104,7 +104,7 @@ struct DashboardMetricsSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardHistoryEntry {
-    pub fetched_at: chrono::DateTime<chrono::Utc>,
+    pub fetched_at: jiff::Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_rooms: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -150,7 +150,7 @@ impl DashboardMetricsCache {
             inner: RwLock::new(DashboardMetricsCacheState::new(history_capacity)),
             refresh_interval: safe_refresh,
             refresh_interval_secs: safe_refresh.as_secs().max(1),
-            stale_after: chrono_duration_from_std(safe_stale),
+            stale_after: signed_duration_from_std(safe_stale),
             metrics,
             history_fields,
             shutdown_tx,
@@ -270,7 +270,7 @@ impl DashboardMetricsCache {
             active_rooms,
             // Wall clock (durable record): absolute sample stamp; the
             // staleness decision reads `fetched_at_instant` instead.
-            fetched_at: chrono::Utc::now(),
+            fetched_at: jiff::Timestamp::now(),
             fetched_at_instant: tokio::time::Instant::now(),
         })
     }
@@ -298,7 +298,7 @@ impl DashboardMetricsCache {
         let stale = match &guard.snapshot {
             Some(snapshot) => {
                 let elapsed = snapshot.fetched_at_instant.elapsed();
-                chrono::Duration::from_std(elapsed).unwrap_or(chrono::Duration::MAX)
+                jiff::SignedDuration::try_from(elapsed).unwrap_or(jiff::SignedDuration::MAX)
                     > self.stale_after
             }
             None => true,
@@ -408,7 +408,7 @@ mod tests {
             player_percentiles: HashMap::new(),
             game_percentiles: HashMap::new(),
             active_rooms: 0,
-            fetched_at: chrono::Utc::now(),
+            fetched_at: jiff::Timestamp::now(),
             fetched_at_instant: tokio::time::Instant::now(),
         };
         cache.inner.write().await.snapshot = Some(fresh);
@@ -567,7 +567,7 @@ mod tests {
                 HashMap::from([("p95".into(), 4.0)]),
             )]),
             active_rooms: 42,
-            fetched_at: chrono::Utc::now(),
+            fetched_at: jiff::Timestamp::now(),
             fetched_at_instant: tokio::time::Instant::now(),
         };
 

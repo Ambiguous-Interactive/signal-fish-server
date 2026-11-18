@@ -43,9 +43,8 @@
 //!
 //! # Zero-flakiness design (the whole risk of H6)
 //!
-//! The window uses `chrono::Utc` wall-clock, not `tokio` time, so real time is
-//! required. That is safe here only where a sleep can merely OVERSHOOT the
-//! assertion:
+//! The window uses the server runtime’s monotonic clock. These real-socket
+//! tests use an unpaused runtime. The sleeps can only overshoot their bounds:
 //! - Outside-window leg sleeps 2× the window, then asserts EXPIRED — more
 //!   elapsed time only makes it "more expired", so it cannot flake into "not
 //!   yet expired". (A standard `#[tokio::test]` runtime is not time-paused, so

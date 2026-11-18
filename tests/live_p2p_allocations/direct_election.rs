@@ -16,9 +16,7 @@ fn expected_host(
     let mut candidates: Vec<_> = players.iter().filter(|player| eligible(player)).collect();
     candidates.sort_by_key(|player| {
         (
-            player
-                .connected_at
-                .unwrap_or(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            player.connected_at.unwrap_or(jiff::Timestamp::MAX),
             player.id,
         )
     });
@@ -76,18 +74,18 @@ pub(crate) fn direct_start_matches_borrowed_election_oracle() {
                                 let valid = valid_mask & (1 << index) != 0;
                                 let connected_at = match clock_case {
                                     0 => None,
-                                    1 => Some(chrono::DateTime::UNIX_EPOCH),
+                                    1 => Some(jiff::Timestamp::UNIX_EPOCH),
                                     2 if index == 0 => None,
                                     2 => Some(
-                                        chrono::DateTime::from_timestamp(
+                                        jiff::Timestamp::new(
                                             i64::try_from(4 - index).unwrap(),
                                             0,
                                         )
                                         .unwrap(),
                                     ),
-                                    _ if index == 0 => Some(chrono::DateTime::<chrono::Utc>::MIN_UTC),
-                                    _ if index == 1 => Some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
-                                    _ => Some(chrono::DateTime::UNIX_EPOCH),
+                                    _ if index == 0 => Some(jiff::Timestamp::MIN),
+                                    _ if index == 1 => Some(jiff::Timestamp::MAX),
+                                    _ => Some(jiff::Timestamp::UNIX_EPOCH),
                                 };
                                 let connection_info = if valid {
                                     Some(ConnectionInfo::Direct {

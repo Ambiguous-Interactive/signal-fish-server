@@ -1227,20 +1227,30 @@ async fn test_metrics_room_lookup_distinguishes_unavailable_storage_and_read_fai
             Arc::new(database),
         )
         .await;
-        let test_server =
-            axum_test::TestServer::new(crate::websocket::create_router("*").with_state(server));
-        let response = test_server
-            .get(&format!(
-                "/metrics/rooms/lookup?applicationId={}&gameName=game&roomCode=LOOKUP",
-                uuid::Uuid::new_v4()
-            ))
-            .await;
-        response.assert_status(if track_sessions {
-            axum::http::StatusCode::SERVICE_UNAVAILABLE
-        } else {
-            axum::http::StatusCode::OK
-        });
-        let value = response.json::<serde_json::Value>();
+        use axum::body::{to_bytes, Body};
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt as _;
+
+        let path = format!(
+            "/metrics/rooms/lookup?applicationId={}&gameName=game&roomCode=LOOKUP",
+            uuid::Uuid::new_v4()
+        );
+        let request = Request::get(path).body(Body::empty()).unwrap();
+        let response = crate::websocket::create_router("*")
+            .with_state(server)
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if track_sessions {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::OK
+            }
+        );
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(value["available"], false);
         assert!(
             value.get("room").is_none(),
@@ -1857,7 +1867,7 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn cleanup_empty_rooms(
         &self,
-        empty_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<Vec<RoomId>> {
         if self.pause_empty_cleanup_once.swap(false, Ordering::AcqRel) {
@@ -1871,8 +1881,8 @@ impl GameDatabase for DrainAfterCreateDatabase {
 
     async fn cleanup_expired_rooms(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> anyhow::Result<RoomCleanupOutcome> {
         if self
@@ -5012,7 +5022,7 @@ async fn disconnect_queued_during_leave_does_not_arm_a_reconnect() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -7943,7 +7953,7 @@ async fn aborting_leave_while_ack_is_backpressured_still_publishes_terminal_even
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -8039,7 +8049,7 @@ async fn aborting_reconnect_while_baseline_is_backpressured_still_restores_ident
         name: "reconnecting".to_string(),
         is_authority: false,
         is_ready: false,
-        connected_at: Some(chrono::Utc::now()),
+        connected_at: Some(jiff::Timestamp::now()),
         connection_info: None,
         epoch: None,
         seq: None,
@@ -8505,7 +8515,7 @@ async fn delayed_leave_terminal_event_commits_before_a_concurrent_join() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -9569,7 +9579,7 @@ async fn test_spectator_disconnect_retry_restores_empty_room_gc_issue_241() {
     // virtual idle is exactly zero.
     tokio::time::advance(Duration::from_millis(1)).await;
     let deleted = database
-        .cleanup_empty_rooms(chrono::Duration::zero(), &HashSet::new())
+        .cleanup_empty_rooms(jiff::SignedDuration::ZERO, &HashSet::new())
         .await
         .expect("empty cleanup after disconnected spectator");
     assert_eq!(
@@ -9737,7 +9747,7 @@ async fn draining_unregister_removes_membership_without_roomleft_noise() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11181,7 +11191,7 @@ async fn empty_room_sweep_counts_rooms_deleted() {
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("test server uses in-memory storage")
-        .backdate_room_activity_for_test(&room.id, chrono::Duration::minutes(5))
+        .backdate_room_activity_for_test(&room.id, jiff::SignedDuration::from_mins(5))
         .await;
 
     let deleted_before = server.metrics.rooms_deleted.load(Ordering::Relaxed);
@@ -11635,7 +11645,7 @@ async fn draining_unregister_discards_reconnect_when_drain_starts_during_leave()
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11767,7 +11777,7 @@ async fn draining_leave_room_skips_roomleft_when_drain_starts_inside_send() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11850,7 +11860,7 @@ async fn missing_terminal_tail_suppresses_incomplete_player_left() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -11989,7 +11999,7 @@ async fn draining_leave_room_skips_playerleft_when_drain_starts_inside_broadcast
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -12097,7 +12107,7 @@ async fn draining_leave_room_cancels_backpressured_playerleft_and_replay() {
                 name: "survivor".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -12580,7 +12590,7 @@ async fn empty_room_cleanup_preserves_reconnect_registered_during_its_snapshot()
     let was_authority = room.authority_player == Some(player_id);
 
     let mut cleanup =
-        Box::pin(server.cleanup_empty_rooms_protecting_reconnections(chrono::Duration::zero()));
+        Box::pin(server.cleanup_empty_rooms_protecting_reconnections(jiff::SignedDuration::ZERO));
     assert!(
         futures_util::poll!(cleanup.as_mut()).is_pending(),
         "the database gate must pause cleanup while its reconnect view is pinned"
@@ -12728,8 +12738,8 @@ async fn inactive_cleanup_winner_discards_reconnect_for_deleted_room() {
     tokio::time::advance(Duration::from_millis(1)).await;
 
     let mut cleanup = Box::pin(server.cleanup_expired_rooms_protecting_reconnections(
-        chrono::Duration::hours(1),
-        chrono::Duration::zero(),
+        jiff::SignedDuration::from_hours(1),
+        jiff::SignedDuration::ZERO,
     ));
     assert!(
         futures_util::poll!(cleanup.as_mut()).is_pending(),
@@ -12889,7 +12899,7 @@ async fn inactive_room_cleanup_terminally_unroutes_seated_players() {
         .as_any()
         .downcast_ref::<InMemoryDatabase>()
         .expect("test server uses in-memory storage")
-        .backdate_room_activity_for_test(&room_id, chrono::Duration::minutes(2))
+        .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_mins(2))
         .await;
 
     let shutdown = Arc::new(Notify::new());
@@ -14373,8 +14383,8 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
     let protected = HashSet::new();
     let expired = database
         .cleanup_expired_rooms(
-            chrono::Duration::zero(),
-            chrono::Duration::zero(),
+            jiff::SignedDuration::ZERO,
+            jiff::SignedDuration::ZERO,
             &protected,
         )
         .await
@@ -14388,7 +14398,7 @@ async fn generic_room_cleanup_keeps_unpublished_rooms_for_repair() {
         .await
         .expect("remove creator from pending room");
     assert!(database
-        .cleanup_empty_rooms(chrono::Duration::zero(), &protected)
+        .cleanup_empty_rooms(jiff::SignedDuration::ZERO, &protected)
         .await
         .expect("empty-room cleanup succeeds")
         .is_empty());
@@ -15973,7 +15983,7 @@ async fn default_spectator_snapshot_retains_custom_backend_read_semantics() {
                     crate::protocol::SpectatorInfo {
                         id: PlayerId::from_u128(2),
                         name: name.into(),
-                        connected_at: chrono::DateTime::from_timestamp(1234, 0),
+                        connected_at: Some(jiff::Timestamp::from_second(1234).unwrap()),
                     },
                 )
                 .await

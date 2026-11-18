@@ -153,7 +153,7 @@ impl ExternalHostEvidence {
                 ));
             }
         }
-        chrono::DateTime::parse_from_rfc3339(&self.collected_at_rfc3339)
+        str::parse::<jiff::Timestamp>(&self.collected_at_rfc3339)
             .map_err(|_| "external host evidence collection time must be RFC 3339".to_string())?;
         for (name, hash) in [
             ("effective_sha256", &self.effective_sha256),
@@ -471,7 +471,9 @@ pub fn write_manifest(
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         run_id: run_id.to_string(),
-        created_at_rfc3339: chrono::Utc::now().to_rfc3339(),
+        created_at_rfc3339: jiff::Timestamp::now()
+            .display_with_offset(jiff::tz::Offset::UTC)
+            .to_string(),
         config: config.clone(),
         workload,
         server,

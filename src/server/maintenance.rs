@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use super::maintenance_workers::MaintenanceWorkers;
 use super::room_service::ROOM_JOIN_LOCK_TTL;
-use super::{chrono_duration_from_std, EnhancedGameServer};
+use super::{signed_duration_from_std, EnhancedGameServer};
 
 /// Limit one candidate's wait before maintenance mutates durable or connection state.
 const MAINTENANCE_ADMISSION_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
@@ -411,7 +411,7 @@ impl EnhancedGameServer {
     /// storage sweep instead of appearing in the deletion race window.
     pub(crate) async fn cleanup_empty_rooms_protecting_reconnections(
         &self,
-        empty_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
     ) -> anyhow::Result<Vec<RoomId>> {
         let prepared = self.database.lease_room_cleanup().await?;
         match (prepared, &self.reconnection_manager) {
@@ -439,8 +439,8 @@ impl EnhancedGameServer {
     /// Prepare storage before pinning the current reconnect view for an atomic commit.
     pub(crate) async fn cleanup_expired_rooms_protecting_reconnections(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
     ) -> anyhow::Result<crate::database::RoomCleanupOutcome> {
         let prepared = self.database.lease_room_cleanup().await?;
         match (prepared, &self.reconnection_manager) {
@@ -973,8 +973,8 @@ impl EnhancedGameServer {
     ) {
         let mut interval = crate::deadline::interval(period);
         let mut draining = self.shutdown_drain_receiver();
-        let empty_timeout = chrono_duration_from_std(self.config.empty_room_timeout);
-        let inactive_timeout = chrono_duration_from_std(self.config.inactive_room_timeout);
+        let empty_timeout = signed_duration_from_std(self.config.empty_room_timeout);
+        let inactive_timeout = signed_duration_from_std(self.config.inactive_room_timeout);
         tokio::pin!(shutdown);
 
         loop {

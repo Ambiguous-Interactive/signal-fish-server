@@ -368,7 +368,7 @@ mod tests {
                 .downcast_ref::<InMemoryDatabase>()
                 .unwrap();
             database
-                .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(2))
+                .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_hours(2))
                 .await;
             match failed_update {
                 "player" => database.fail_next_player_heartbeat_for_test(),
@@ -388,8 +388,8 @@ mod tests {
             assert!(server
                 .database
                 .cleanup_expired_rooms(
-                    chrono::Duration::minutes(5),
-                    chrono::Duration::hours(1),
+                    jiff::SignedDuration::from_mins(5),
+                    jiff::SignedDuration::from_hours(1),
                     &HashSet::new(),
                 )
                 .await
@@ -429,7 +429,7 @@ mod tests {
                 .downcast_ref::<InMemoryDatabase>()
                 .unwrap();
             database
-                .backdate_room_activity_for_test(&room_id, chrono::Duration::hours(2))
+                .backdate_room_activity_for_test(&room_id, jiff::SignedDuration::from_hours(2))
                 .await;
             let before = server
                 .database
@@ -472,8 +472,8 @@ mod tests {
             assert!(server
                 .database
                 .cleanup_expired_rooms(
-                    chrono::Duration::minutes(5),
-                    chrono::Duration::hours(1),
+                    jiff::SignedDuration::from_mins(5),
+                    jiff::SignedDuration::from_hours(1),
                     &HashSet::new(),
                 )
                 .await
@@ -529,7 +529,7 @@ mod tests {
             .downcast_ref::<InMemoryDatabase>()
             .expect("test server uses in-memory storage");
         database
-            .backdate_room_activity_for_test(&room.id, chrono::Duration::minutes(5))
+            .backdate_room_activity_for_test(&room.id, jiff::SignedDuration::from_mins(5))
             .await;
         let room_activity_before = server
             .database
@@ -921,7 +921,7 @@ mod tests {
             .expect("test server uses the in-memory database");
         for room_id in &room_ids {
             database
-                .backdate_room_activity_for_test(room_id, chrono::Duration::hours(2))
+                .backdate_room_activity_for_test(room_id, jiff::SignedDuration::from_hours(2))
                 .await;
         }
 
@@ -932,8 +932,8 @@ mod tests {
         let outcome = server
             .database
             .cleanup_expired_rooms(
-                chrono::Duration::zero(),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::ZERO,
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await

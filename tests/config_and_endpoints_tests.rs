@@ -9,6 +9,9 @@
 mod test_helpers;
 mod websocket_test_helpers;
 
+use axum::body::{to_bytes, Body};
+use axum::http::{request, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
+use axum::Router;
 use regex::Regex;
 use signal_fish_server::config::{
     validate_config_security, AppRegistrationEntry, ClientAuthMode, Config, DashboardHistoryField,
@@ -29,6 +32,105 @@ use test_helpers::{
     create_test_server, create_test_server_with_transport_security, test_server_config,
     RunningTestServer,
 };
+use tower::ServiceExt as _;
+
+struct TestRouter(Router);
+
+struct TestGet<'a> {
+    router: &'a Router,
+    request: request::Builder,
+}
+
+struct TestResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: bytes::Bytes,
+}
+
+impl TestRouter {
+    fn get(&self, path: &str) -> TestGet<'_> {
+        TestGet {
+            router: &self.0,
+            request: Request::get(path),
+        }
+    }
+}
+
+impl TestGet<'_> {
+    fn add_header(self, name: HeaderName, value: HeaderValue) -> Self {
+        Self {
+            request: self.request.header(name, value),
+            ..self
+        }
+    }
+
+    async fn send(self) -> TestResponse {
+        let request = self.request.body(Body::empty()).expect("HTTP test request");
+        let response = self
+            .router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("router response");
+        let (parts, body) = response.into_parts();
+        TestResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: to_bytes(body, 8 * 1024 * 1024)
+                .await
+                .expect("HTTP test body"),
+        }
+    }
+}
+
+impl TestResponse {
+    fn assert_status(&self, expected: StatusCode) -> &Self {
+        assert_eq!(
+            self.status,
+            expected,
+            "HTTP response: {}",
+            String::from_utf8_lossy(&self.body)
+        );
+        self
+    }
+
+    fn assert_status_ok(&self) -> &Self {
+        self.assert_status(StatusCode::OK)
+    }
+
+    fn assert_header(&self, name: HeaderName, expected: &str) -> &Self {
+        assert_eq!(
+            self.headers.get(&name).expect("response header"),
+            expected,
+            "header {name}"
+        );
+        self
+    }
+
+    fn contains_header(&self, name: HeaderName) -> bool {
+        self.headers.contains_key(name)
+    }
+
+    fn assert_text(&self, expected: &str) {
+        assert_eq!(self.text(), expected);
+    }
+
+    fn text(&self) -> &str {
+        std::str::from_utf8(&self.body).expect("UTF-8 response")
+    }
+
+    fn status_code(&self) -> StatusCode {
+        self.status
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.body
+    }
+
+    fn json<T: serde::de::DeserializeOwned>(&self) -> T {
+        serde_json::from_slice(&self.body).expect("JSON response")
+    }
+}
 
 fn repo_path(path: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
@@ -1524,8 +1626,8 @@ async fn test_health_endpoint_returns_ok() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
-    let response = test_server.get("/health").await;
+    let test_server = TestRouter(app);
+    let response = test_server.get("/health").send().await;
 
     response.assert_status_ok();
     response.assert_text("OK");
@@ -1541,29 +1643,23 @@ async fn readyz_is_mounted_on_the_versioned_router_and_flips_at_drain() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server.clone());
 
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let ready = test_server.get("/readyz").await;
+    let ready = test_server.get("/readyz").send().await;
     ready.assert_status_ok();
 
     server.begin_shutdown_drain();
 
-    let draining = test_server.get("/readyz").await;
+    let draining = test_server.get("/readyz").send().await;
     draining.assert_status(axum::http::StatusCode::SERVICE_UNAVAILABLE);
 
-    let live = test_server.get("/health").await;
+    let live = test_server.get("/health").send().await;
     live.assert_status_ok();
 
     // The verdict varies over time, so it must not be cacheable: an
     // intermediary serving a stale 200 across the flip would route new
     // connections to a dying instance.
-    assert_eq!(
-        draining
-            .header("cache-control")
-            .to_str()
-            .expect("header value is ASCII"),
-        "no-store"
-    );
+    draining.assert_header(axum::http::header::CACHE_CONTROL, "no-store");
 }
 
 #[tokio::test]
@@ -1590,7 +1686,7 @@ async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
                 .expect("origin policy parses")
                 .cors_layer(),
         );
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
     for path in ["/v2/client-config", "/v3/client-config"] {
         let response = test_server
@@ -1599,6 +1695,7 @@ async fn client_config_is_browser_readable_before_v2_or_v3_websocket_setup() {
                 axum::http::header::ORIGIN,
                 axum::http::HeaderValue::from_static("https://game.example"),
             )
+            .send()
             .await;
         response
             .assert_status_ok()
@@ -1633,9 +1730,12 @@ async fn test_metrics_endpoint_no_auth_required() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let response = test_server.get("/metrics?includeSnapshot=true").await;
+    let response = test_server
+        .get("/metrics?includeSnapshot=true")
+        .send()
+        .await;
     response.assert_status_ok();
 
     // Should return JSON with expected structure
@@ -1747,10 +1847,10 @@ async fn test_metrics_endpoint_requires_auth_when_configured() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
     // Without auth header, should fail
-    let response = test_server.get("/metrics").await;
+    let response = test_server.get("/metrics").send().await;
     response.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 }
 
@@ -1767,7 +1867,7 @@ async fn test_metrics_endpoint_accepts_valid_bearer_token() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
     let response = test_server
         .get("/metrics")
@@ -1777,6 +1877,7 @@ async fn test_metrics_endpoint_accepts_valid_bearer_token() {
                 .parse::<axum::http::HeaderValue>()
                 .unwrap(),
         )
+        .send()
         .await;
 
     response.assert_status_ok();
@@ -1795,7 +1896,7 @@ async fn test_metrics_endpoint_rejects_invalid_bearer_token() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
     let response = test_server
         .get("/metrics")
@@ -1805,6 +1906,7 @@ async fn test_metrics_endpoint_rejects_invalid_bearer_token() {
                 .parse::<axum::http::HeaderValue>()
                 .unwrap(),
         )
+        .send()
         .await;
 
     response.assert_status(axum::http::StatusCode::UNAUTHORIZED);
@@ -1856,7 +1958,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
         )
         .await
         .unwrap();
-    let test_server = axum_test::TestServer::new(create_router("*").with_state(server.clone()));
+    let test_server = TestRouter(create_router("*").with_state(server.clone()));
     let path = format!(
         "/metrics/rooms/lookup?applicationId={application_id}&gameName=lookup_game&roomCode=lookup"
     );
@@ -1869,6 +1971,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
             );
         }
         request
+            .send()
             .await
             .assert_status(axum::http::StatusCode::UNAUTHORIZED);
     }
@@ -1878,6 +1981,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let hidden = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     hidden.assert_status_ok();
     assert_eq!(
@@ -1888,6 +1992,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let listed = test_server
         .get("/metrics/sessions")
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await
         .json::<serde_json::Value>();
     assert_eq!(listed["activeCount"], 513);
@@ -1910,6 +2015,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
             omitted.code
         ))
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     omitted_lookup.assert_status_ok();
     assert_eq!(
@@ -1919,6 +2025,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let found = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     found.assert_status_ok();
     let expected = serde_json::json!({
@@ -1937,6 +2044,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
                 "/metrics/rooms/lookup?applicationId={app}&gameName={game}&roomCode={code}"
             ))
             .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .send()
             .await;
         response.assert_status_ok();
         assert_eq!(
@@ -1948,6 +2056,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let removed = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     removed.assert_status_ok();
     assert_eq!(
@@ -1970,6 +2079,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let reused = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     let reused = reused.json::<serde_json::Value>();
     assert_eq!(reused["room"]["roomId"], replacement.id.to_string());
@@ -1981,6 +2091,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let unowned = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     unowned.assert_status_ok();
     assert_eq!(
@@ -1999,6 +2110,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
     let abandoned = test_server
         .get(&path)
         .add_header(axum::http::header::AUTHORIZATION, token.clone())
+        .send()
         .await;
     abandoned.assert_status_ok();
     assert_eq!(
@@ -2026,6 +2138,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
         let response = test_server
             .get(&path)
             .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .send()
             .await;
         if response_bytes == 4096 {
             response.assert_status_ok();
@@ -2059,6 +2172,7 @@ async fn test_metrics_room_lookup_finds_rooms_beyond_session_cap_and_tracks_life
         test_server
             .get(&format!("/metrics/rooms/lookup?{query}"))
             .add_header(axum::http::header::AUTHORIZATION, token.clone())
+            .send()
             .await
             .assert_status(axum::http::StatusCode::BAD_REQUEST);
     }
@@ -2076,9 +2190,9 @@ async fn test_metrics_sessions_endpoint_returns_bounded_session_shape() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let response = test_server.get("/metrics/sessions").await;
+    let response = test_server.get("/metrics/sessions").send().await;
     response.assert_status_ok();
 
     let json: serde_json::Value = response.json();
@@ -2107,9 +2221,9 @@ async fn test_metrics_sessions_endpoint_requires_auth_when_configured() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let response = test_server.get("/metrics/sessions").await;
+    let response = test_server.get("/metrics/sessions").send().await;
     response.assert_status(axum::http::StatusCode::UNAUTHORIZED);
 
     let authorized = test_server
@@ -2120,6 +2234,7 @@ async fn test_metrics_sessions_endpoint_requires_auth_when_configured() {
                 .parse::<axum::http::HeaderValue>()
                 .unwrap(),
         )
+        .send()
         .await;
     authorized.assert_status_ok();
 }
@@ -2202,9 +2317,9 @@ async fn test_metrics_sessions_endpoint_reports_traffic_protocol_and_applies_fil
         .await;
 
     let app = create_router("*").with_state(Arc::clone(&server));
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let response = test_server.get("/metrics/sessions").await;
+    let response = test_server.get("/metrics/sessions").send().await;
     response.assert_status_ok();
     let json: serde_json::Value = response.json();
     assert_eq!(json["activeCount"], 1);
@@ -2244,6 +2359,7 @@ async fn test_metrics_sessions_endpoint_reports_traffic_protocol_and_applies_fil
     let other_app = Uuid::new_v4();
     let filtered = test_server
         .get(&format!("/metrics/sessions?applicationId={other_app}"))
+        .send()
         .await;
     filtered.assert_status_ok();
     let filtered_json: serde_json::Value = filtered.json();
@@ -2254,6 +2370,7 @@ async fn test_metrics_sessions_endpoint_reports_traffic_protocol_and_applies_fil
     // nothing.
     let malformed = test_server
         .get("/metrics/sessions?applicationId=not-a-uuid")
+        .send()
         .await;
     malformed.assert_status(axum::http::StatusCode::BAD_REQUEST);
 }
@@ -2274,9 +2391,9 @@ async fn test_prometheus_metrics_endpoint_returns_text() {
     .await;
 
     let app = create_router("*").with_state(server);
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let response = test_server.get("/metrics/prom").await;
+    let response = test_server.get("/metrics/prom").send().await;
     response.assert_status_ok();
 
     // Prometheus format should contain standard HELP and TYPE annotations
@@ -2294,11 +2411,11 @@ async fn test_websocket_route_exists() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
     // GET /ws without WebSocket upgrade should not return 404
     // (It will return 400 or similar since there's no upgrade header, but NOT 404)
-    let response = test_server.get("/ws").await;
+    let response = test_server.get("/ws").send().await;
     let status = response.status_code();
     assert_ne!(
         status,
@@ -2316,23 +2433,23 @@ async fn test_production_style_router_has_top_level_v3_only() {
         .route("/v3/ws", websocket_route_v3("*"))
         .with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
 
-    let v2_response = test_server.get("/v2/ws").await;
+    let v2_response = test_server.get("/v2/ws").send().await;
     assert_ne!(
         v2_response.status_code(),
         axum::http::StatusCode::NOT_FOUND,
         "/v2/ws route should exist"
     );
 
-    let v3_response = test_server.get("/v3/ws").await;
+    let v3_response = test_server.get("/v3/ws").send().await;
     assert_ne!(
         v3_response.status_code(),
         axum::http::StatusCode::NOT_FOUND,
         "/v3/ws route should exist at the top level"
     );
 
-    let nested_v3_response = test_server.get("/v2/v3/ws").await;
+    let nested_v3_response = test_server.get("/v2/v3/ws").send().await;
     nested_v3_response.assert_status(axum::http::StatusCode::NOT_FOUND);
 }
 
@@ -2341,8 +2458,8 @@ async fn test_standalone_router_exposes_v3_alias() {
     let server = create_test_server().await;
     let app = create_standalone_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
-    let response = test_server.get("/v3/ws").await;
+    let test_server = TestRouter(app);
+    let response = test_server.get("/v3/ws").send().await;
     assert_ne!(
         response.status_code(),
         axum::http::StatusCode::NOT_FOUND,
@@ -2355,8 +2472,8 @@ async fn test_unknown_route_returns_404() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
-    let response = test_server.get("/nonexistent").await;
+    let test_server = TestRouter(app);
+    let response = test_server.get("/nonexistent").send().await;
     response.assert_status(axum::http::StatusCode::NOT_FOUND);
 }
 
@@ -2369,8 +2486,8 @@ async fn test_permissive_cors_with_wildcard() {
     let server = create_test_server().await;
     let app = create_router("*").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
-    let response = test_server.get("/health").await;
+    let test_server = TestRouter(app);
+    let response = test_server.get("/health").send().await;
     response.assert_status_ok();
 }
 
@@ -2379,13 +2496,14 @@ async fn test_specific_cors_origins() {
     let server = create_test_server().await;
     let app = create_router("http://localhost:3000,http://example.com").with_state(server);
 
-    let test_server = axum_test::TestServer::new(app);
+    let test_server = TestRouter(app);
     let allowed = test_server
         .get("/health")
         .add_header(
             axum::http::header::ORIGIN,
             axum::http::HeaderValue::from_static("http://example.com"),
         )
+        .send()
         .await;
     allowed.assert_status_ok().assert_header(
         axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -2398,6 +2516,7 @@ async fn test_specific_cors_origins() {
             axum::http::header::ORIGIN,
             axum::http::HeaderValue::from_static("https://evil.example"),
         )
+        .send()
         .await;
     disallowed.assert_status_ok();
     assert!(

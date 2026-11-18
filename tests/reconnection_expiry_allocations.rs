@@ -133,7 +133,7 @@ async fn claimed_disconnect_skips_retained_metadata_copies() {
             name: "n".repeat(name_bytes),
             is_authority: true,
             is_ready: false,
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
             connection_info: None,
             epoch: Some(7),
             seq: Some(9),

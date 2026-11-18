@@ -123,8 +123,8 @@ pub struct RoomCleanupOutcome {
 }
 
 type RoomCleanupCommit<'a> = dyn FnOnce(
-        chrono::Duration,
-        Option<chrono::Duration>,
+        jiff::SignedDuration,
+        Option<jiff::SignedDuration>,
         &HashSet<RoomId>,
     ) -> (Vec<RoomId>, RoomCleanupOutcome)
     + Send
@@ -139,8 +139,8 @@ impl<'a> RoomCleanupLease<'a> {
     /// Retain all storage fences needed for an atomic synchronous cleanup.
     pub fn new(
         commit: impl FnOnce(
-                chrono::Duration,
-                Option<chrono::Duration>,
+                jiff::SignedDuration,
+                Option<jiff::SignedDuration>,
                 &HashSet<RoomId>,
             ) -> (Vec<RoomId>, RoomCleanupOutcome)
             + Send
@@ -154,7 +154,7 @@ impl<'a> RoomCleanupLease<'a> {
     /// Delete only empty rooms using the supplied current reconnect protection.
     pub fn cleanup_empty(
         self,
-        timeout: chrono::Duration,
+        timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> Vec<RoomId> {
         (self.commit)(timeout, None, protected).0
@@ -163,8 +163,8 @@ impl<'a> RoomCleanupLease<'a> {
     /// Delete empty and occupied expired rooms using current reconnect protection.
     pub fn cleanup_expired(
         self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> RoomCleanupOutcome {
         (self.commit)(empty_timeout, Some(inactive_timeout), protected).1
@@ -344,7 +344,7 @@ pub struct SessionPlayer {
     /// Stored authority flag.
     pub is_authority: bool,
     /// Stored join time used for deterministic host election.
-    pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub connected_at: Option<jiff::Timestamp>,
     /// Validated Direct endpoint, when present.
     pub direct_endpoint: Option<crate::protocol::DirectEndpoint>,
 }
@@ -1153,7 +1153,7 @@ pub trait GameDatabase: Send + Sync {
     /// reconnection token behind a `RoomNotFound` (BUG-1 corollary B).
     async fn cleanup_empty_rooms(
         &self,
-        empty_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> Result<Vec<RoomId>>;
 
@@ -1162,8 +1162,8 @@ pub trait GameDatabase: Send + Sync {
     /// [`Self::cleanup_empty_rooms`]).
     async fn cleanup_expired_rooms(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome>;
 
@@ -1417,11 +1417,11 @@ pub struct LiveRoomCounts {
 /// after a claim: the monotonic window is a uniform 5 minutes from the claim
 /// itself, so a re-created room is re-cleanable at a known, wall-jump-proof
 /// instant.
-const CLEANUP_RECLAIM_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
+const CLEANUP_RECLAIM_WINDOW: jiff::SignedDuration = jiff::SignedDuration::from_mins(5);
 
 /// How long a claimed-cleanup entry is retained before the maintenance prune
 /// forgets it.
-const CLEANUP_EVENT_RETENTION: chrono::Duration = chrono::Duration::hours(1);
+const CLEANUP_EVENT_RETENTION: jiff::SignedDuration = jiff::SignedDuration::from_hours(1);
 
 /// Tracks one server-owned pending room through cancellation and repair.
 /// The database holds only a weak owner reference, so dropping the creator
@@ -1497,11 +1497,11 @@ enum PendingRoomState {
     },
 }
 
-/// Saturating `std::time::Duration` → `chrono::Duration` conversion for
+/// Saturating `std::time::Duration` → `jiff::SignedDuration` conversion for
 /// monotonic elapsed values (an `Instant` elapsed cannot be negative, but it
-/// can exceed the chrono range).
-fn chrono_elapsed(duration: std::time::Duration) -> chrono::Duration {
-    chrono::Duration::from_std(duration).unwrap_or(chrono::Duration::MAX)
+/// can exceed the signed duration range).
+fn signed_elapsed(duration: std::time::Duration) -> jiff::SignedDuration {
+    jiff::SignedDuration::try_from(duration).unwrap_or(jiff::SignedDuration::MAX)
 }
 
 /// Entry tracking a claimed room cleanup operation for idempotency
@@ -1862,7 +1862,7 @@ impl InMemoryDatabase {
                 let timeout = match (room.has_occupants(), inactive_timeout) {
                     (true, None) => return false,
                     (true, Some(timeout)) => timeout,
-                    (false, None) => empty_timeout.max(chrono::Duration::zero()),
+                    (false, None) => empty_timeout.max(jiff::SignedDuration::ZERO),
                     (false, Some(_)) => empty_timeout,
                 };
                 let expired =
@@ -2396,11 +2396,11 @@ impl InMemoryDatabase {
     pub(crate) async fn backdate_room_activity_for_test(
         &self,
         room_id: &RoomId,
-        age: chrono::Duration,
+        age: jiff::SignedDuration,
     ) {
         let mut rooms = self.rooms.write().await;
         let room = rooms.get_mut(room_id).expect("room exists");
-        room.last_activity = chrono::Utc::now() - age;
+        room.last_activity = jiff::Timestamp::now() - age;
         // Emulate GENUINE inactivity: both the wall-clock observability record
         // and the monotonic GC stamp move together, exactly as they would if no
         // activity had occurred for `age`. The emulated idle duration is stored
@@ -2409,7 +2409,9 @@ impl InMemoryDatabase {
         // machines).
         self.room_liveness_monotonic.write().await.insert(
             *room_id,
-            RoomLiveness::AgedFor(age.to_std().expect("test ages are positive")),
+            RoomLiveness::AgedFor(
+                std::time::Duration::try_from(age).expect("test ages are positive"),
+            ),
         );
     }
 
@@ -2452,14 +2454,14 @@ enum RoomLiveness {
 
 impl RoomLiveness {
     /// Elapsed idle time this state represents.
-    fn idle_for(&self) -> chrono::Duration {
+    fn idle_for(&self) -> jiff::SignedDuration {
         match self {
             Self::Live(stamp) => {
-                chrono::Duration::from_std(stamp.elapsed()).unwrap_or(chrono::Duration::MAX)
+                jiff::SignedDuration::try_from(stamp.elapsed()).unwrap_or(jiff::SignedDuration::MAX)
             }
             #[cfg(test)]
             Self::AgedFor(idle) => {
-                chrono::Duration::from_std(*idle).unwrap_or(chrono::Duration::MAX)
+                jiff::SignedDuration::try_from(*idle).unwrap_or(jiff::SignedDuration::MAX)
             }
         }
     }
@@ -2480,8 +2482,8 @@ impl RoomLiveness {
 /// path stamps at insert time.
 fn room_idle_for(
     activity: Option<RoomLiveness>,
-    last_activity_wall: chrono::DateTime<chrono::Utc>,
-) -> chrono::Duration {
+    last_activity_wall: jiff::Timestamp,
+) -> jiff::SignedDuration {
     match activity {
         Some(liveness) => liveness.idle_for(),
         // Defensive only: rooms whose row exists without a liveness stamp.
@@ -2490,7 +2492,7 @@ fn room_idle_for(
         // foreign row insertion from becoming an immortal room.
         // Wall clock (durable record): the only input available for a
         // pre-stamp row.
-        None => chrono::Utc::now().signed_duration_since(last_activity_wall),
+        None => jiff::Timestamp::now().duration_since(last_activity_wall),
     }
 }
 
@@ -2547,7 +2549,7 @@ impl InMemoryDatabase {
         // a stale instant (BUG-1 clock pairing).
         room_codes.remove(&room.game_name, &room.code);
         room.code = new_code;
-        room.last_activity = chrono::Utc::now();
+        room.last_activity = jiff::Timestamp::now();
         room_codes.insert(room.game_name.clone(), room.code.clone(), *room_id);
         liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         self.session_records
@@ -2608,7 +2610,7 @@ impl InMemoryDatabase {
             is_ready: false,
             // Wall clock (durable record): membership stamp on a durable
             // room-state row.
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
             connection_info: None,
             // Room-state record, not a wire snapshot: the v3 incarnation epoch
             // is filled at snapshot-send time, so this stays `None`.
@@ -2659,7 +2661,7 @@ impl InMemoryDatabase {
         // windows that must survive process restarts; the in-process GC
         // decision pairs them with a monotonic liveness stamp (see
         // `room_idle_for`).
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let room = Room {
             id: room_id,
             game_name: game_name.clone(),
@@ -3618,7 +3620,7 @@ impl GameDatabase for InMemoryDatabase {
     /// Remove expired empty published rooms, preserving protected rooms and all live indexes.
     async fn cleanup_empty_rooms(
         &self,
-        empty_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> Result<Vec<RoomId>> {
         Ok(self
@@ -3629,8 +3631,8 @@ impl GameDatabase for InMemoryDatabase {
 
     async fn cleanup_expired_rooms(
         &self,
-        empty_timeout: chrono::Duration,
-        inactive_timeout: chrono::Duration,
+        empty_timeout: jiff::SignedDuration,
+        inactive_timeout: jiff::SignedDuration,
         protected: &HashSet<RoomId>,
     ) -> Result<RoomCleanupOutcome> {
         Ok(self.prepare_room_cleanup().await.cleanup_expired(
@@ -3664,7 +3666,7 @@ impl GameDatabase for InMemoryDatabase {
         let mut rooms = self.rooms.write().await;
         let mut liveness = self.room_liveness_monotonic.write().await;
         if let Some(room) = rooms.get_mut(room_id) {
-            room.last_activity = chrono::Utc::now();
+            room.last_activity = jiff::Timestamp::now();
             liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         }
         Ok(())
@@ -4089,7 +4091,7 @@ impl GameDatabase for InMemoryDatabase {
         room.ready_players.extend(room.players.keys().copied());
         room.lobby_state = crate::protocol::LobbyState::Finalized;
         // Wall clock (durable record): absolute lifecycle stamp.
-        room.game_finalized_at = Some(chrono::Utc::now());
+        room.game_finalized_at = Some(jiff::Timestamp::now());
         room.update_activity();
         liveness.insert(*room_id, RoomLiveness::Live(tokio::time::Instant::now()));
         Ok(FinalizeRoomGameOutcome::Finalized)
@@ -4246,7 +4248,7 @@ impl GameDatabase for InMemoryDatabase {
             }
             std::collections::hash_map::Entry::Occupied(mut e) => {
                 let elapsed = now.saturating_duration_since(e.get().claimed_at);
-                if chrono_elapsed(elapsed) >= CLEANUP_RECLAIM_WINDOW {
+                if signed_elapsed(elapsed) >= CLEANUP_RECLAIM_WINDOW {
                     // The previous claim's window has passed: take over the
                     // claim and restart the window.
                     e.insert(CleanupEventEntry {
@@ -4269,7 +4271,7 @@ impl GameDatabase for InMemoryDatabase {
         let initial_count = cleanup_events.len();
         cleanup_events.retain(|_, entry| {
             let elapsed = now.saturating_duration_since(entry.claimed_at);
-            chrono_elapsed(elapsed) < CLEANUP_EVENT_RETENTION
+            signed_elapsed(elapsed) < CLEANUP_EVENT_RETENTION
         });
         let deleted_count = initial_count.saturating_sub(cleanup_events.len());
 
@@ -5129,7 +5131,7 @@ mod tests {
     }
 
     // NOTE: These tests run under Miri. `InMemoryDatabase::create_room` calls
-    // `chrono::Utc::now()` (which invokes `clock_gettime(CLOCK_REALTIME)`), but the
+    // `jiff::Timestamp::now()` (which invokes `clock_gettime(CLOCK_REALTIME)`), but the
     // Miri job runs with `-Zmiri-disable-isolation`, so that syscall is serviced
     // rather than aborting the run. The `tokio::spawn`-based concurrency tests below
     // also run under Miri (the default `#[tokio::test]` current-thread runtime is
@@ -5251,8 +5253,8 @@ mod tests {
                     6 => {
                         database
                             .cleanup_expired_rooms(
-                                chrono::Duration::zero(),
-                                chrono::Duration::zero(),
+                                jiff::SignedDuration::ZERO,
+                                jiff::SignedDuration::ZERO,
                                 &HashSet::new(),
                             )
                             .await
@@ -5400,10 +5402,10 @@ mod tests {
         let db = InMemoryDatabase::new();
         let room_id = Uuid::new_v4();
         let instance = Uuid::new_v4();
-        let window = CLEANUP_RECLAIM_WINDOW.to_std().expect("positive window");
-        let retention = CLEANUP_EVENT_RETENTION
-            .to_std()
-            .expect("positive retention");
+        let window =
+            std::time::Duration::try_from(CLEANUP_RECLAIM_WINDOW).expect("positive window");
+        let retention =
+            std::time::Duration::try_from(CLEANUP_EVENT_RETENTION).expect("positive retention");
 
         // First claim wins.
         assert!(db
@@ -5732,7 +5734,7 @@ mod tests {
             name: name.to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
             connection_info: None,
             epoch: None,
             seq: None,
@@ -5744,7 +5746,7 @@ mod tests {
         SpectatorInfo {
             id: Uuid::new_v4(),
             name: name.to_string(),
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
         }
     }
 
@@ -5869,8 +5871,12 @@ mod tests {
 
     /// Backdate a room's timestamps so it looks stale to the GC without waiting
     /// wall-clock time. Reaches the in-memory map directly (same module).
-    pub(super) async fn age_room(db: &InMemoryDatabase, room_id: &RoomId, age: chrono::Duration) {
-        let now = chrono::Utc::now();
+    pub(super) async fn age_room(
+        db: &InMemoryDatabase,
+        room_id: &RoomId,
+        age: jiff::SignedDuration,
+    ) {
+        let now = jiff::Timestamp::now();
         {
             let mut rooms = db.rooms.write().await;
             let room = rooms.get_mut(room_id).expect("room exists");
@@ -5885,12 +5891,14 @@ mod tests {
         let mut liveness = db.room_liveness_monotonic.write().await;
         liveness.insert(
             *room_id,
-            RoomLiveness::AgedFor(age.to_std().expect("test ages are positive")),
+            RoomLiveness::AgedFor(
+                std::time::Duration::try_from(age).expect("test ages are positive"),
+            ),
         );
     }
 
-    fn is_fresh(ts: chrono::DateTime<chrono::Utc>) -> bool {
-        chrono::Utc::now().signed_duration_since(ts) < chrono::Duration::minutes(1)
+    fn is_fresh(ts: jiff::Timestamp) -> bool {
+        jiff::Timestamp::now().duration_since(ts) < jiff::SignedDuration::from_mins(1)
     }
 
     #[tokio::test]
@@ -6011,7 +6019,7 @@ mod tests {
         let room = create_test_room(&db, "activity_game", "ACT001")
             .await
             .expect("room creation should succeed");
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
 
         assert!(db
             .add_player_to_room(&room.id, member("Joiner"))
@@ -6050,7 +6058,7 @@ mod tests {
             .unwrap()
             .ready_players
             .extend([absent, absent]);
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         let before_left = db.session_records.snapshot().active[0].players_left;
         let liveness = db.room_liveness_monotonic.write().await;
@@ -6114,7 +6122,7 @@ mod tests {
             .update_room_authority(&room.id, Some(creator))
             .await
             .unwrap());
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
         let before_left = db.session_records.snapshot().active[0].players_left;
         let liveness = db.room_liveness_monotonic.write().await;
@@ -6172,7 +6180,7 @@ mod tests {
             .await
             .expect("room creation should succeed");
         let creator = *room.players.keys().next().expect("creator present");
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
 
         db.remove_player_from_room(&room.id, &creator)
             .await
@@ -6197,7 +6205,7 @@ mod tests {
             .expect("room creation should succeed");
         let spectator = spectator("Watcher");
 
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         assert!(db
             .add_spectator_to_room(&room.id, spectator.clone())
             .await
@@ -6212,7 +6220,7 @@ mod tests {
             "spectator join must refresh room activity"
         );
 
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
         db.remove_spectator_from_room(&room.id, &spectator.id)
             .await
             .expect("spectator detach should not error")
@@ -6254,15 +6262,15 @@ mod tests {
                 .await
                 .expect("player departure should not error");
             let occupied_age = match sweep {
-                Sweep::Empty => chrono::Duration::hours(2),
-                Sweep::Expired => chrono::Duration::minutes(10),
+                Sweep::Empty => jiff::SignedDuration::from_hours(2),
+                Sweep::Expired => jiff::SignedDuration::from_mins(10),
             };
             age_room(&db, &room.id, occupied_age).await;
 
             match sweep {
                 Sweep::Empty => {
                     let deleted = db
-                        .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                        .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                         .await
                         .expect("empty cleanup should not error");
                     assert!(deleted.is_empty(), "spectator-occupied room was deleted");
@@ -6270,8 +6278,8 @@ mod tests {
                 Sweep::Expired => {
                     let outcome = db
                         .cleanup_expired_rooms(
-                            chrono::Duration::seconds(300),
-                            chrono::Duration::seconds(3600),
+                            jiff::SignedDuration::from_secs(300),
+                            jiff::SignedDuration::from_secs(3600),
                             &HashSet::new(),
                         )
                         .await
@@ -6295,11 +6303,11 @@ mod tests {
                 .await
                 .expect("spectator detach should not error")
                 .expect("spectator should be removed");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             match sweep {
                 Sweep::Empty => {
                     let deleted = db
-                        .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                        .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                         .await
                         .expect("post-detach empty cleanup should not error");
                     assert_eq!(deleted, vec![room.id]);
@@ -6307,8 +6315,8 @@ mod tests {
                 Sweep::Expired => {
                     let outcome = db
                         .cleanup_expired_rooms(
-                            chrono::Duration::seconds(300),
-                            chrono::Duration::seconds(3600),
+                            jiff::SignedDuration::from_secs(300),
+                            jiff::SignedDuration::from_secs(3600),
                             &HashSet::new(),
                         )
                         .await
@@ -6331,12 +6339,12 @@ mod tests {
             .add_spectator_to_room(&room.id, spectator)
             .await
             .expect("spectator join should not error"));
-        age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+        age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
 
         let outcome = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::seconds(3600),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_secs(3600),
                 &HashSet::new(),
             )
             .await
@@ -6377,7 +6385,7 @@ mod tests {
                 .await
                 .expect("remove should not error");
             // Age past both the 300s empty and 3600s inactive timeouts.
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
 
             let mut protected = HashSet::new();
             if protect {
@@ -6386,14 +6394,14 @@ mod tests {
 
             match sweep {
                 Sweep::Empty => {
-                    db.cleanup_empty_rooms(chrono::Duration::seconds(300), &protected)
+                    db.cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &protected)
                         .await
                         .expect("cleanup_empty_rooms should not error");
                 }
                 Sweep::Expired => {
                     db.cleanup_expired_rooms(
-                        chrono::Duration::seconds(300),
-                        chrono::Duration::seconds(3600),
+                        jiff::SignedDuration::from_secs(300),
+                        jiff::SignedDuration::from_secs(3600),
                         &protected,
                     )
                     .await
@@ -6429,13 +6437,13 @@ mod tests {
             // Emulate genuine idleness first (both stamps rewind), then real
             // ongoing activity after a forward wall step (only the monotonic
             // stamp returns to fresh).
-            db.backdate_room_activity_for_test(&room.id, chrono::Duration::hours(2))
+            db.backdate_room_activity_for_test(&room.id, jiff::SignedDuration::from_hours(2))
                 .await;
             db.refresh_room_monotonic_liveness_for_test(&room.id).await;
 
             if empty_only {
                 let deleted = db
-                    .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                    .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                     .await
                     .expect("cleanup_empty_rooms should not error");
                 assert!(
@@ -6445,8 +6453,8 @@ mod tests {
             } else {
                 let outcome = db
                     .cleanup_expired_rooms(
-                        chrono::Duration::seconds(300),
-                        chrono::Duration::seconds(3600),
+                        jiff::SignedDuration::from_secs(300),
+                        jiff::SignedDuration::from_secs(3600),
                         &HashSet::new(),
                     )
                     .await
@@ -6478,7 +6486,7 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(7200)).await;
 
         let deleted = db
-            .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+            .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
             .await
             .expect("cleanup_empty_rooms should not error");
         assert_eq!(
@@ -6494,8 +6502,8 @@ mod tests {
         tokio::time::advance(std::time::Duration::from_secs(7200)).await;
         let outcome = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::seconds(3600),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_secs(3600),
                 &HashSet::new(),
             )
             .await
@@ -6518,14 +6526,14 @@ mod tests {
     /// clock yet be reaped mid-game.
     #[tokio::test(start_paused = true)]
     async fn every_activity_path_refreshes_monotonic_liveness() {
-        const INACTIVE_TIMEOUT: chrono::Duration = chrono::Duration::seconds(60);
+        const INACTIVE_TIMEOUT: jiff::SignedDuration = jiff::SignedDuration::from_secs(60);
 
         // A fresh monotonic stamp survives cleanup with no elapsed time; a
         // stale one (activity path failed to refresh) is reaped immediately.
         async fn survives_cleanup(db: &InMemoryDatabase) -> bool {
             let outcome = db
                 .cleanup_expired_rooms(
-                    chrono::Duration::seconds(300),
+                    jiff::SignedDuration::from_secs(300),
                     INACTIVE_TIMEOUT,
                     &HashSet::new(),
                 )
@@ -6540,7 +6548,7 @@ mod tests {
             let room = create_test_room(&db, "parity", "PAR0001")
                 .await
                 .expect("room creation should succeed");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             assert!(
                 !survives_cleanup(&db).await,
                 "aged room without activity must be reaped"
@@ -6553,13 +6561,13 @@ mod tests {
             let room = create_test_room(&db, "parity", "PAR0002")
                 .await
                 .expect("room creation should succeed");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let joined = crate::protocol::PlayerInfo {
                 id: Uuid::new_v4(),
                 name: "Joiner".to_string(),
                 is_authority: false,
                 is_ready: false,
-                connected_at: Some(chrono::Utc::now()),
+                connected_at: Some(jiff::Timestamp::now()),
                 connection_info: None,
                 epoch: None,
                 seq: None,
@@ -6581,7 +6589,7 @@ mod tests {
             let room = create_test_room(&db, "parity", "PAR0003")
                 .await
                 .expect("room creation should succeed");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let watcher = spectator("Watcher");
             let watcher_id = watcher.id;
             assert!(db
@@ -6608,7 +6616,7 @@ mod tests {
             assert!(detached.is_some(), "spectator must be removable");
             tokio::time::advance(std::time::Duration::from_secs(299)).await;
             let deleted = db
-                .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                 .await
                 .expect("empty cleanup should not error");
             assert!(
@@ -6617,7 +6625,7 @@ mod tests {
             );
             tokio::time::advance(std::time::Duration::from_secs(2)).await;
             let deleted = db
-                .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                 .await
                 .expect("empty cleanup should not error");
             assert_eq!(
@@ -6633,7 +6641,7 @@ mod tests {
             let room = create_test_room(&db, "parity", "PAR0004")
                 .await
                 .expect("room creation should succeed");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             db.update_room_activity(&room.id)
                 .await
                 .expect("activity update should not error");
@@ -6652,7 +6660,7 @@ mod tests {
             let room = create_test_room(&db, "activity", "CANCEL").await.unwrap();
             let member = *room.players.keys().next().unwrap();
             db.transition_room_to_lobby(&room.id).await.unwrap();
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             let expected = FinalizeRoomGameExpectation::from_room(&before);
             let liveness = db.room_liveness_monotonic.write().await;
@@ -6809,7 +6817,7 @@ mod tests {
                     FinalizeRoomGameOutcome::Finalized
                 );
             }
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             db.transition_room_to_lobby(&room.id).await.unwrap();
             assert!(db
@@ -6868,8 +6876,8 @@ mod tests {
         }
         let cleanup = db
             .cleanup_expired_rooms(
-                chrono::Duration::seconds(300),
-                chrono::Duration::hours(1),
+                jiff::SignedDuration::from_secs(300),
+                jiff::SignedDuration::from_hours(1),
                 &HashSet::new(),
             )
             .await
@@ -6906,7 +6914,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
             let before = db.get_room_by_id(&room.id).await.unwrap().unwrap();
             match operation {
                 "lobby" => assert!(db.transition_room_to_lobby(&room.id).await.unwrap()),
@@ -6943,8 +6951,8 @@ mod tests {
             );
             let cleanup = db
                 .cleanup_expired_rooms(
-                    chrono::Duration::seconds(300),
-                    chrono::Duration::hours(1),
+                    jiff::SignedDuration::from_secs(300),
+                    jiff::SignedDuration::from_hours(1),
                     &HashSet::new(),
                 )
                 .await
@@ -6956,8 +6964,8 @@ mod tests {
             tokio::time::advance(std::time::Duration::from_secs(3601)).await;
             let cleanup = db
                 .cleanup_expired_rooms(
-                    chrono::Duration::seconds(300),
-                    chrono::Duration::hours(1),
+                    jiff::SignedDuration::from_secs(300),
+                    jiff::SignedDuration::from_hours(1),
                     &HashSet::new(),
                 )
                 .await
@@ -7362,7 +7370,7 @@ mod tests {
             let member = *room.players.keys().next().unwrap();
             assert!(database.transition_room_to_lobby(&room.id).await.unwrap());
             database
-                .backdate_room_activity_for_test(&room.id, chrono::Duration::hours(2))
+                .backdate_room_activity_for_test(&room.id, jiff::SignedDuration::from_hours(2))
                 .await;
             let room = database.get_room_by_id(&room.id).await.unwrap().unwrap();
             let lease = database
@@ -7399,8 +7407,8 @@ mod tests {
                         assert_eq!(
                             database
                                 .cleanup_expired_rooms(
-                                    chrono::Duration::minutes(5),
-                                    chrono::Duration::hours(1),
+                                    jiff::SignedDuration::from_mins(5),
+                                    jiff::SignedDuration::from_hours(1),
                                     &HashSet::new()
                                 )
                                 .await
@@ -7495,7 +7503,7 @@ mod tests {
             name: "Member".to_string(),
             is_authority: false,
             is_ready: false,
-            connected_at: Some(chrono::Utc::now()),
+            connected_at: Some(jiff::Timestamp::now()),
             connection_info: None,
             epoch: None,
             seq: None,
@@ -7821,20 +7829,20 @@ mod tests {
             db.remove_player_from_room(&room.id, &creator)
                 .await
                 .expect("removal should not error");
-            age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+            age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
 
             let empty_sweep = expected == crate::session_records::SessionCloseReason::Empty;
             if empty_sweep {
                 let deleted = db
-                    .cleanup_empty_rooms(chrono::Duration::seconds(300), &HashSet::new())
+                    .cleanup_empty_rooms(jiff::SignedDuration::from_secs(300), &HashSet::new())
                     .await
                     .expect("empty cleanup should not error");
                 assert_eq!(deleted, vec![room.id]);
             } else {
                 let outcome = db
                     .cleanup_expired_rooms(
-                        chrono::Duration::seconds(300),
-                        chrono::Duration::seconds(3600),
+                        jiff::SignedDuration::from_secs(300),
+                        jiff::SignedDuration::from_secs(3600),
                         &HashSet::new(),
                     )
                     .await
@@ -7887,7 +7895,7 @@ mod tests {
                     );
                 }
                 if index != 5 {
-                    age_room(&db, &room.id, chrono::Duration::hours(2)).await;
+                    age_room(&db, &room.id, jiff::SignedDuration::from_hours(2)).await;
                 }
                 let should_remove =
                     matches!(index, 0 | 7) || (expired && matches!(index, 1 | 2 | 6));
@@ -7901,8 +7909,8 @@ mod tests {
             if expired {
                 let outcome = db
                     .cleanup_expired_rooms(
-                        chrono::Duration::minutes(5),
-                        chrono::Duration::hours(1),
+                        jiff::SignedDuration::from_mins(5),
+                        jiff::SignedDuration::from_hours(1),
                         &protected,
                     )
                     .await
@@ -7911,7 +7919,7 @@ mod tests {
                 assert_eq!(outcome.inactive_rooms_cleaned, 3);
             } else {
                 let deleted = db
-                    .cleanup_empty_rooms(chrono::Duration::minutes(5), &protected)
+                    .cleanup_empty_rooms(jiff::SignedDuration::from_mins(5), &protected)
                     .await
                     .unwrap();
                 assert_eq!(deleted.into_iter().collect::<HashSet<_>>(), removed);

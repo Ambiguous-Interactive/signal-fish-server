@@ -134,7 +134,7 @@ async fn compact_room_code_rotation_preserves_registry_and_clocks() {
             .get(&room.id)
             .unwrap()
             .idle_for(),
-        chrono::Duration::zero()
+        jiff::SignedDuration::ZERO
     );
     let collision = database
         .update_room_code_snapshot(&room.id, "TAKEN1".into())

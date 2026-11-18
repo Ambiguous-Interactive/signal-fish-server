@@ -679,7 +679,7 @@ fn reserved_room_joined_envelope(
                V2 keeps the runtime join timestamp. Reserve its widest supported
                UTC representation; v3 strips it from roster snapshots.
             */
-            connected_at: (version < 3).then_some(chrono::DateTime::<chrono::Utc>::MAX_UTC),
+            connected_at: (version < 3).then_some(jiff::Timestamp::MAX),
             connection_info: None,
             /*
                V3 always carries both counters. Their widths can grow across

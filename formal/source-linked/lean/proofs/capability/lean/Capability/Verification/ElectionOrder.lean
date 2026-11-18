@@ -4,38 +4,30 @@ open CoreModels Aeneas Aeneas.Std
 
 namespace Capability
 
-/-- The numeric timestamp interpretation preserves lexicographic field ordering.
-This checks the encoding arithmetic, not the trusted Chrono field interpretation. -/
-theorem timestamp_key_order {Left LeftOffset Right RightOffset : Type}
-    (left : chrono.datetime.DateTime Left LeftOffset)
-    (right : chrono.datetime.DateTime Right RightOffset) :
+/-- The numeric timestamp key preserves the modeled Jiff field order. -/
+theorem timestamp_key_order (left right : jiff.timestamp.Timestamp) :
     ElectionOrder.timeKey left < ElectionOrder.timeKey right ↔
-      left.packedDate.val < right.packedDate.val ∨
-        left.packedDate.val = right.packedDate.val ∧
-          (left.seconds.val < right.seconds.val ∨
-            left.seconds.val = right.seconds.val ∧ left.fraction.val < right.fraction.val) := by
-  have left_date_lower : -2147483648 ≤ left.packedDate.val := by scalar_tac
-  have right_date_lower : -2147483648 ≤ right.packedDate.val := by scalar_tac
-  have left_seconds_upper : left.seconds.val < 4294967296 := by scalar_tac
-  have right_seconds_upper : right.seconds.val < 4294967296 := by scalar_tac
-  have left_fraction_upper : left.fraction.val < 4294967296 := by scalar_tac
-  have right_fraction_upper : right.fraction.val < 4294967296 := by scalar_tac
+      left.seconds.val < right.seconds.val ∨
+        left.seconds.val = right.seconds.val ∧ left.fraction.val < right.fraction.val := by
+  have left_seconds_lower : -9223372036854775808 ≤ left.seconds.val := by scalar_tac
+  have right_seconds_lower : -9223372036854775808 ≤ right.seconds.val := by scalar_tac
+  have left_fraction_lower : -2147483648 ≤ left.fraction.val := by scalar_tac
+  have right_fraction_lower : -2147483648 ≤ right.fraction.val := by scalar_tac
+  have left_fraction_upper : left.fraction.val < 2147483648 := by scalar_tac
+  have right_fraction_upper : right.fraction.val < 2147483648 := by scalar_tac
   unfold ElectionOrder.timeKey
   omega
 
-/-- Distinct modeled timestamp fields have distinct keys; timezone offset is ignored. -/
-theorem timestamp_key_equal {Left LeftOffset Right RightOffset : Type}
-    (left : chrono.datetime.DateTime Left LeftOffset)
-    (right : chrono.datetime.DateTime Right RightOffset) :
+/-- Distinct modeled timestamp fields have distinct keys. -/
+theorem timestamp_key_equal (left right : jiff.timestamp.Timestamp) :
     ElectionOrder.timeKey left = ElectionOrder.timeKey right ↔
-      left.packedDate.val = right.packedDate.val ∧
-        left.seconds.val = right.seconds.val ∧ left.fraction.val = right.fraction.val := by
-  have left_date_lower : -2147483648 ≤ left.packedDate.val := by scalar_tac
-  have right_date_lower : -2147483648 ≤ right.packedDate.val := by scalar_tac
-  have left_seconds_upper : left.seconds.val < 4294967296 := by scalar_tac
-  have right_seconds_upper : right.seconds.val < 4294967296 := by scalar_tac
-  have left_fraction_upper : left.fraction.val < 4294967296 := by scalar_tac
-  have right_fraction_upper : right.fraction.val < 4294967296 := by scalar_tac
+      left.seconds.val = right.seconds.val ∧ left.fraction.val = right.fraction.val := by
+  have left_seconds_lower : -9223372036854775808 ≤ left.seconds.val := by scalar_tac
+  have right_seconds_lower : -9223372036854775808 ≤ right.seconds.val := by scalar_tac
+  have left_fraction_lower : -2147483648 ≤ left.fraction.val := by scalar_tac
+  have right_fraction_lower : -2147483648 ≤ right.fraction.val := by scalar_tac
+  have left_fraction_upper : left.fraction.val < 2147483648 := by scalar_tac
+  have right_fraction_upper : right.fraction.val < 2147483648 := by scalar_tac
   unfold ElectionOrder.timeKey
   omega
 

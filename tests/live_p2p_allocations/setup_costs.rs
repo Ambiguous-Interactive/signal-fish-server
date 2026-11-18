@@ -96,7 +96,7 @@ pub(crate) fn session_selection_keeps_capabilities_inline() {
                     name: "P".into(),
                     is_authority: false,
                     is_ready: false,
-                    connected_at: Some(chrono::DateTime::UNIX_EPOCH),
+                    connected_at: Some(jiff::Timestamp::UNIX_EPOCH),
                     connection_info: None,
                     epoch: None,
                     seq: None,
