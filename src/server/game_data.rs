@@ -1,23 +1,22 @@
+use crate::coordination::ConnectionCloseSignal;
 use crate::protocol::{
     DeliveryClass, ErrorCode, GameDataEncoding, PlayerId, RoomId, ServerMessage,
 };
 use bytes::Bytes;
+use std::future::Future;
 use std::sync::Arc;
 #[cfg(all(test, signal_fish_repository_tests))]
 use std::sync::LazyLock;
 
 use super::signaling::canonical_json_len;
 use super::{ClientLifecycle, EnhancedGameServer};
-
-/// Where a relay admission pauses for reconnect-race regressions (issue
-/// #686): the sender-budget wait and the room-budget wait are the two
-/// suspension points between the source check and the lifecycle-guarded
-/// stamp.
+/// Pause a relay at a budget wait (#686) or before the close/stamp fence (#826).
 #[cfg(all(test, signal_fish_repository_tests))]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(super) enum RelayAdmissionStage {
     BeforeSenderBudget,
     BeforeRoomBudget,
+    StampBoundary,
 }
 
 #[cfg(all(test, signal_fish_repository_tests))]
@@ -420,21 +419,30 @@ impl EnhancedGameServer {
             Some(lifecycle) => Some(lifecycle.lock().await),
             None => None,
         };
-        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
+            self.connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+        });
+        if source_lifecycle.is_some() && source_close.is_none() {
             return;
         }
         if let Some(room_id) = self.get_client_room(player_id).await {
             // The sender-controlled JSON payload is the budget measure
             // (memoized above, shared with the per-encoding cap).
-            if let Err(e) = self
-                .check_and_charge_relay_bytes(
+            let Some(admission) = while_relay_open(
+                source_close.as_ref(),
+                self.check_and_charge_relay_bytes(
                     player_id,
                     &room_id,
                     crate::protocol::GameDataEncoding::Json,
                     payload_bytes() as u64,
-                )
-                .await
-            {
+                ),
+            )
+            .await
+            else {
+                return;
+            };
+            if let Err(e) = admission {
                 // The refusal reply locks the source gate itself; it is sent
                 // only after this frame's admission released it.
                 drop(source_gate);
@@ -476,11 +484,14 @@ impl EnhancedGameServer {
                     key,
                 })
             });
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_relay_admission(player_id, RelayAdmissionStage::StampBoundary).await;
             self.broadcast_game_data_with(
                 player_id,
                 &room_id,
                 source_gate,
                 source_lifecycle.as_ref(),
+                source_close.as_ref(),
                 &mut build_message,
             )
             .await;
@@ -600,17 +611,31 @@ impl EnhancedGameServer {
             Some(lifecycle) => Some(lifecycle.lock().await),
             None => None,
         };
-        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
+            self.connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+        });
+        if source_lifecycle.is_some() && source_close.is_none() {
             return;
         }
         if let Some(room_id) = self.get_client_room(player_id).await {
             // Sender-side relay byte budget (issue #519) plus the room's
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
-            if let Err(e) = self
-                .check_and_charge_relay_bytes(player_id, &room_id, encoding, payload.len() as u64)
-                .await
-            {
+            let Some(admission) = while_relay_open(
+                source_close.as_ref(),
+                self.check_and_charge_relay_bytes(
+                    player_id,
+                    &room_id,
+                    encoding,
+                    payload.len() as u64,
+                ),
+            )
+            .await
+            else {
+                return;
+            };
+            if let Err(e) = admission {
                 // The refusal reply locks the source gate itself; it is sent
                 // only after this frame's admission released it.
                 drop(source_gate);
@@ -624,13 +649,17 @@ impl EnhancedGameServer {
                     .await;
                 return;
             }
-            // Charged frames record liveness (rejected frames never do), and
-            // under the gate the refresh can only land on the incumbent. The
-            // throttled database write holds the gate; the in-memory database
-            // makes that bounded today, and a real backend must stay bounded
-            // too or this call moves behind the gate release (#686 audit).
-            self.record_client_activity(player_id);
-            self.maybe_update_last_seen(player_id).await;
+            // Only charged frames refresh liveness. The lifecycle still
+            // pins the incumbent, and close can interrupt pending storage.
+            if while_relay_open(
+                source_close.as_ref(),
+                self.refresh_client_activity(player_id),
+            )
+            .await
+            .is_none()
+            {
+                return;
+            }
             let connection_manager = &self.connection_manager;
             let expected_room = room_id;
             let expected_epoch = connection_manager
@@ -658,19 +687,29 @@ impl EnhancedGameServer {
                     epoch: Some(stamp.epoch),
                 })
             });
+            #[cfg(all(test, signal_fish_repository_tests))]
+            pause_relay_admission(player_id, RelayAdmissionStage::StampBoundary).await;
             self.broadcast_game_data_with(
                 player_id,
                 &room_id,
                 source_gate,
                 source_lifecycle.as_ref(),
+                source_close.as_ref(),
                 &mut build_message,
             )
             .await;
         } else {
             // Roomless frames keep their pre-existing liveness contract: the
             // frame was validly sized and is answered with NOT_IN_ROOM.
-            self.record_client_activity(player_id);
-            self.maybe_update_last_seen(player_id).await;
+            if while_relay_open(
+                source_close.as_ref(),
+                self.refresh_client_activity(player_id),
+            )
+            .await
+            .is_none()
+            {
+                return;
+            }
             drop(source_gate);
             // See the text-lane rationale above: an unseated sender must be
             // able to observe the rejection, not infer it from silence.
@@ -710,6 +749,7 @@ impl EnhancedGameServer {
         room_id: &RoomId,
         source_gate: Option<tokio::sync::MutexGuard<'a, ()>>,
         source_lifecycle: Option<&'a Arc<ClientLifecycle>>,
+        source_close: Option<&ConnectionCloseSignal>,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) {
         if let Err(e) = self
@@ -719,6 +759,7 @@ impl EnhancedGameServer {
                 build_message,
                 source_gate,
                 source_lifecycle,
+                source_close,
             )
             .await
         {
@@ -742,6 +783,7 @@ impl EnhancedGameServer {
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
         mut source_gate: Option<tokio::sync::MutexGuard<'a, ()>>,
         source_lifecycle: Option<&'a Arc<ClientLifecycle>>,
+        source_close: Option<&ConnectionCloseSignal>,
     ) -> anyhow::Result<()> {
         // Acceptance-time semantics, deliberately counted BEFORE the
         // builder runs: the increment doubles as the synchronization marker
@@ -769,10 +811,15 @@ impl EnhancedGameServer {
                 }
                 ImmediateGameDataBroadcast::OrderingBlocked(wait) => wait,
                 ImmediateGameDataBroadcast::Unavailable => {
-                    match coordinator
-                        .enqueue_relay_broadcast_after_contention(room_id, player_id, build_message)
-                        .await
-                    {
+                    let outcome = coordinator
+                        .enqueue_relay_broadcast_after_contention_with_close(
+                            room_id,
+                            player_id,
+                            source_close,
+                            build_message,
+                        )
+                        .await;
+                    match outcome {
                         RelayEnqueueOutcome::Finished(result) => return result,
                         RelayEnqueueOutcome::AwaitFinish(completion) => {
                             drop(source_gate);
@@ -783,15 +830,33 @@ impl EnhancedGameServer {
                 }
             };
             drop(source_gate.take());
-            wait.await;
-            source_gate = match source_lifecycle {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
+            let wait_and_reacquire = async {
+                wait.await;
+                match source_lifecycle {
+                    Some(lifecycle) => Some(lifecycle.lock().await),
+                    None => None,
+                }
             };
+            let Some(guard) = while_relay_open(source_close, wait_and_reacquire).await else {
+                return Ok(());
+            };
+            source_gate = guard;
             if !self.relay_source_is_current(player_id, source_lifecycle) {
                 return Ok(());
             }
         }
+    }
+}
+
+/// Stop pending admission on the sender's close without rolling back a budget
+/// charge or activity write that completed before cancellation.
+async fn while_relay_open<T>(
+    source_close: Option<&ConnectionCloseSignal>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    match source_close {
+        Some(close) => close.while_open(work).await,
+        None => Some(work.await),
     }
 }
 

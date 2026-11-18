@@ -3166,14 +3166,17 @@ impl InMemoryMessageCoordinator {
         &self,
         room_id: &RoomId,
         except_player: &PlayerId,
+        source_close: Option<&ConnectionCloseSignal>,
         build_message: &mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> RoutedRelayStart {
         let Some(relay_guard) = self.relay_order_gates.try_write(*except_player) else {
             return RoutedRelayStart::OrderingBlocked(self.wait_for_relay_order(*except_player));
         };
-        let _routing = self.room_routing_gates.read(*room_id).await;
-        let room_players = self.room_players.read().await;
-        let clients = self.local_clients.read().await;
+        let Some((_routing, room_players, clients)) =
+            self.read_room_delivery_routes(*room_id, source_close).await
+        else {
+            return RoutedRelayStart::Complete;
+        };
         match build_message() {
             Some(message) => {
                 let started = self.start_routed_owned_deliveries(
@@ -6131,6 +6134,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .enqueue_borrowed_owned_broadcast_after_contention(
                     room_id,
                     except_player,
+                    None,
                     build_message,
                 )
                 .await
@@ -6156,6 +6160,21 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         except_player: &PlayerId,
         build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> Pin<Box<dyn Future<Output = RelayEnqueueOutcome<'a>> + Send + 'a>> {
+        self.enqueue_relay_broadcast_after_contention_with_close(
+            room_id,
+            except_player,
+            None,
+            build_message,
+        )
+    }
+
+    fn enqueue_relay_broadcast_after_contention_with_close<'a>(
+        &'a self,
+        room_id: &RoomId,
+        except_player: &PlayerId,
+        source_close: Option<&'a ConnectionCloseSignal>,
+        build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
+    ) -> Pin<Box<dyn Future<Output = RelayEnqueueOutcome<'a>> + Send + 'a>> {
         let room_id = *room_id;
         let except_player = *except_player;
         Box::pin(async move {
@@ -6163,6 +6182,7 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
                 .enqueue_borrowed_owned_broadcast_after_contention(
                     &room_id,
                     &except_player,
+                    source_close,
                     build_message,
                 )
                 .await
