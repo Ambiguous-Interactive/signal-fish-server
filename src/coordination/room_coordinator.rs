@@ -15,8 +15,8 @@ use crate::database::{AuthorityDenial, AuthorityOutcome};
 use crate::protocol::{PeerConnectionInfo, PlayerId, PlayerInfo, RoomId};
 
 use super::{
-    MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard, RoomMessageTransactionOutcome,
-    RoomRecipientMessages,
+    ConnectionCloseSignal, MessageCoordinator, RoomEventCompletion, RoomEventMutationGuard,
+    RoomMemberRouteLease, RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 
 /// Snapshot of a room at finalization, used to build the capability-aware
@@ -367,6 +367,27 @@ impl InMemoryRoomOperationCoordinator {
 }
 
 impl InMemoryRoomOperationCoordinator {
+    /// Run an admitted toggle and turn a worker failure into a typed refusal.
+    pub(crate) async fn handle_player_ready_under_room_gate(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        room_guard: RoomEventMutationGuard,
+    ) -> std::result::Result<(), PlayerReadyError> {
+        let coordinator = self.clone();
+        let room_id = *room_id;
+        let player_id = *player_id;
+        tokio::spawn(async move {
+            coordinator
+                .apply_player_ready(room_id, player_id, room_guard)
+                .await
+        })
+        .await
+        .map_err(|error| {
+            PlayerReadyError::Internal(anyhow::anyhow!("Owned ready toggle task failed: {error}"))
+        })?
+    }
+
     /// Commit and publish a ready toggle even if its caller is canceled.
     async fn apply_player_ready(
         self,
@@ -637,12 +658,185 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         player_id: &PlayerId,
         become_authority: bool,
     ) -> Result<AuthorityOutcome> {
+        let admission = self.prepare_authority_request(room_id, player_id).await?;
+        self.complete_authority_request(room_id, player_id, become_authority, admission)
+            .await
+    }
+
+    async fn handle_player_ready(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        _app_id: Option<Uuid>,
+    ) -> std::result::Result<(), PlayerReadyError> {
+        let room_guard = self.coordinator.lock_room_event_mutation(room_id).await;
+        self.handle_player_ready_under_room_gate(room_id, player_id, room_guard)
+            .await
+    }
+
+    /// Handle an explicit `StartGame`: finalize the room with its *current*
+    /// members when every current player is ready and the sender is permitted
+    /// to start (the room's authority, or any member if no authority is set).
+    ///
+    /// Returns the [`StartGameOutcome`]: `Started(FinalizedRoom)` after the
+    /// complete publication commits, or a rejection variant the caller maps to
+    /// the matching `ErrorCode`.
+    async fn handle_start_game(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<StartGameOutcome> {
+        self.handle_start_game_with_publication(
+            room_id,
+            player_id,
+            Box::new(|finalized, game_starting| {
+                StartGamePublication::game_starting_only(finalized, game_starting)
+            }),
+        )
+        .await
+    }
+
+    async fn handle_start_game_with_publication(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        build_publication: StartGamePublicationBuilder,
+    ) -> Result<StartGameOutcome> {
+        let room_guard = self.coordinator.lock_room_event_mutation(room_id).await;
+        self.start_game_under_room_gate(room_id, player_id, build_publication, room_guard)
+            .await
+    }
+
+    /// Return a membership-filtered ready snapshot without holding its lock during storage reads.
+    async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
+        // Snapshot the set without holding the lock across either DB await
+        // below: the guard scope closes before any await, so a snapshot can
+        // never block a concurrent toggle, clear, forget, or finalize
+        // entry-drop for the duration of a database read.
+        let live_entry: Option<Vec<PlayerId>> = {
+            let ready_map = self.ready_players.read().await;
+            ready_map
+                .get(room_id)
+                .map(|ready| ready.iter().copied().collect())
+        };
+        let Some(mut ready_players) = live_entry else {
+            // No live entry: either nobody has toggled yet, or the room
+            // finalized and the start transaction dropped the entry. Prefer
+            // the durable record so a snapshot that straddles finalization
+            // reports the finalized ready set instead of an all-unready game;
+            // an open room falls through to empty (nobody ready yet).
+            return match self
+                .database
+                .get_finalized_room_ready_players(room_id)
+                .await
+            {
+                Ok(ready_players) => ready_players.unwrap_or_default(),
+                Err(error) => {
+                    tracing::warn!(
+                        %room_id,
+                        error = %error,
+                        "Failed to load the finalized room for the readiness snapshot; failing closed to an empty set"
+                    );
+                    Vec::new()
+                }
+            };
+        };
+        // Filter to present members so an id that departed without a toggle is
+        // never reported as ready. A failed membership read fails closed to an
+        // empty set: reporting the unfiltered set would fabricate readiness for
+        // departed members precisely when the data is known-stale.
+        match self
+            .database
+            .retain_room_player_ids(room_id, &mut ready_players)
+            .await
+        {
+            Ok(()) => ready_players,
+            Err(error) => {
+                tracing::warn!(
+                    %room_id,
+                    error = %error,
+                    "Failed to load room members for the readiness snapshot; failing closed to an empty set"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()> {
+        // Clear ready players from the in-memory coordinator map
+        let mut ready_map = self.ready_players.write().await;
+        ready_map.remove(room_id);
+        tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
+        Ok(())
+    }
+
+    async fn forget_player_ready(&self, room_id: &RoomId, player_id: &PlayerId) {
+        let mut ready_map = self.ready_players.write().await;
+        let Some(room_ready_players) = ready_map.get_mut(room_id) else {
+            return;
+        };
+        if !room_ready_players.remove(player_id) {
+            return;
+        }
+        // Keep the map free of empty sets so a lobby that fully un-readies costs
+        // nothing until the room-scoped entry is needed again.
+        if room_ready_players.is_empty() {
+            ready_map.remove(room_id);
+        }
+        tracing::debug!(%room_id, %player_id, "Dropped stale readiness for a new membership");
+    }
+
+    async fn ready_player_room_ids(&self) -> Vec<RoomId> {
+        // Snapshot keys without holding the lock across any caller `.await`.
+        self.ready_players.read().await.keys().copied().collect()
+    }
+}
+
+impl InMemoryRoomOperationCoordinator {
+    async fn prepare_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+    ) -> Result<(RoomEventMutationGuard, RoomMemberRouteLease)> {
         let mutation_guard = self.coordinator.lock_room_event_mutation(room_id).await;
         let route_lease = self
             .coordinator
             .lease_room_member_route(room_id, player_id)
             .await?;
+        Ok((mutation_guard, route_lease))
+    }
 
+    /// Stop waiting on a closing socket until the request enters the owned transaction.
+    pub(crate) async fn handle_socket_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        become_authority: bool,
+        close: &ConnectionCloseSignal,
+    ) -> Result<Option<AuthorityOutcome>> {
+        let Some(admission) = close
+            .while_open(self.prepare_authority_request(room_id, player_id))
+            .await
+        else {
+            return Ok(None);
+        };
+        // The optimistic poll can finish as close is requested. Order admission
+        // against close after both guards are available and before storage can change.
+        let Some(admission) = close.commit_if_open(|| admission) else {
+            return Ok(None);
+        };
+        self.complete_authority_request(room_id, player_id, become_authority, admission?)
+            .await
+            .map(Some)
+    }
+
+    async fn complete_authority_request(
+        &self,
+        room_id: &RoomId,
+        player_id: &PlayerId,
+        become_authority: bool,
+        (mutation_guard, route_lease): (RoomEventMutationGuard, RoomMemberRouteLease),
+    ) -> Result<AuthorityOutcome> {
         // From the first durable mutation onward this owned task retains the
         // room mutation guard. Dropping the caller only detaches its join
         // handle; the database result still reaches the synchronous FIFO enqueue.
@@ -731,56 +925,15 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
             .map_err(|error| anyhow::anyhow!("Owned authority request task failed: {error}"))
     }
 
-    async fn handle_player_ready(
-        &self,
-        room_id: &RoomId,
-        player_id: &PlayerId,
-        _app_id: Option<Uuid>,
-    ) -> std::result::Result<(), PlayerReadyError> {
-        let room_guard = self.coordinator.lock_room_event_mutation(room_id).await;
-        let coordinator = self.clone();
-        let room_id = *room_id;
-        let player_id = *player_id;
-        tokio::spawn(async move {
-            coordinator
-                .apply_player_ready(room_id, player_id, room_guard)
-                .await
-        })
-        .await
-        .map_err(|error| {
-            PlayerReadyError::Internal(anyhow::anyhow!("Owned ready toggle task failed: {error}"))
-        })?
-    }
-
-    /// Handle an explicit `StartGame`: finalize the room with its *current*
-    /// members when every current player is ready and the sender is permitted
-    /// to start (the room's authority, or any member if no authority is set).
-    ///
-    /// Returns the [`StartGameOutcome`]: `Started(FinalizedRoom)` after the
-    /// complete publication commits, or a rejection variant the caller maps to
-    /// the matching `ErrorCode`.
-    async fn handle_start_game(
-        &self,
-        room_id: &RoomId,
-        player_id: &PlayerId,
-    ) -> Result<StartGameOutcome> {
-        self.handle_start_game_with_publication(
-            room_id,
-            player_id,
-            Box::new(|finalized, game_starting| {
-                StartGamePublication::game_starting_only(finalized, game_starting)
-            }),
-        )
-        .await
-    }
-
-    async fn handle_start_game_with_publication(
+    /// Evaluate and publish a start while holding the room mutation gate.
+    pub(crate) async fn start_game_under_room_gate(
         &self,
         room_id: &RoomId,
         player_id: &PlayerId,
         build_publication: StartGamePublicationBuilder,
+        room_guard: RoomEventMutationGuard,
     ) -> Result<StartGameOutcome> {
-        let mut mutation_guard = Some(self.coordinator.lock_room_event_mutation(room_id).await);
+        let mut mutation_guard = Some(room_guard);
 
         // Captured under the lock for the post-release broadcast.
         let mut relay_type_for_broadcast: Option<String> = None;
@@ -998,90 +1151,6 @@ impl RoomOperationCoordinatorTrait for InMemoryRoomOperationCoordinator {
         drop(mutation_guard);
 
         result
-    }
-
-    /// Return a membership-filtered ready snapshot without holding its lock during storage reads.
-    async fn current_ready_players(&self, room_id: &RoomId) -> Vec<PlayerId> {
-        // Snapshot the set without holding the lock across either DB await
-        // below: the guard scope closes before any await, so a snapshot can
-        // never block a concurrent toggle, clear, forget, or finalize
-        // entry-drop for the duration of a database read.
-        let live_entry: Option<Vec<PlayerId>> = {
-            let ready_map = self.ready_players.read().await;
-            ready_map
-                .get(room_id)
-                .map(|ready| ready.iter().copied().collect())
-        };
-        let Some(mut ready_players) = live_entry else {
-            // No live entry: either nobody has toggled yet, or the room
-            // finalized and the start transaction dropped the entry. Prefer
-            // the durable record so a snapshot that straddles finalization
-            // reports the finalized ready set instead of an all-unready game;
-            // an open room falls through to empty (nobody ready yet).
-            return match self
-                .database
-                .get_finalized_room_ready_players(room_id)
-                .await
-            {
-                Ok(ready_players) => ready_players.unwrap_or_default(),
-                Err(error) => {
-                    tracing::warn!(
-                        %room_id,
-                        error = %error,
-                        "Failed to load the finalized room for the readiness snapshot; failing closed to an empty set"
-                    );
-                    Vec::new()
-                }
-            };
-        };
-        // Filter to present members so an id that departed without a toggle is
-        // never reported as ready. A failed membership read fails closed to an
-        // empty set: reporting the unfiltered set would fabricate readiness for
-        // departed members precisely when the data is known-stale.
-        match self
-            .database
-            .retain_room_player_ids(room_id, &mut ready_players)
-            .await
-        {
-            Ok(()) => ready_players,
-            Err(error) => {
-                tracing::warn!(
-                    %room_id,
-                    error = %error,
-                    "Failed to load room members for the readiness snapshot; failing closed to an empty set"
-                );
-                Vec::new()
-            }
-        }
-    }
-
-    async fn clear_ready_players(&self, room_id: &RoomId) -> Result<()> {
-        // Clear ready players from the in-memory coordinator map
-        let mut ready_map = self.ready_players.write().await;
-        ready_map.remove(room_id);
-        tracing::info!(%room_id, "Cleared ready players from coordinator (in-memory)");
-        Ok(())
-    }
-
-    async fn forget_player_ready(&self, room_id: &RoomId, player_id: &PlayerId) {
-        let mut ready_map = self.ready_players.write().await;
-        let Some(room_ready_players) = ready_map.get_mut(room_id) else {
-            return;
-        };
-        if !room_ready_players.remove(player_id) {
-            return;
-        }
-        // Keep the map free of empty sets so a lobby that fully un-readies costs
-        // nothing until the room-scoped entry is needed again.
-        if room_ready_players.is_empty() {
-            ready_map.remove(room_id);
-        }
-        tracing::debug!(%room_id, %player_id, "Dropped stale readiness for a new membership");
-    }
-
-    async fn ready_player_room_ids(&self) -> Vec<RoomId> {
-        // Snapshot keys without holding the lock across any caller `.await`.
-        self.ready_players.read().await.keys().copied().collect()
     }
 }
 

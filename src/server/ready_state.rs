@@ -1,6 +1,10 @@
-use crate::coordination::{PlayerReadyError, RoomOperationCoordinatorTrait, StartGameOutcome};
-use crate::protocol::{ErrorCode, LobbyState, PlayerId, PlayerInfo, Room};
+use crate::coordination::{
+    ConnectionCloseSignal, MessageCoordinator, PlayerReadyError, RoomEventMutationGuard,
+    RoomOperationCoordinatorTrait, StartGameOutcome,
+};
+use crate::protocol::{ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId};
 use std::sync::Arc;
+use tokio::sync::OwnedMutexGuard;
 
 use super::{ClientLifecycle, EnhancedGameServer};
 
@@ -46,7 +50,55 @@ pub(crate) fn apply_snapshot_readiness(players: &mut [PlayerInfo], ready_players
     }
 }
 
+struct LobbyCommandSource {
+    close: ConnectionCloseSignal,
+    _lifecycle_guard: OwnedMutexGuard<()>,
+}
+
+impl LobbyCommandSource {
+    async fn admit_room(
+        &self,
+        coordinator: &dyn MessageCoordinator,
+        room_id: &RoomId,
+    ) -> Option<RoomEventMutationGuard> {
+        let room_guard = self
+            .close
+            .while_open(coordinator.lock_room_event_mutation(room_id))
+            .await?;
+        // The optimistic poll can acquire the gate as close is requested.
+        // Order admission against close before the worker can change the room.
+        self.close.commit_if_open(|| room_guard)
+    }
+}
+
 impl EnhancedGameServer {
+    /// Pin the source before scheduling its command. Close can interrupt the wait.
+    async fn lock_lobby_source(
+        &self,
+        player_id: &PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+    ) -> Option<LobbyCommandSource> {
+        let lifecycle =
+            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))?;
+        let close = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &lifecycle)?;
+        let lifecycle_guard = close
+            .while_open(Arc::clone(&lifecycle).lock_owned())
+            .await?;
+        if lifecycle.player_id() != *player_id
+            || !self
+                .connection_manager
+                .lifecycle_matches(player_id, &lifecycle)
+        {
+            return None;
+        }
+        Some(LobbyCommandSource {
+            close,
+            _lifecycle_guard: lifecycle_guard,
+        })
+    }
+
     /// Handle a player ready-state toggle under process-local room coordination.
     ///
     /// Readiness can be toggled at any time while the room is open; it no longer
@@ -63,29 +115,19 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let Some(lifecycle) =
-            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
-        else {
+        let Some(source) = self.lock_lobby_source(player_id, source_lifecycle).await else {
             return;
         };
-        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
-        if lifecycle.player_id() != *player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(player_id, &lifecycle)
-        {
-            return;
-        }
-
-        let room_id = self.get_client_room(player_id).await;
-
+        let room_id = self.connection_manager.get_client_room(player_id);
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
-        let app_id = self.client_app_id(player_id);
         let player_id = *player_id;
+        // Use the same owned-task scheduling as the other room commands.
         let completion = tokio::spawn(async move {
-            let _lifecycle_guard = lifecycle_guard;
+            if source.close.requested_reason().is_some() {
+                return;
+            }
             let player_id = &player_id;
             let Some(room_id) = room_id else {
                 let _ = super::messaging::send_error_to_player(
@@ -98,8 +140,14 @@ impl EnhancedGameServer {
                 .await;
                 return;
             };
+            let Some(room_guard) = source
+                .admit_room(message_coordinator.as_ref(), &room_id)
+                .await
+            else {
+                return;
+            };
             if let Err(error) = room_coordinator
-                .handle_player_ready(&room_id, player_id, app_id)
+                .handle_player_ready_under_room_gate(&room_id, player_id, room_guard)
                 .await
             {
                 // The variant's own `error_code()` is the single source of truth for
@@ -155,30 +203,20 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let Some(lifecycle) =
-            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
-        else {
+        let Some(source) = self.lock_lobby_source(player_id, source_lifecycle).await else {
             return;
         };
-        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
-        if lifecycle.player_id() != *player_id
-            || !self
-                .connection_manager
-                .lifecycle_matches(player_id, &lifecycle)
-        {
-            return;
-        }
-
-        let publication = self
-            .get_client_room(player_id)
-            .await
-            .map(|room| (room, self.start_game_publication_builder(room)));
+        let room_id = self.connection_manager.get_client_room(player_id);
+        let publication = room_id.map(|id| (id, self.start_game_publication_builder(id)));
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
         let player_id = *player_id;
+        // Use the same owned-task scheduling as the other room commands.
         let completion = tokio::spawn(async move {
-            let _lifecycle_guard = lifecycle_guard;
+            if source.close.requested_reason().is_some() {
+                return;
+            }
             let player_id = &player_id;
             let Some((room_id, publication)) = publication else {
                 let _ = super::messaging::send_error_to_player(
@@ -191,8 +229,14 @@ impl EnhancedGameServer {
                 .await;
                 return;
             };
+            let Some(room_guard) = source
+                .admit_room(message_coordinator.as_ref(), &room_id)
+                .await
+            else {
+                return;
+            };
             match room_coordinator
-                .handle_start_game_with_publication(&room_id, player_id, publication)
+                .start_game_under_room_gate(&room_id, player_id, publication, room_guard)
                 .await
             {
                 Ok(StartGameOutcome::Started(_)) => {}

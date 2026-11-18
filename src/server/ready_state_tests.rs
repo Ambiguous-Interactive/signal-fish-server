@@ -2,9 +2,10 @@ use crate::config::{
     CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
     TransportSecurityConfig, TurnConfig,
 };
+use crate::coordination::RoomOperationCoordinatorTrait;
 use crate::database::DatabaseConfig;
 use crate::protocol::{
-    ErrorCode, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology, Transport,
+    ClientMessage, ErrorCode, LobbyState, PlayerId, PlayerInfo, ServerMessage, Topology, Transport,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig};
 use std::net::SocketAddr;
@@ -1561,6 +1562,320 @@ async fn poll_room_operation_to_gate<F: std::future::Future>(
     )
     .await
     .expect("the operation must enter the room mutation queue before the next actor");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_ready_waiting_for_room_mutation() {
+    check_lobby_command_admission(ClientMessage::PlayerReady, SocketAction::CloseWhileWaiting)
+        .await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_start_waiting_for_room_mutation() {
+    check_lobby_command_admission(ClientMessage::StartGame, SocketAction::CloseWhileWaiting).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn open_socket_completes_lobby_commands_after_room_mutation_wait() {
+    for message in [ClientMessage::PlayerReady, ClientMessage::StartGame] {
+        check_lobby_command_admission(message, SocketAction::StayOpen).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn queued_lobby_commands_survive_canceled_socket_dispatch() {
+    for message in [ClientMessage::PlayerReady, ClientMessage::StartGame] {
+        check_lobby_command_admission(message, SocketAction::CancelDispatchWhileOpen).await;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SocketAction {
+    CloseWhileWaiting,
+    StayOpen,
+    CancelDispatchWhileOpen,
+}
+
+async fn check_lobby_command_admission(message: ClientMessage, action: SocketAction) {
+    use crate::coordination::CloseReason;
+    use std::collections::BTreeSet;
+
+    let start_game = matches!(message, ClientMessage::StartGame);
+
+    let server = create_test_server_with_session(mesh_session_config()).await;
+    let (source, mut source_messages) = register_client(&server).await;
+    let (peer, mut peer_messages) = register_client(&server).await;
+    for (id, name) in [(source, "Source"), (peer, "Peer")] {
+        server.set_client_protocol(&id, v3_webrtc());
+        server
+            .handle_join_room(
+                &id,
+                "lobby-command-close".to_string(),
+                Some("CLOSE2".to_string()),
+                name.to_string(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+    }
+    for messages in [&mut source_messages, &mut peer_messages] {
+        let joined = recv(messages).await;
+        assert!(
+            matches!(joined.as_ref(), ServerMessage::RoomJoined(_)),
+            "{joined:?}"
+        );
+    }
+    if start_game {
+        server.handle_player_ready(&source).await;
+        server.handle_player_ready(&peer).await;
+    }
+    drain_pending(&mut source_messages);
+    drain_pending(&mut peer_messages);
+
+    let room_id = server.get_client_room(&source).await.expect("joined room");
+    let mut ready_before = server
+        .room_coordinator
+        .current_ready_players(&room_id)
+        .await;
+    ready_before.sort_unstable();
+    assert_eq!(ready_before.len(), if start_game { 2 } else { 0 });
+
+    let lifecycle = server.client_lifecycle(&source).expect("source lifecycle");
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    let mut operation = Box::pin(server.handle_client_message_from_lifecycle(
+        &source,
+        message,
+        Arc::clone(&lifecycle),
+    ));
+    poll_room_operation_to_gate(operation.as_mut(), &gate).await;
+    let queued = peer_messages.try_recv();
+    assert!(
+        matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+        "{queued:?}"
+    );
+
+    if action == SocketAction::CloseWhileWaiting {
+        assert!(server
+            .connection_manager
+            .request_close_for(&source, CloseReason::Unregistered));
+        timeout(Duration::from_millis(10), operation.as_mut())
+            .await
+            .expect("closing command must return while the room gate is held");
+        let teardown = timeout(Duration::from_millis(10), lifecycle.lock())
+            .await
+            .expect("close must release the lifecycle for teardown");
+        drop(teardown);
+    }
+    match action {
+        SocketAction::CloseWhileWaiting => drop(gate),
+        SocketAction::StayOpen => {
+            drop(gate);
+            timeout(Duration::from_secs(1), operation)
+                .await
+                .expect("open command must complete after gate release");
+        }
+        SocketAction::CancelDispatchWhileOpen => {
+            // The worker has queued for room mutation. Canceling the caller
+            // leaves it queued while the source stays open.
+            drop(operation);
+            drop(gate);
+            let completed = timeout(Duration::from_secs(1), lifecycle.lock())
+                .await
+                .expect("the owned transaction must finish and release the lifecycle");
+            drop(completed);
+        }
+    }
+    // Pass the room gate again to expose any leftover owned room work.
+    drop(
+        server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await,
+    );
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .expect("read stored room")
+        .expect("room remains present");
+    let mut ready_after = server
+        .room_coordinator
+        .current_ready_players(&room_id)
+        .await;
+    ready_after.sort_unstable();
+    if action == SocketAction::CloseWhileWaiting {
+        assert_eq!(room.lobby_state, LobbyState::Lobby);
+        assert_eq!(ready_after, ready_before);
+        assert!(server.active_session_plan(&room_id).is_none());
+    } else if start_game {
+        assert_eq!(room.lobby_state, LobbyState::Finalized);
+        assert_eq!(ready_after, ready_before);
+        let members = BTreeSet::from([source, peer]);
+        let mut generation = None;
+        for (other, messages) in [(peer, &mut source_messages), (source, &mut peer_messages)] {
+            let starting = recv(messages).await;
+            let ServerMessage::GameStarting { peer_connections } = starting.as_ref() else {
+                panic!("expected GameStarting, received {starting:?}");
+            };
+            assert_eq!(peer_connections.len(), members.len());
+            assert_eq!(
+                peer_connections
+                    .iter()
+                    .map(|peer| peer.player_id)
+                    .collect::<BTreeSet<_>>(),
+                members
+            );
+            let message = recv(messages).await;
+            let ServerMessage::SessionPlan(plan) = message.as_ref() else {
+                panic!("expected SessionPlan, received {message:?}");
+            };
+            assert_eq!(plan.topology, Topology::Mesh);
+            assert_eq!(plan.transport, Transport::WebRtc);
+            assert_eq!(plan.peers.len(), 1);
+            assert_eq!(plan.peers.first().map(|peer| peer.player_id), Some(other));
+            assert_eq!(*generation.get_or_insert(plan.generation), plan.generation);
+        }
+    } else {
+        assert_eq!(room.lobby_state, LobbyState::Lobby);
+        assert_eq!(ready_after, vec![source]);
+        for messages in [&mut source_messages, &mut peer_messages] {
+            assert!(matches!(
+                recv(messages).await.as_ref(),
+                ServerMessage::LobbyStateChanged { lobby_state: LobbyState::Lobby, ready_players, all_ready: false }
+                    if ready_players.as_slice() == [source]
+            ));
+        }
+    }
+    for messages in [&mut source_messages, &mut peer_messages] {
+        let queued = messages.try_recv();
+        assert!(
+            matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+            "{queued:?}"
+        );
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_reaches_room_gate_while_ready_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::PlayerReady).await;
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_reaches_room_gate_while_authority_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::AuthorityRequest {
+        become_authority: false,
+    })
+    .await;
+}
+
+async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
+    use crate::coordination::CloseReason;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let server = create_test_server().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app =
+        crate::websocket::create_router("http://localhost:3000").with_state(Arc::clone(&server));
+    let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop.await;
+        })
+        .await
+        .unwrap();
+    });
+    let bound = Duration::from_secs(5);
+    let (mut socket, _) = timeout(bound, connect_async(format!("ws://{addr}/ws")))
+        .await
+        .expect("WebSocket upgrade deadline")
+        .expect("WebSocket upgrade succeeds");
+    let join = ClientMessage::JoinRoom {
+        game_name: "closing-command".into(),
+        room_code: None,
+        player_name: "Closing".into(),
+        max_players: Some(2),
+        supports_authority: Some(matches!(command, ClientMessage::AuthorityRequest { .. })),
+        relay_transport: None,
+        password: None,
+        join_only: None,
+    };
+    socket
+        .send(Message::text(serde_json::to_string(&join).unwrap()))
+        .await
+        .unwrap();
+    let frame = timeout(bound, socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let joined = serde_json::from_str::<ServerMessage>(frame.to_text().unwrap()).unwrap();
+    let ServerMessage::RoomJoined(joined) = joined else {
+        panic!("expected RoomJoined, received {joined:?}");
+    };
+
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&joined.room_id)
+        .await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    let command = serde_json::to_string(&command).unwrap();
+    socket.send(Message::text(command)).await.unwrap();
+    timeout(
+        bound,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("the socket command must queue for room mutation");
+    let attempts = gate.mutation_attempt_count_for_test();
+    assert!(server
+        .connection_manager
+        .request_close_for(&joined.player_id, CloseReason::ActivityTimeout));
+
+    let (teardown_arrival, close_frame) = tokio::join!(
+        timeout(
+            bound,
+            gate.wait_for_mutation_attempt_after_for_test(attempts)
+        ),
+        timeout(bound, async {
+            while let Some(frame) = socket.next().await {
+                if let Message::Close(frame) = frame.expect("WebSocket receive succeeds") {
+                    return frame;
+                }
+            }
+            None
+        })
+    );
+    // Let teardown finish even when the regression assertion will fail.
+    drop(gate);
+    drop(socket);
+    shutdown.send(()).unwrap();
+    assert_eq!(server.wait_for_shutdown_connections(bound).await, 0);
+    timeout(bound, serve).await.unwrap().unwrap();
+    assert_eq!(
+        close_frame
+            .expect("wire close deadline")
+            .map(|frame| u16::from(frame.code)),
+        Some(4003)
+    );
+    teardown_arrival.expect("teardown must enter the room mutation queue before the gate opens");
 }
 
 #[tokio::test(start_paused = true)]

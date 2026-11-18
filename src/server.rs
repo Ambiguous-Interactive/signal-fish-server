@@ -5,7 +5,7 @@ use crate::coordination::{
     DeliveryReserveError, DeliverySender, DeliveryTrySendError, ImmediateGameDataBroadcast,
     InMemoryRoomOperationCoordinator, MessageCoordinator, RelayEnqueueOutcome, RoomEventCompletion,
     RoomEventJob, RoomEventMutationGuard, RoomEventSequencer, RoomMessageTransactionOutcome,
-    RoomOperationCoordinatorTrait, RoomRecipientMessages,
+    RoomRecipientMessages,
 };
 use crate::database::{create_database, DatabaseConfig, GameDatabase};
 use crate::distributed::{DistributedLock, InMemoryDistributedLock};
@@ -974,7 +974,7 @@ pub struct EnhancedGameServer {
     /// Process-local message coordinator behind a future remote-backend seam
     message_coordinator: Arc<dyn MessageCoordinator>,
     /// Process-local room operation coordinator
-    room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
+    room_coordinator: Arc<InMemoryRoomOperationCoordinator>,
     /// Process-local coordination lock
     distributed_lock: Arc<dyn DistributedLock>,
     /// Instance identifier
@@ -1478,12 +1478,11 @@ impl EnhancedGameServer {
             None
         };
 
-        let room_coordinator: Arc<dyn RoomOperationCoordinatorTrait> =
-            Arc::new(InMemoryRoomOperationCoordinator::new(
-                message_coordinator.clone(),
-                database.clone(),
-                reconnection_manager.clone(),
-            ));
+        let room_coordinator = Arc::new(InMemoryRoomOperationCoordinator::new(
+            message_coordinator.clone(),
+            database.clone(),
+            reconnection_manager.clone(),
+        ));
 
         // Initialize public app-ID access policy based on configuration.
         let app_id_allowlist = if config.app_id_allowlist_enabled {
@@ -1511,7 +1510,7 @@ impl EnhancedGameServer {
         let (shutdown_drain_tx, _) = watch::channel(false);
         let spectator_service = SpectatorService::new(
             database.clone(),
-            Arc::clone(&room_coordinator),
+            room_coordinator.clone(),
             message_coordinator.clone(),
             Arc::clone(&distributed_lock),
             Arc::clone(&metrics),

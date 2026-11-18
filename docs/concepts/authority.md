@@ -108,6 +108,11 @@ The code tells you whether retrying can ever succeed:
 | `STORAGE_ERROR` | The server could not decide the request. | Yes — this is a transient server-side fault. |
 | `INTERNAL_ERROR` | The request failed before storage was consulted. | Yes — this is a transient server-side fault. |
 
+If the server starts closing the WebSocket while an authority request waits
+for room access, it drops the request. A request that has entered the room
+transaction can still change authority after close. After a reconnect, use
+the room snapshot to learn who holds authority.
+
 ### Broadcasting Authority Changes
 
 When authority changes, **every player** in the room receives an

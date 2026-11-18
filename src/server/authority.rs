@@ -21,7 +21,16 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &lifecycle)
+        else {
+            return;
+        };
+        let Some(lifecycle_guard) = close.while_open(Arc::clone(&lifecycle).lock_owned()).await
+        else {
+            return;
+        };
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -32,7 +41,7 @@ impl EnhancedGameServer {
 
         tracing::info!(%player_id, %become_authority, "Server handling authority request");
 
-        let room_id = self.get_client_room(player_id).await;
+        let room_id = self.connection_manager.get_client_room(player_id);
 
         let room_coordinator = Arc::clone(&self.room_coordinator);
         let connection_manager = Arc::clone(&self.connection_manager);
@@ -42,6 +51,9 @@ impl EnhancedGameServer {
             let _lifecycle_guard = lifecycle_guard;
             let player_id = &player_id;
             let Some(room_id) = room_id else {
+                if close.requested_reason().is_some() {
+                    return;
+                }
                 tracing::warn!(%player_id, "Player not in room for authority request");
                 // The refusal is a polite per-frame reply: it charges the
                 // per-connection error-reply budget (issue #518), so a
@@ -65,10 +77,11 @@ impl EnhancedGameServer {
                 return;
             };
             match room_coordinator
-                .handle_authority_request(&room_id, player_id, become_authority)
+                .handle_socket_authority_request(&room_id, player_id, become_authority, &close)
                 .await
             {
-                Ok(outcome) => {
+                Ok(None) => {}
+                Ok(Some(outcome)) => {
                     tracing::info!(
                         %player_id,
                         granted = outcome.granted(),
