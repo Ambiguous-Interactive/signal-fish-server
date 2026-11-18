@@ -23,7 +23,7 @@
     "format:check": "prettier --check ."
   },
   "dependencies": {
-    "playwright-core": "1.65.0"
+    "playwright-core": "1.65.1"
   },
   "devDependencies": {
     "@msgpack/msgpack": "3.1.3",

@@ -53,8 +53,9 @@ impl EnhancedGameServer {
 
     /// Handle ping with coordination.
     ///
+    /// Close can interrupt a pending source or reply route wait.
     /// An admitted reply retains source ordering if its caller is canceled.
-    /// Records the in-memory ping timestamp (always) for disconnect detection and
+    /// A live Ping records the in-memory timestamp for disconnect detection and
     /// replies `Pong`. The throttled `last_seen` + room-activity refresh is done
     /// once per inbound message by the router (`handle_client_message` →
     /// `maybe_update_last_seen`), so `Ping` needs no separate refresh here.
@@ -79,7 +80,16 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &lifecycle)
+        else {
+            return;
+        };
+        let Some(lifecycle_guard) = close.while_open(Arc::clone(&lifecycle).lock_owned()).await
+        else {
+            return;
+        };
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -93,12 +103,15 @@ impl EnhancedGameServer {
         let player_id = *player_id;
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
+            if close.requested_reason().is_some() {
+                return;
+            }
             connection_manager.record_ping(&player_id);
             if !connection_manager.charge_error_reply(&player_id).await {
                 return;
             }
             let _ = message_coordinator
-                .send_to_player(&player_id, Arc::new(ServerMessage::Pong))
+                .send_to_player_on_socket(&player_id, &close, Arc::new(ServerMessage::Pong))
                 .await;
         });
         if let Err(error) = completion.await {
@@ -659,6 +672,76 @@ mod tests {
             expired_after.is_empty(),
             "ping refresh should remove player from expired set"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg(all(signal_fish_repository_tests, not(miri)))]
+    async fn routed_ping_releases_reply_route_wait_on_close() {
+        check_routed_ping_with_held_route(true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg(all(signal_fish_repository_tests, not(miri)))]
+    async fn routed_ping_replies_once_when_route_reopens() {
+        check_routed_ping_with_held_route(false).await;
+    }
+
+    #[cfg(all(signal_fish_repository_tests, not(miri)))]
+    async fn check_routed_ping_with_held_route(close_while_waiting: bool) {
+        use crate::coordination::CloseReason;
+        use crate::server::{InMemoryDistributedLock, InMemoryMessageCoordinator};
+
+        let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let server =
+            super::super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+                ServerConfig::default(),
+                coordinator.clone(),
+                Arc::new(InMemoryDistributedLock::new()),
+                Arc::new(InMemoryDatabase::new()),
+            )
+            .await;
+        let player = uuid::Uuid::new_v4();
+        let (sender, mut receiver) = mpsc::channel(4);
+        server.connect_client(player, sender).await;
+        let lifecycle = server.client_lifecycle(&player).expect("source lifecycle");
+        let route = coordinator.local_clients.write().await;
+        let ping = server.handle_client_message_from_lifecycle(
+            &player,
+            ClientMessage::Ping,
+            lifecycle.clone(),
+        );
+        tokio::pin!(ping);
+        assert!(futures_util::poll!(&mut ping).is_pending());
+        assert!(
+            timeout(Duration::from_millis(10), lifecycle.lock())
+                .await
+                .is_err(),
+            "the Pong route wait must hold the source lifecycle"
+        );
+
+        if close_while_waiting {
+            assert!(server
+                .connection_manager
+                .request_close_for(&player, CloseReason::Unregistered));
+            timeout(Duration::from_millis(10), &mut ping)
+                .await
+                .expect("close must release the Pong route wait");
+            drop(
+                timeout(Duration::from_millis(10), lifecycle.lock())
+                    .await
+                    .expect("close must release the source lifecycle before routing resumes"),
+            );
+            drop(route);
+        } else {
+            drop(route);
+            timeout(Duration::from_millis(10), &mut ping)
+                .await
+                .expect("live Ping must finish after routing resumes");
+            let response = receiver.try_recv().expect("one Pong");
+            assert!(matches!(response.as_ref(), ServerMessage::Pong));
+        }
+        let pending = receiver.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
     }
 
     #[tokio::test(start_paused = true)]
