@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Report session metrics scan and capture times in trace logs.
 - Report native transport counters after exchange sends, including during SDP, and at failed deadlines to diagnose
   missing P2P receipts (#1639).
+- Let native Godot exchange probes resend after confirmed expiry before transmission when explicitly enabled (#1639).
 
 ### Changed
 
