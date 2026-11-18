@@ -7995,3 +7995,132 @@ taskset -c 0 <saved-executable> --bench \
   'claimed_registration/retained_name_bytes/64$' \
   --warm-up-time 1 --measurement-time 2 --sample-size 30
 ```
+
+## Absent-player departure liveness admission — session 737
+
+Existing [#636](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/636)
+owns this finite server-work obligation at base `ce43c7c8`.
+`InMemoryDatabase::remove_player_from_room` no longer acquires the liveness
+write lock for a missing room or absent member. It still holds the room write
+lock while checking membership and applying `Room::remove_player`.
+Absent-member removal still prunes stale readiness, including duplicate entries.
+Real removal takes both locks before changing membership, clocks or accounting.
+It adds one membership lookup. No API, wire value or lifecycle result changes.
+Rust, .NET and Godot clients need no changes for that reason.
+
+The original lock-wait regression fails in Nextest `4c744b4c`: even a missing
+room waits behind held liveness. The actual-removal cancellation control passes
+on that source. Candidate `ac7071c8` passes both new controls. All-feature
+`67c358d2` passes all six new and existing expiry, readiness and storage-fence
+controls. The absent-member control retains legitimate readiness and removes
+two stale entries. It preserves player values, authority, room state, both
+clocks and departure accounting. The real-removal control cancels before the
+second lock, checks unchanged state, then completes a retry with the exact
+removed record, authority clearing, readiness pruning and one counted departure.
+
+The `player_removal` Criterion group measures full public calls through a
+current-thread Tokio runtime. Fixtures contain one room with one or sixteen
+players. Successful-call setup restores the removed member outside timing.
+The original creator's authority is cleared on the first removal; steady-state
+successful samples measure ordinary departures. No-op timing starts from an
+empty readiness list; the separate regression covers stale-readiness repair.
+
+Two saved-executable pairs run original then candidate on CPU 0, without
+concurrent builds. Each cell uses one-second warm-up, two-second measurement
+and thirty samples. This host is Linux ARM64 with Rust 1.94.0. All point
+estimates below are nanoseconds, including normalized microsecond output.
+Every measured cell is retained; no earlier pilot was discarded.
+
+| Full public call / player count | Original 1 | Candidate 1 | Original 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| missing_room/1 | 786.48 | 672.41 | 697.64 | 694.74 |
+| absent_member/1 | 732.66 | 753.99 | 752.30 | 693.61 |
+| removed/1 | 2642.90 | 2380.70 | 2601.40 | 2226.60 |
+| missing_room/16 | 710.71 | 671.28 | 698.78 | 675.96 |
+| absent_member/16 | 741.08 | 705.07 | 764.99 | 694.83 |
+| removed/16 | 2377.10 | 2219.40 | 2223.00 | 2208.40 |
+
+The sixteen-player absent-member cells decrease from 741.08 to 705.07 ns and
+764.99 to 694.83 ns. The one-player absent-member cell is slower in the first
+pair and faster in the second. Missing-room cells decrease in both pairs, but
+some differences are small. Successful-removal controls vary. These samples
+do not establish a general latency, throughput, allocation, process-memory or
+whole-node capacity gain. The deterministic resource gain is one write lock
+instead of two for absent departures, with no wait behind unrelated liveness
+work while retaining the room write lock. No contention timing is claimed.
+
+```bash
+bash scripts/dev-loop.sh --all-features \
+  absent_player_removal_skips_liveness_and_preserves_room_state \
+  player_removal_waits_for_liveness_before_commit_and_survives_cancellation \
+  remove_player_from_room_refreshes_last_activity \
+  test_remove_player_from_room_prunes_ready_players \
+  every_activity_path_refreshes_monotonic_liveness \
+  readiness_storage_lease_blocks_room_invalidation_until_commit
+cargo bench --locked --bench game_room_count --no-run
+# Save each revision's executable, then run original/candidate twice in order.
+taskset -c 0 <saved-executable> --bench player_removal \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30
+```
+
+Saved binaries, complete timing logs, source snapshots, CPU details and test
+logs remain in ignored `progress/session-737`. Independent source review finds
+no blocking issue. This accepts a finite locking improvement only. Broader
+optimization and whole-node capacity criteria in #636 remain open.
+
+## Game-start storage validation
+
+The game-start coordinator passes sorted player IDs to
+`InMemoryDatabase::finalize_room_game`. Storage now uses that slice directly
+when the IDs are strictly increasing. Arbitrary-order storage calls still
+sort a copy and reject duplicates. Both paths check the count and exact
+membership. Storage rejects stale, already-finalized and missing-room
+requests before acquiring the liveness write lock. A valid start holds the
+room lock from validation through commit and acquires the liveness lock
+before changing readiness, lobby state or either activity clock.
+
+The lock-wait regression fails at `e8589948` (Nextest `9c8a4394`). The
+allocation ceiling also fails on that revision for sorted rosters of 17, 64
+and 255 players in both readiness-storage states (Nextest `79b7e2f6`). The
+candidate passes ten storage and concurrent game-start controls (Nextest
+`c90d5cbf`), both allocation tests (Nextest `8c6d59b9`), and five live
+WebSocket cases for mesh, Direct, mixed-version, host departure and late-join
+plans (Nextest `071c7737`).
+
+At 255 sorted players with prepared readiness storage, the measured call
+goes from two allocations totaling 4,240 bytes to one allocation of 176 bytes.
+The roster copy accounts for 4,080 bytes. The boxed storage future increases
+by 16 bytes, which also adds 16 bytes to the small-room and unsorted cases
+without changing their allocation counts.
+
+The `room_finalization` Criterion group times the public storage call on an
+ARM64 Linux host. It uses one room at a time and creates a fresh lobby
+outside each timed successful call. The unsorted case rotates the ordered
+roster by one position. Each run uses CPU 0, a one-second warm-up, a
+two-second measurement window and 30 samples. Pair 1 runs original then
+candidate. Pair 2 reverses the run order. All point estimates are in
+microseconds.
+
+| Storage call / player count | Original 1 | Candidate 1 | Original 2 | Candidate 2 |
+| --- | ---: | ---: | ---: | ---: |
+| Stale authority / 16 | 1.4326 | 1.0349 | 1.4058 | 1.0603 |
+| Sorted success / 16 | 4.7453 | 4.5002 | 4.9239 | 5.2962 |
+| Unsorted success / 16 | 4.9313 | 5.3804 | 5.1181 | 4.9785 |
+| Stale authority / 255 | 6.2396 | 1.1678 | 6.1495 | 1.1476 |
+| Sorted success / 255 | 11.906 | 11.818 | 13.214 | 14.899 |
+| Unsorted success / 255 | 15.263 | 15.545 | 15.458 | 17.471 |
+
+Stale authority decisions take 25–28% less time at 16 players and 81% less
+at 255. Successful start estimates vary. Both runs show higher estimates for
+the 255-player unsorted control. These figures measure storage calls on one
+host. The capacity targets in #636 still require live load measurements.
+
+```bash
+cargo bench --locked --bench game_room_count --no-run
+# Set saved_executable to a saved binary and run_dir to a fresh result directory.
+CRITERION_HOME="$run_dir" taskset -c 0 "$saved_executable" --bench room_finalization \
+  --warm-up-time 1 --measurement-time 2 --sample-size 30 --noplot
+```
+
+Saved binaries, full timing reports and allocation logs are in ignored
+`progress/session-738`.

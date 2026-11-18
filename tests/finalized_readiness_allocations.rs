@@ -121,11 +121,11 @@ async fn finalized_readiness_projection_copies_only_ready_identities() {
     );
 }
 
-/// #636: complete game starts reuse prepared readiness storage at both buffer boundaries.
+/// #636: game starts reuse sorted membership and prepared readiness storage.
 async fn finalization_reuses_readiness_storage_and_inline_members() {
     let mut excess = Vec::new();
     for count in [1_u8, 2, 15, 16, 17, 64, 255] {
-        for prepared in [false, true] {
+        for (prepared, sorted) in [(false, false), (true, false), (false, true), (true, true)] {
             let database = InMemoryDatabase::new();
             let room = database
                 .create_room(
@@ -159,7 +159,10 @@ async fn finalization_reuses_readiness_storage_and_inline_members() {
             let before = database.get_room_by_id(&room.id).await.unwrap().unwrap();
             let expected_order: Vec<_> = before.players.keys().copied().collect();
             let mut expectation = FinalizeRoomGameExpectation::from_room(&before);
-            expectation.members.reverse();
+            expectation.members.sort_unstable();
+            if !sorted {
+                expectation.members.rotate_left(1);
+            }
             let original = expectation.clone();
             let region = stats_alloc::Region::new(ALLOCATOR);
             let outcome = database
@@ -167,7 +170,7 @@ async fn finalization_reuses_readiness_storage_and_inline_members() {
                 .await
                 .unwrap();
             let stats = region.change();
-            println!("FINALIZATION_PROFILE count={count} prepared={prepared} stats={stats:?}");
+            println!("FINALIZATION_PROFILE count={count} prepared={prepared} sorted={sorted} stats={stats:?}");
             assert_eq!(outcome, FinalizeRoomGameOutcome::Finalized);
             assert_eq!(expectation, original);
             let after = database.get_room_by_id(&room.id).await.unwrap().unwrap();
@@ -194,15 +197,13 @@ async fn finalization_reuses_readiness_storage_and_inline_members() {
                     .game_finalized_at,
                 after.game_finalized_at
             );
-            let ceiling =
-                repeated_stats.allocations + usize::from(count > 16) + usize::from(!prepared);
+            let buffers = usize::from(!sorted && count > 16) + usize::from(!prepared);
+            let ceiling = repeated_stats.allocations + buffers;
             let byte_ceiling = repeated_stats.bytes_allocated
-                + (usize::from(count > 16) + usize::from(!prepared))
-                    * usize::from(count)
-                    * std::mem::size_of::<Uuid>();
+                + buffers * usize::from(count) * std::mem::size_of::<Uuid>();
             assert_eq!(stats.reallocations, 0, "count={count} prepared={prepared}");
             if stats.allocations > ceiling || stats.bytes_allocated > byte_ceiling {
-                excess.push((count, prepared, ceiling, stats));
+                excess.push((count, prepared, sorted, ceiling, stats));
             }
         }
     }
