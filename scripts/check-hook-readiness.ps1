@@ -117,8 +117,9 @@ if ($WorkflowTools) {
         }
     }
 
-    if (Test-Path -LiteralPath ".markdownlint-version") {
-        $requiredMarkdownlint = (Get-Content -LiteralPath ".markdownlint-version" -Raw).Trim()
+    $manifest = Get-Content -LiteralPath (Join-Path $repoRoot "package.json") -Raw | ConvertFrom-Json -AsHashtable
+    $requiredMarkdownlint = $manifest["devDependencies"]?["markdownlint-cli2"]
+    if ($requiredMarkdownlint -match '^[0-9]+\.[0-9]+\.[0-9]+$') {
         $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2"
         if ($IsWindows) {
             $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2.cmd"
@@ -126,16 +127,16 @@ if ($WorkflowTools) {
 
         if (Test-Path -LiteralPath $localMarkdownlint) {
             $version = (& $localMarkdownlint --version 2>$null) -join "`n"
-            if ($version -match [regex]::Escape($requiredMarkdownlint)) {
+            if ($version -match '([0-9]+\.[0-9]+\.[0-9]+)' -and $Matches[1] -eq $requiredMarkdownlint) {
                 Ok "Pinned markdownlint-cli2 $requiredMarkdownlint is installed locally."
             } else {
-                Warn "Local markdownlint-cli2 version does not match .markdownlint-version ($requiredMarkdownlint)."
+                Warn "Local markdownlint-cli2 version does not match package.json ($requiredMarkdownlint)."
             }
         } else {
             Warn "Pinned markdownlint-cli2 is not installed locally. Run npm ci before local CI checks."
         }
     } else {
-        Warn ".markdownlint-version is missing."
+        Warn "package.json must pin markdownlint-cli2 to an exact version."
     }
 }
 

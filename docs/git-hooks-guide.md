@@ -181,13 +181,7 @@ inside git hooks.
 Install the pinned version locally:
 
 ```bash
-npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-```
-
-Or install the pinned version globally:
-
-```bash
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+npm ci
 ```
 
 ## Troubleshooting

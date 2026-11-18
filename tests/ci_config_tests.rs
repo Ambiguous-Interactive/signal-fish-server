@@ -5271,18 +5271,18 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
     // Supply-chain hardening policy:
     //   - No npx runtime downloads
     //   - No Docker latest fallback for markdownlint
-    //   - Enforce pinned markdownlint version via .markdownlint-version
+    //   - Enforce pinned markdownlint version via package.json
     let root = repo_root();
     let script = root.join("scripts/check-markdown.sh");
     let content = read_file(&script);
     // Presence checks assert against the live view (the script's header comment
-    // names `.markdownlint-version`); the npx/docker MUST-NOT-appear checks below
+    // names `package.json`); the npx/docker MUST-NOT-appear checks below
     // stay on raw `content`.
     let content_live = strip_comment_lines(&content);
 
     assert!(
-        content_live.contains(".markdownlint-version"),
-        "check-markdown.sh must read required version from .markdownlint-version.\n\
+        content_live.contains(r#"require("./package.json").devDependencies["markdownlint-cli2"]"#),
+        "check-markdown.sh must read the exact markdownlint-cli2 pin from package.json.\n\
          Missing pinned version reference in {}",
         script.display()
     );
@@ -5628,27 +5628,20 @@ fn test_git_hook_skill_external_code_sample_links_exist() {
 }
 
 #[test]
-fn test_markdownlint_version_file_exists_and_is_semver() {
+fn test_markdownlint_manifest_pins_the_locked_version() {
     let root = repo_root();
-    let version_file = root.join(".markdownlint-version");
-
-    assert!(
-        version_file.exists(),
-        ".markdownlint-version must exist to pin markdownlint-cli2 version for local automation."
-    );
-
-    let version = read_file(&version_file).trim().to_string();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&read_live_file(&root.join("package.json")))
+            .expect("package.json must parse as JSON");
+    let version = manifest["devDependencies"]["markdownlint-cli2"]
+        .as_str()
+        .expect("package.json must pin markdownlint-cli2");
     let semver_pattern = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("valid semver regex");
     assert!(
-        semver_pattern.is_match(&version),
-        ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
-         Found: '{version}'"
+        semver_pattern.is_match(version),
+        "package.json must pin markdownlint-cli2 to a plain version (X.Y.Z). Found: '{version}'"
     );
 
-    // scripts/check-markdown.sh requires the installed markdownlint-cli2 to
-    // equal .markdownlint-version exactly, and prefers the npm-installed
-    // runner. The two pins must move in the same commit or the Markdownlint
-    // CI job fails on version mismatch.
     let lock: serde_json::Value =
         serde_json::from_str(&read_live_file(&root.join("package-lock.json")))
             .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
@@ -5660,10 +5653,7 @@ fn test_markdownlint_version_file_exists_and_is_semver() {
         .expect("package-lock.json must install markdownlint-cli2");
     assert_eq!(
         version, installed,
-        ".markdownlint-version ({version}) and the npm-installed markdownlint-cli2 \
-         ({installed}) must match exactly.\n\
-         Fix: bump both pins in the same commit (package.json + `npm install` \
-         + .markdownlint-version)."
+        "The package.json markdownlint-cli2 pin ({version}) must match the lockfile ({installed})."
     );
 }
 
@@ -25649,7 +25639,7 @@ fn test_hook_readiness_default_is_required_hook_health_only() {
         content.contains("[switch]$WorkflowTools")
             && content[..workflow_tools_gate].contains("$requiredTools = @(\"git\", \"pwsh\")")
             && content[workflow_tools_gate..].contains("$optionalTools = @(")
-            && content[workflow_tools_gate..].contains(".markdownlint-version"),
+            && content[workflow_tools_gate..].contains("package.json"),
         "scripts/check-hook-readiness.ps1 default mode must check only required hook \
          health. Optional workflow tools and markdownlint version probes belong behind \
          -WorkflowTools so native hook setup stays fast and dependency-light."

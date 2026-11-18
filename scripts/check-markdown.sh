@@ -8,7 +8,7 @@
 # Security note:
 #   This script intentionally avoids npx auto-download and Docker "latest"
 #   fallbacks. It requires a pinned markdownlint-cli2 version from
-#   .markdownlint-version for reproducible and safer local execution.
+#   package.json for reproducible and safer local execution.
 #
 # Usage:
 #   ./scripts/check-markdown.sh         # Check all markdown files
@@ -32,7 +32,6 @@ NC='\033[0m' # No Color
 
 MARKDOWNLINT_MODE=""
 MARKDOWNLINT_CMD=()
-MARKDOWNLINT_VERSION_FILE="$REPO_ROOT/.markdownlint-version"
 MARKDOWNLINT_AUTO_INSTALL="${MARKDOWNLINT_AUTO_INSTALL:-1}"
 MARKDOWNLINT_BOOTSTRAP_PREFIX="${MARKDOWNLINT_BOOTSTRAP_PREFIX:-${XDG_CACHE_HOME:-$HOME/.cache}/signal-fish-server/npm-global}"
 MARKDOWNLINT_BOOTSTRAP_BIN="$MARKDOWNLINT_BOOTSTRAP_PREFIX/bin/markdownlint-cli2"
@@ -115,14 +114,11 @@ print_markdownlint_install_help() {
     echo "  $MARKDOWNLINT_BOOTSTRAP_BIN"
 }
 
-if [ ! -f "$MARKDOWNLINT_VERSION_FILE" ]; then
-    echo -e "${RED}ERROR: Missing $MARKDOWNLINT_VERSION_FILE${NC}"
-    echo ""
-    echo "Expected a pinned markdownlint-cli2 version file for reproducible linting."
+if ! REQUIRED_MARKDOWNLINT_VERSION="$(node -p 'require("./package.json").devDependencies["markdownlint-cli2"]')" ||
+    [[ ! "$REQUIRED_MARKDOWNLINT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo -e "${RED}ERROR: Use Node.js and pin markdownlint-cli2 to an exact version in package.json${NC}"
     exit 2
 fi
-
-REQUIRED_MARKDOWNLINT_VERSION="$(tr -d '[:space:]' < "$MARKDOWNLINT_VERSION_FILE")"
 
 if ! detect_markdownlint_runner; then
     if is_truthy "$MARKDOWNLINT_AUTO_INSTALL" && try_auto_install_markdownlint; then

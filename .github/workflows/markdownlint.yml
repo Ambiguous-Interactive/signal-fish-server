@@ -6,7 +6,7 @@
 # Configuration:
 #   - .markdownlint.json: Rule configuration
 #   - .markdownlintignore: Files/directories to exclude
-#   - .markdownlint-version: pinned markdownlint-cli2 version
+#   - package.json and package-lock.json: pinned markdownlint-cli2 version
 #
 # Runs on:
 #   - Pull requests to main (only for changed Markdown files)
@@ -20,7 +20,6 @@ on:
       - "**.md"
       - ".markdownlint.json"
       - ".markdownlintignore"
-      - ".markdownlint-version"
       - "package.json"
       - "package-lock.json"
       - "scripts/check-markdown.sh"

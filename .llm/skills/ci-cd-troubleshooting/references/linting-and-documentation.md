@@ -216,7 +216,7 @@ grep -r '^```$' --include="*.md" .
 **B. Run markdown linting locally:**
 
 ```bash
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+npm ci
 ./scripts/check-markdown.sh  # Check ALL files, not just docs/
 ```
 
