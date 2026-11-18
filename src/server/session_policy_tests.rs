@@ -7694,7 +7694,8 @@ async fn endpoint_lookup_failure_stops_refresh_preparation() {
                     transport: Transport::Direct,
                     host: Some(player)
                 },
-                guard
+                guard,
+                &crate::coordination::ConnectionCloseSignal::detached(),
             )
             .await
     );
@@ -7813,6 +7814,8 @@ async fn metadata_route_fence_survives_cancellation_and_duplicate_direct_updates
             futures_util::poll!(&mut removal).is_pending(),
             "direct_host={direct_host}"
         );
+        let close = server.connection_manager.close_signal_for(&host).unwrap();
+        assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
         caller.abort();
         assert!(caller.await.unwrap_err().is_cancelled());
         assert!(futures_util::poll!(&mut removal).is_pending());
@@ -7834,6 +7837,92 @@ async fn metadata_route_fence_survives_cancellation_and_duplicate_direct_updates
         let trailing = host_rx.try_recv();
         assert!(matches!(trailing, Err(mpsc::error::TryRecvError::Empty)));
     }
+}
+
+/// #826: a Direct host's endpoint lookup must release the room on source close.
+#[tokio::test(start_paused = true)]
+async fn direct_endpoint_lookup_stops_on_sender_close() {
+    let server = create_server_with_session(SessionConfig {
+        default_topology: Topology::Host,
+        enable_webrtc: false,
+        enable_direct: true,
+        ..SessionConfig::default()
+    })
+    .await;
+    let (host, mut host_rx) = register_client(&server).await;
+    let (peer, mut peer_rx) = register_client(&server).await;
+    let direct = NegotiatedProtocol {
+        version: 3,
+        transports: vec![Transport::Relay, Transport::Direct],
+        topologies: vec![Topology::Relay, Topology::Host],
+    };
+    for player in [host, peer] {
+        server.set_client_protocol(&player, direct.clone());
+    }
+    let room = finalized_db_room_with(&server, host, &[(peer, "Peer")]).await;
+    publish_room_members(&server, &room, &[host, peer]).await;
+    let initial = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    server
+        .handle_provide_connection_info(&host, initial.clone())
+        .await;
+    let members = server.database.get_room_players(&room).await.unwrap();
+    server
+        .emit_session_plan(&room, &finalized("host-game", members, Some(host)))
+        .await;
+    let old_plan = expect_plan(&mut peer_rx, "peer").await;
+    let _ = expect_plan(&mut host_rx, "host").await;
+    assert_eq!(old_plan.transport, Transport::Direct);
+    assert_eq!(old_plan.host, Some(host));
+    let initial_active_plan = server.active_session_plan(&room);
+
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<crate::database::InMemoryDatabase>()
+        .unwrap();
+    database.pause_next_get_room_by_id_for_test();
+    let message = crate::protocol::ClientMessage::ProvideConnectionInfo {
+        connection_info: ConnectionInfo::Direct {
+            host: "192.0.2.20".into(),
+            port: 8888,
+        },
+    };
+    let dispatch = server.handle_client_message(&host, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(
+        Duration::from_secs(1),
+        database.wait_for_paused_get_room_by_id_for_test(),
+    )
+    .await
+    .expect("the host reached the endpoint lookup with the room guard");
+    let close = server.connection_manager.close_signal_for(&host).unwrap();
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closing the host must cancel the pending endpoint lookup");
+    let next_publication = timeout(
+        Duration::from_millis(10),
+        server.message_coordinator.lock_room_event_mutation(&room),
+    )
+    .await
+    .expect("pending endpoint lookup must release the room guard");
+    let stored = server
+        .database
+        .get_room_by_id(&room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.players[&host].connection_info, Some(initial));
+    assert_eq!(server.active_session_plan(&room), initial_active_plan);
+    let peer_tail = peer_rx.try_recv();
+    assert!(matches!(peer_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let host_tail = host_rx.try_recv();
+    assert!(matches!(host_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(next_publication);
 }
 
 /// #1555: route loss during a Direct endpoint lookup cannot reach the duplicate write.
