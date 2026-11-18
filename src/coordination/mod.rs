@@ -2397,7 +2397,8 @@ pub trait MessageCoordinator: Send + Sync {
     /// neither delay the teardown nor reclassify the close as a
     /// slow-consumer disconnect — the close itself, with its lifecycle
     /// reason, is the authoritative signal. Returns whether the message was
-    /// enqueued.
+    /// enqueued. The in-memory coordinator also skips the send if it cannot
+    /// read the route immediately.
     ///
     /// CONTRACT: implementations must not wait on recipient queue capacity.
     /// There is deliberately no default implementation — falling back to the

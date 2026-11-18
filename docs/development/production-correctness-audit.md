@@ -19247,3 +19247,27 @@ rooms use eight allocations and 3,312 bytes in both revisions. An early
 repair added 56 bytes to the ordinary reply future. The final repair
 keeps the close-aware wait outside that future. These probes measure
 allocations only. A11 and #826 remain open.
+
+### F390 — A close advisory waited for routing
+
+At `735e6937` under #826, a WebRTC refusal could exhaust the socket's
+reply budget and park on the coordinator's client-map read. The handler
+held the source lifecycle and had yet to request close `4006`. The
+advisory is optional, including during shutdown and player removal.
+
+Run `bash scripts/dev-loop.sh --all-features
+signal_error_reply_exhaustion_closes_without_waiting_for_advisory_route`.
+The Linux ARM64 test holds the real client-map writer. The message router
+on the base misses a 10 ms paused-clock deadline (Nextest `dc6d791b`).
+With the repair (`4db6c74d`), it requests close and releases the lifecycle
+before the writer unlocks. The control with routing available still queues
+the advisory and requests the same close reason.
+
+The in-memory coordinator skips unconditional pre-close sends when its
+route read cannot start immediately. The close request can proceed.
+Membership changes still need the authoritative route. Clients can see a
+queued advisory before close, the close by itself, or a transport failure.
+A partition can delay observation. Reconnect still requires the room and
+pending record on their home server. Another or restarted server declines
+recovery when it lacks that state. The regression measures the ordering of
+these steps with a paused clock. The broader audit remains open.

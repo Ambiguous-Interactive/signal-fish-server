@@ -2511,6 +2511,72 @@ async fn signal_refusal_waiting_for_reply_routing_stops_on_sender_close() {
     assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
 }
 
+/// #826: the advisory may be skipped, but the close must proceed.
+#[tokio::test(start_paused = true)]
+async fn signal_error_reply_exhaustion_closes_without_waiting_for_advisory_route() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let config = ServerConfig {
+        rate_limit_config: RateLimitConfig {
+            max_inbound_error_replies: 1,
+            ..RateLimitConfig::default()
+        },
+        ..ServerConfig::default()
+    };
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        config,
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    for (player, rx) in [(alice, &mut alice_rx), (bob, &mut bob_rx)] {
+        server.handle_client_message(&player, refusal(player)).await;
+        assert_eq!(
+            error_code(recv(rx).await.as_ref()),
+            Some(ErrorCode::SignalTargetNotFound)
+        );
+    }
+
+    let bob_close = server.connection_manager.close_signal_for(&bob).unwrap();
+    server.handle_client_message(&bob, refusal(bob)).await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::RateLimitExceeded),
+        "an available route carries the advisory"
+    );
+    assert_eq!(
+        bob_close.requested_reason(),
+        Some(crate::coordination::CloseReason::InboundRateLimited)
+    );
+
+    let alice_close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let routes = coordinator.local_clients.write().await;
+    timeout(
+        Duration::from_millis(10),
+        server.handle_client_message(&alice, refusal(alice)),
+    )
+    .await
+    .expect("the exhausting signal must finish while the advisory route is locked");
+    assert_eq!(
+        alice_close.requested_reason(),
+        Some(crate::coordination::CloseReason::InboundRateLimited)
+    );
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routes);
+}
+
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_signal_caller_preserves_admitted_offer() {

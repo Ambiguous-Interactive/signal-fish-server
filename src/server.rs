@@ -5484,7 +5484,13 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         player_id: &PlayerId,
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<bool> {
-        let handle = { self.local_clients.read().await.get(player_id).cloned() };
+        let handle = {
+            let Ok(clients) = self.local_clients.try_read() else {
+                tracing::debug!(%player_id, "Farewell skipped: client routes are busy");
+                return Ok(false);
+            };
+            clients.get(player_id).cloned()
+        };
         let Some(handle) = handle else {
             tracing::debug!(%player_id, "Farewell skipped: player not registered with coordinator");
             return Ok(false);
