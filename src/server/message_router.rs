@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 #[cfg(signal_fish_repository_tests)]
 use tokio::sync::Notify;
 
+use crate::coordination::ConnectionCloseSignal;
 use crate::protocol::{ClientMessage, PlayerId, RoomOperationRequest, ServerMessage};
 
 use super::{ClientLifecycle, EnhancedGameServer, TransportStatusUpdate};
@@ -69,6 +70,7 @@ pub(super) fn disarm_transport_status_delivery_pause(player_id: &crate::protocol
 /// has released its lifecycle gate.
 struct TransportStatusFanOut {
     sender: PlayerId,
+    source_close: ConnectionCloseSignal,
     room_id: crate::protocol::RoomId,
     membership_generation: uuid::Uuid,
     recipients: Vec<PlayerId>,
@@ -78,9 +80,9 @@ struct TransportStatusFanOut {
 impl TransportStatusFanOut {
     /// Deliver outside the lifecycle and room gates. Sender and recipient
     /// membership are revalidated at queue commit, and each leg
-    /// re-checks the recipient's negotiated v3 capability, so a membership
-    /// change or a reconnect identity swap that lands after the snapshot
-    /// cannot direct this v3-only frame at a v2 connection.
+    /// re-checks the sender's close state and the recipient's negotiated v3
+    /// capability. An evicted sender can retain its room assignment until
+    /// teardown completes.
     async fn deliver(&self, server: &EnhancedGameServer) {
         // Deliver to all peers concurrently: one slow room member costs this
         // event one slow-consumer window, never `(N - 1)` windows. Recipient
@@ -155,14 +157,16 @@ impl TransportStatusFanOut {
             server.client_supports_v3(recipient)
                 && server
                     .connection_manager
-                    .membership_generation_in_room(&self.sender, &self.room_id)
+                    .live_membership_generation_in_room(&self.sender, &self.room_id)
                     == Some(self.membership_generation)
         };
         server
             .message_coordinator
-            .send_to_player_in_room_if(
+            .send_to_player_in_room_from_socket_if(
                 recipient,
                 &self.room_id,
+                &self.sender,
+                &self.source_close,
                 Arc::clone(&self.message),
                 &delivery_is_current,
             )
@@ -211,22 +215,27 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        {
-            let _source_guard = match source_lifecycle.as_ref() {
-                Some(lifecycle) => Some(lifecycle.lock().await),
-                None => None,
+        let report_close = if let Some(lifecycle) = &source_lifecycle {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+            else {
+                return;
             };
-            if source_lifecycle.as_ref().is_some_and(|lifecycle| {
-                lifecycle.player_id() != *player_id
-                    || !self
-                        .connection_manager
-                        .lifecycle_matches(player_id, lifecycle)
-            }) {
+            if !self
+                .refresh_socket_activity(player_id, lifecycle, &close)
+                .await
+            {
                 return;
             }
-            self.record_client_activity(player_id);
-            self.maybe_update_last_seen(player_id).await;
-        }
+            matches!(message, ClientMessage::TransportStatus { .. }).then_some(close)
+        } else {
+            if matches!(message, ClientMessage::TransportStatus { .. }) {
+                return;
+            }
+            self.refresh_client_activity(player_id).await;
+            None
+        };
         #[cfg(all(test, signal_fish_repository_tests))]
         if let Some((_, pause)) = SOCKET_DISPATCH_PAUSES.remove(player_id) {
             pause.reached.notify_one();
@@ -561,8 +570,10 @@ impl EnhancedGameServer {
                 transport,
                 connected,
             } => {
-                self.handle_transport_status(player_id, transport, connected, source_lifecycle)
-                    .await;
+                if let (Some(lifecycle), Some(close)) = (source_lifecycle, report_close) {
+                    self.handle_transport_status(player_id, transport, connected, lifecycle, close)
+                        .await;
+                }
             }
         }
     }
@@ -638,18 +649,14 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
-        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        lifecycle: Arc<ClientLifecycle>,
+        source_close: ConnectionCloseSignal,
     ) {
-        let Some(lifecycle) =
-            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
-        else {
-            return;
-        };
         let server = Arc::clone(self);
         let player_id = *player_id;
         let transaction = tokio::spawn(async move {
             server
-                .transport_status_owned(&player_id, transport, connected, lifecycle)
+                .transport_status_owned(&player_id, transport, connected, lifecycle, source_close)
                 .await;
         });
         if let Err(error) = transaction.await {
@@ -663,19 +670,29 @@ impl EnhancedGameServer {
         transport: crate::protocol::Transport,
         connected: bool,
         lifecycle: Arc<ClientLifecycle>,
+        source_close: ConnectionCloseSignal,
     ) {
-        let _report_guard = lifecycle.lock_transport_reports().await;
-        let lifecycle_guard = lifecycle.lock().await;
+        let Some((_report_guard, lifecycle_guard)) = source_close
+            .while_open(async {
+                let report_guard = lifecycle.lock_transport_reports().await;
+                let lifecycle_guard = lifecycle.lock().await;
+                (report_guard, lifecycle_guard)
+            })
+            .await
+        else {
+            return;
+        };
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
                 .lifecycle_matches(player_id, &lifecycle)
+            || source_close.requested_reason().is_some()
         {
             return;
         }
 
         let Some(fan_out) = self
-            .handle_transport_status_under_lifecycle(player_id, transport, connected)
+            .handle_transport_status_under_lifecycle(player_id, transport, connected, source_close)
             .await
         else {
             return;
@@ -698,6 +715,7 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         transport: crate::protocol::Transport,
         connected: bool,
+        source_close: ConnectionCloseSignal,
     ) -> Option<TransportStatusFanOut> {
         use crate::protocol::Transport;
 
@@ -776,22 +794,18 @@ impl EnhancedGameServer {
         // (including its first report). No room ⇒ nothing to fan out — the
         // generation-scoped state was still recorded above.
         let room_id = room_id?;
-
-        /*
-            Snapshot membership without excluding other read-only signaling work.
-            Queue-commit checks retain delivery truth after this fence releases.
-        */
-        let _room_snapshot_guard = self.message_coordinator.lock_room_signal(&room_id).await;
+        let _room_snapshot_guard = source_close
+            .while_open(self.message_coordinator.lock_room_signal(&room_id))
+            .await?;
 
         // Cheap non-consuming preflight before the fallible/O(room) membership
         // snapshot below. The consuming check still happens after recipient
         // resolution, immediately before dispatch, so failed lookups and empty
         // fan-outs do not burn a slot while already-over-budget clients cannot
         // keep forcing room scans.
-        if self
-            .rate_limiter
-            .check_signal_available(player_id)
-            .await
+        if source_close
+            .while_open(self.rate_limiter.check_signal_available(player_id))
+            .await?
             .is_err()
         {
             tracing::debug!(
@@ -807,10 +821,9 @@ impl EnhancedGameServer {
         // control-plane budget. Production exposes coordinator routing; the
         // database fallback keeps lightweight/distributed test coordinators
         // compatible without weakening the production source-route check.
-        let recipients: Vec<PlayerId> = match self
-            .message_coordinator
-            .routed_player_ids(&room_id)
-            .await
+        let recipients: Vec<PlayerId> = match source_close
+            .while_open(self.message_coordinator.routed_player_ids(&room_id))
+            .await?
         {
             Ok(Some(routed)) => {
                 if !routed.contains(player_id) {
@@ -824,9 +837,9 @@ impl EnhancedGameServer {
                     })
                     .collect()
             }
-            Ok(None) => match self
-                .transport_status_fallback_recipients(player_id, &room_id)
-                .await
+            Ok(None) => match source_close
+                .while_open(self.transport_status_fallback_recipients(player_id, &room_id))
+                .await?
             {
                 Ok(members) => members,
                 Err(err) => {
@@ -880,7 +893,11 @@ impl EnhancedGameServer {
         // bounded by other means — size cap, connection/room caps, best-effort
         // sends — so this only closes the control-plane consistency gap with
         // `Signal`.)
-        if self.rate_limiter.check_signal(player_id).await.is_err() {
+        if source_close
+            .while_open(self.rate_limiter.check_signal(player_id))
+            .await?
+            .is_err()
+        {
             tracing::debug!(
                 %player_id,
                 ?transport,
@@ -890,6 +907,9 @@ impl EnhancedGameServer {
             return None;
         }
 
+        let membership_generation = self
+            .connection_manager
+            .live_membership_generation_in_room(player_id, &room_id)?;
         let message = Arc::new(ServerMessage::PeerTransportStatus {
             peer_id: *player_id,
             transport,
@@ -897,10 +917,9 @@ impl EnhancedGameServer {
         });
         Some(TransportStatusFanOut {
             sender: *player_id,
+            source_close,
             room_id,
-            membership_generation: self
-                .connection_manager
-                .membership_generation_in_room(player_id, &room_id)?,
+            membership_generation,
             recipients,
             message,
         })

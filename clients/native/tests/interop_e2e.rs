@@ -351,17 +351,16 @@ async fn run_three_clients(
     let created = creator.await_event("room_created", EVENT_TIMEOUT).await;
     let room_code = str_field(&created, "room_code").to_string();
 
-    let mut clients: Vec<ClientProcess> = vec![creator];
-    for (index, name) in CLIENT_NAMES.iter().enumerate().skip(1) {
+    let spawn_joiner = |index: usize| {
         let client_args: Vec<&str> = configs[index]
             .extra_args
             .iter()
             .copied()
             .chain(["--success-release-file", success_release_path])
             .collect();
-        clients.push(spawn_client(
+        spawn_client(
             &ClientSpec {
-                name,
+                name: CLIENT_NAMES[index],
                 server_url: &urls[index],
                 game_name,
                 join_code: Some(&room_code),
@@ -371,16 +370,32 @@ async fn run_three_clients(
                 extra_args: &client_args,
             },
             workdir.path(),
-        ));
-    }
+        )
+    };
+    let mut clients = [creator, spawn_joiner(1), spawn_joiner(2)];
 
     // A local SCTP send completion is not remote delivery. Hold all clients
     // until every process independently reports complete success criteria, so
     // sibling teardown cannot erase an outstanding exchange obligation.
-    for client in &mut clients {
-        client
-            .await_event("success_criteria_met", CLIENT_EXIT_TIMEOUT)
-            .await;
+    let completion = await_client_observations(clients.each_mut().map(await_client_success)).await;
+    if completion != [true; 3] {
+        let reports = clients.each_ref().map(|client| {
+            let player_id = client
+                .events
+                .iter()
+                .find(|event| event["event"] == "room_joined")
+                .and_then(|event| event["player_id"].as_str())
+                .unwrap_or("<unassigned>");
+            format!(
+                "{} player_id={player_id}\n{}",
+                client.name,
+                client.diagnostics()
+            )
+        });
+        panic!(
+            "three-client {default_topology} success gates failed ({completion:?});\n{}",
+            reports.join("\n")
+        );
     }
     tokio::time::sleep(Duration::from_millis(350)).await;
     for client in &mut clients {

@@ -48,6 +48,7 @@ use std::future::Future;
 
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use rtc::peer_connection::transport::RTCSctpAssociationStats;
 use serde_json::json;
 use signal_fish_server::protocol::{
     ClientMessage, DeliveryReportPayload, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer,
@@ -56,13 +57,14 @@ use signal_fish_server::protocol::{
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::peer_connection::RTCPeerConnectionState;
+use webrtc::data_channel::DataChannel;
+use webrtc::peer_connection::{PeerConnection, RTCPeerConnectionState};
 
 use crate::accountability::{DeliveryAccountability, GameDataDisposition};
 use crate::cli::Cli;
 use crate::deadline::Deadline;
 use crate::engine::{
-    CandidateApplyResult, Engine, EngineEvent, Negotiation, NegotiationCompletion,
+    CandidateApplyResult, ChannelProfile, Engine, EngineEvent, Negotiation, NegotiationCompletion,
     NegotiationReply, SelectedPairProbeResult, RELIABLE_LABEL, UNRELIABLE_LABEL,
 };
 use crate::events::{emit, Event, PlanPeer, SignalKind};
@@ -326,6 +328,58 @@ fn is_exchange_probe(peer: PlayerId, label: &str, text: &str) -> bool {
     payload.get("from").and_then(serde_json::Value::as_str) == Some(peer.to_string().as_str())
         && payload.get("channel").and_then(serde_json::Value::as_str) == Some(label)
         && payload.get("seq").and_then(serde_json::Value::as_f64) == Some(0.0)
+}
+
+/// Replace only an exact new Godot unreliable send retired before selection.
+fn expired_untransmitted_probe(
+    before: &RTCSctpAssociationStats,
+    after: &RTCSctpAssociationStats,
+) -> bool {
+    let Some(next_id) = before
+        .last_enqueued_message
+        .map_or(Some(0), |prior| prior.message_id.checked_add(1))
+    else {
+        return false;
+    };
+    after.last_abandoned_message.is_some_and(|abandoned| {
+        after.last_enqueued_message == Some(abandoned)
+            && before.messages_abandoned.checked_add(1) == Some(after.messages_abandoned)
+            && abandoned.message_id == next_id
+            && abandoned.stream_id == 3
+            && abandoned.unordered
+            && abandoned.reliability == "lifetime"
+            && !abandoned.transmission_selected
+    })
+}
+
+/// Run only for the interop probe. The enclosing physical-link send owns the
+/// original deadline and aborts on retirement. A sample with uncertain
+/// provenance leaves the ordinary one-shot outcome in force.
+async fn send_godot_interop_probe(
+    pc: &dyn PeerConnection,
+    channel: &dyn DataChannel,
+    text: &str,
+) -> webrtc::error::Result<()> {
+    const MAX_ATTEMPTS: usize = 8;
+    let Some(sctp) = pc.sctp().await else {
+        return channel.send_text(text).await;
+    };
+    for _ in 1..MAX_ATTEMPTS {
+        let before = sctp.association_stats().await.ok().flatten();
+        channel.send_text(text).await?;
+        let Some(before) = before else {
+            return Ok(());
+        };
+        // Sample after the one-millisecond lifetime. The transport must
+        // record the abandonment itself before a replacement is permitted.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let after = sctp.association_stats().await.ok().flatten();
+        if !after.is_some_and(|after| expired_untransmitted_probe(&before, &after)) {
+            return Ok(());
+        }
+        tracing::info!("Replace a Godot interop probe expired before transmission");
+    }
+    channel.send_text(text).await
 }
 
 /// Logical exchange obligations survive transport and membership teardown.
@@ -2447,6 +2501,11 @@ impl Orchestrator<'_> {
                     self.my_id, label
                 );
                 let deadline = self.exchange_send_deadline(peer).await?;
+                let expiry_retry = (self.cli.interop_resend_expired_probe
+                    && self.cli.channel_profile == ChannelProfile::Godot
+                    && label == UNRELIABLE_LABEL)
+                    .then(|| self.engine.exchange_peer_connection(peer))
+                    .flatten();
                 #[cfg(test)]
                 let hook = self.exchange_send_hook.clone();
                 if let Some(result) = self
@@ -2461,7 +2520,14 @@ impl Orchestrator<'_> {
                             if let Some(hook) = hook {
                                 return hook.lock().unwrap()(channel, text);
                             }
-                            Box::pin(async move { channel.send_text(&text).await })
+                            Box::pin(async move {
+                                if let Some(pc) = expiry_retry {
+                                    send_godot_interop_probe(pc.as_ref(), channel.as_ref(), &text)
+                                        .await
+                                } else {
+                                    channel.send_text(&text).await
+                                }
+                            })
                                 as std::pin::Pin<
                                     Box<dyn Future<Output = webrtc::error::Result<()>> + Send>,
                                 >
@@ -4429,6 +4495,7 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
     use clap::Parser;
+    use rtc::peer_connection::transport::{RTCSctpAssociationStats, RTCSctpOutboundMessageInfo};
     use tokio::time::{Duration, Instant};
 
     use serde_json::json;
@@ -4441,6 +4508,81 @@ mod tests {
     use crate::cli::Cli;
     use crate::deadline::Deadline;
     use crate::wire;
+
+    #[test]
+    fn expired_godot_probe_requires_exact_unsent_abandonment() {
+        let probe = RTCSctpOutboundMessageInfo {
+            message_id: 2,
+            stream_id: 3,
+            stream_generation: 8,
+            sequence_number: 0,
+            unordered: true,
+            reliability: "lifetime",
+            transmission_selected: false,
+        };
+        let before = RTCSctpAssociationStats {
+            flow_control: None,
+            data_chunks_received: 0,
+            data_chunks_emitted: 1,
+            data_chunks_retransmitted: 0,
+            messages_abandoned: 1,
+            last_enqueued_message: Some(RTCSctpOutboundMessageInfo {
+                message_id: 1,
+                ..probe
+            }),
+            first_abandoned_message: None,
+            last_abandoned_message: None,
+            data_chunks_accepted: 0,
+            data_chunks_refused: 0,
+            data_chunks_redundant: 0,
+            sack_chunks_received: 0,
+            retransmission_timeouts: 0,
+            acknowledgement_timeouts: 0,
+            fast_retransmissions: 0,
+        };
+        let after = |message| RTCSctpAssociationStats {
+            messages_abandoned: 2,
+            last_enqueued_message: Some(message),
+            last_abandoned_message: Some(message),
+            ..before
+        };
+        assert!(super::expired_untransmitted_probe(&before, &after(probe)));
+        for message in [
+            RTCSctpOutboundMessageInfo {
+                transmission_selected: true,
+                ..probe
+            },
+            RTCSctpOutboundMessageInfo {
+                stream_id: 2,
+                ..probe
+            },
+            RTCSctpOutboundMessageInfo {
+                reliability: "retransmits",
+                ..probe
+            },
+            RTCSctpOutboundMessageInfo {
+                message_id: 1,
+                ..probe
+            },
+        ] {
+            assert!(!super::expired_untransmitted_probe(
+                &before,
+                &after(message)
+            ));
+        }
+        let intervening_send = RTCSctpAssociationStats {
+            last_enqueued_message: Some(RTCSctpOutboundMessageInfo {
+                message_id: 3,
+                ..probe
+            }),
+            ..after(probe)
+        };
+        assert!(!super::expired_untransmitted_probe(
+            &before,
+            &intervening_send
+        ));
+        assert!(!super::expired_untransmitted_probe(&before, &before));
+    }
 
     use super::{
         advance_authenticate_handshake, apply_selected_pair_probes_before_run_deadline,

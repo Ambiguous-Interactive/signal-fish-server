@@ -1839,6 +1839,17 @@ impl Engine {
             .cloned()
     }
 
+    /// Capture the same physical connection as the selected exchange channel.
+    pub(crate) fn exchange_peer_connection(
+        &self,
+        peer: PlayerId,
+    ) -> Option<Arc<dyn PeerConnection>> {
+        self.peers
+            .get(&peer)
+            .map(|link| Arc::clone(&link.pc))
+            .or_else(|| self.pending_negotiations.get(&peer)?.pc.clone())
+    }
+
     /// Prefer active state; setup exposes sends only for an established link.
     fn send_link(&self, peer: PlayerId) -> Option<SendLink<'_>> {
         if let Some(link) = self.peers.get(&peer) {

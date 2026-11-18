@@ -577,6 +577,13 @@ pub fn spawn_client_with_windows(
     }
     if spec.exchange {
         command.arg("--exchange");
+        if spec
+            .extra_args
+            .windows(2)
+            .any(|args| args == ["--channel-profile", "godot"])
+        {
+            command.arg("--interop-resend-expired-probe");
+        }
     }
     if let Some(payload) = spec.relay_payload {
         command.arg("--relay-payload").arg(payload);

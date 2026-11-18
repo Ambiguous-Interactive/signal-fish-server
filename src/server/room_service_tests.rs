@@ -5814,7 +5814,7 @@ async fn seated_connection_rejects_foreign_transitions_and_preserves_its_route()
             .current_relay_stamp_in_room(&player, &fixture.room_id);
         let generation = server
             .connection_manager
-            .membership_generation_in_room(&player, &fixture.room_id);
+            .live_membership_generation_in_room(&player, &fixture.room_id);
         fixture
             .database
             .fail_get_room_players_for_test(fail_baseline);
@@ -5887,7 +5887,7 @@ async fn seated_connection_rejects_foreign_transitions_and_preserves_its_route()
         assert_eq!(
             server
                 .connection_manager
-                .membership_generation_in_room(&player, &fixture.room_id),
+                .live_membership_generation_in_room(&player, &fixture.room_id),
             generation
         );
         let routed = server

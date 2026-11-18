@@ -1600,6 +1600,109 @@ async fn signal_delivered_to_same_room_peer_preserving_payload() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn closing_inbound_signal_stops_waiting_for_activity_gate() {
+    let server = create_test_server().await;
+    let (alice, _alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.client_lifecycle(&alice).unwrap();
+    let activity_gate = lifecycle.lock().await;
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &alice,
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::nil(),
+            signal: json!({"Offer": "waiting for activity admission"}),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&alice, crate::coordination::CloseReason::Unregistered));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closing signal must return while activity admission stays blocked");
+    drop(activity_gate);
+    let queued = bob_rx.try_recv();
+    assert!(
+        matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+        "a canceled signal left a frame for the recipient: {queued:?}"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn inbound_signal_activity_write_respects_socket_close() {
+    for closing in [false, true] {
+        let server = create_test_server().await;
+        let (alice, _alice_rx) = register_client(&server).await;
+        let (bob, mut bob_rx) = register_client(&server).await;
+        let room_id = create_db_room(&server, alice).await;
+        for player in [alice, bob] {
+            server.set_client_protocol(&player, v3_webrtc());
+            server.assign_client_to_room(&player, room_id).await;
+        }
+        let database = server
+            .database
+            .as_any()
+            .downcast_ref::<InMemoryDatabase>()
+            .unwrap();
+        let storage = database.hold_room_writes_for_test().await;
+        let lifecycle = server.client_lifecycle(&alice).unwrap();
+        let payload = json!({"Offer": "waiting for room activity storage"});
+        let generation = uuid::Uuid::from_u128(1);
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &alice,
+            ClientMessage::Signal {
+                to: bob,
+                generation,
+                signal: payload.clone(),
+            },
+            Arc::clone(&lifecycle),
+        ));
+        assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+        let mut teardown = Box::pin(lifecycle.lock());
+        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
+        let queued = bob_rx.try_recv();
+        assert!(
+            matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+            "a signal reached the recipient before the activity write: {queued:?}"
+        );
+
+        let bound = Duration::from_millis(10);
+        if closing {
+            assert!(server
+                .connection_manager
+                .request_close_for(&alice, crate::coordination::CloseReason::Unregistered));
+            timeout(bound, dispatch)
+                .await
+                .expect("closing signal must return while the activity write stays blocked");
+            let _guard = timeout(bound, teardown)
+                .await
+                .expect("teardown can take the lifecycle");
+            drop(storage);
+            let queued = bob_rx.try_recv();
+            assert!(
+                matches!(queued, Err(mpsc::error::TryRecvError::Empty)),
+                "a canceled signal left a frame for the recipient: {queued:?}"
+            );
+        } else {
+            drop(teardown);
+            drop(storage);
+            timeout(bound, dispatch)
+                .await
+                .expect("live signal finishes after storage unlocks");
+            assert!(matches!(
+                recv(&mut bob_rx).await.as_ref(),
+                ServerMessage::Signal { from, generation: actual, signal }
+                    if *from == alice && *actual == generation && *signal == payload
+            ));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn signal_from_a_replaced_connection_lifecycle_is_discarded() {
     let server = create_test_server().await;
     let (alice, _alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
@@ -2148,6 +2251,663 @@ async fn signal_dispatch_waits_for_room_plan_publication_gate() {
             if *from == alice && signal == &json!({ "Offer": "plan-gated" })
     ));
     assert_silent(&mut alice_rx).await;
+}
+
+/// #826: closing the sender must release its lifecycle before publication resumes.
+async fn assert_close_cancels_room_gate_wait(transport_report: bool) {
+    let server = create_test_server().await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let publication = server
+        .message_coordinator
+        .lock_room_event_mutation(&room)
+        .await;
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting for the room plan"}),
+        }
+    };
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if transport_report {
+        // Reports run in an owned task. Wait for the task to record the report
+        // under the lifecycle lock before checking the publication wait.
+        timeout(Duration::from_secs(1), async {
+            while server.metrics.p2p_established.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("report task records the WebRTC connection before waiting");
+    }
+    let next_lifecycle_user = lifecycle.lock_owned();
+    tokio::pin!(next_lifecycle_user);
+    assert!(futures_util::poll!(&mut next_lifecycle_user).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before the room publication gate opens");
+    assert!(futures_util::poll!(&mut next_lifecycle_user).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(publication);
+}
+
+#[tokio::test(start_paused = true)]
+async fn offer_waiting_for_room_publication_stops_on_sender_close() {
+    assert_close_cancels_room_gate_wait(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_room_publication_stops_on_sender_close() {
+    assert_close_cancels_room_gate_wait(true).await;
+}
+
+/// #826: the routing read can wait even after the publication read succeeds.
+async fn assert_close_cancels_routing_admission(transport_report: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let routing_writer = coordinator.room_routing_gates.write(room).await;
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting for routing"}),
+        }
+    };
+
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if transport_report {
+        timeout(Duration::from_secs(1), async {
+            while server.metrics.p2p_established.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the owned report task must start");
+    }
+    let publication = coordinator.lock_room_event_mutation(&room);
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(&mut publication).is_pending());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before the routing writer releases its lock");
+    assert!(futures_util::poll!(&mut publication).is_ready());
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routing_writer);
+}
+
+#[tokio::test(start_paused = true)]
+async fn offer_waiting_for_routing_admission_stops_on_sender_close() {
+    assert_close_cancels_routing_admission(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_routing_admission_stops_on_sender_close() {
+    assert_close_cancels_routing_admission(true).await;
+}
+
+/// #826: a pending metadata write must release the sender before admission resumes.
+async fn assert_peer_metadata_admission_observes_close(block_routing: bool, close_source: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (player, mut receiver, room) = register_refusal_source(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+    let close = server.connection_manager.close_signal_for(&player).unwrap();
+    let update = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    let (publication, routing) = if block_routing {
+        (None, Some(coordinator.room_routing_gates.write(room).await))
+    } else {
+        (
+            Some(coordinator.lock_room_event_mutation(&room).await),
+            None,
+        )
+    };
+    let dispatch = server.handle_client_message(
+        &player,
+        ClientMessage::ProvideConnectionInfo {
+            connection_info: update.clone(),
+        },
+    );
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let lock = Arc::clone(&lifecycle).lock_owned();
+            tokio::pin!(lock);
+            if futures_util::poll!(&mut lock).is_pending() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the metadata update owns the lifecycle while waiting");
+
+    if close_source {
+        assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+        timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .expect("closing the sender must release pending metadata admission");
+        let teardown = timeout(Duration::from_millis(10), lifecycle.lock_owned())
+            .await
+            .expect("teardown can take the lifecycle before admission resumes");
+        drop(teardown);
+        if block_routing {
+            let next_publication = timeout(
+                Duration::from_millis(10),
+                coordinator.lock_room_event_mutation(&room),
+            )
+            .await
+            .expect("canceled metadata admission must release the room gate");
+            drop(next_publication);
+        }
+    } else {
+        assert!(timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .is_err());
+    }
+    let snapshot = server
+        .database
+        .get_room_by_id(&room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.players[&player].connection_info.is_none());
+    drop(routing);
+    drop(publication);
+
+    if !close_source {
+        timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("a live metadata update must finish once admission opens");
+        let snapshot = server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.players[&player].connection_info, Some(update));
+    }
+    let tail = receiver.try_recv();
+    assert!(matches!(
+        tail,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_waiting_for_publication_stops_on_sender_close() {
+    assert_peer_metadata_admission_observes_close(false, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_waiting_for_routing_stops_on_sender_close() {
+    assert_peer_metadata_admission_observes_close(true, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_peer_metadata_waits_for_publication_and_routing() {
+    assert_peer_metadata_admission_observes_close(false, false).await;
+    assert_peer_metadata_admission_observes_close(true, false).await;
+}
+
+/// #826: close must cancel routing waits on both sides of capacity reservation.
+async fn assert_close_cancels_delivery_routing(transport_report: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let metrics = &coordinator.metrics;
+    let pause =
+        transport_report.then(|| super::message_router::arm_transport_status_delivery_pause(alice));
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        for _ in 0..bob_rx.max_capacity() {
+            assert!(coordinator
+                .send_to_player_in_room(&bob, &room, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap());
+        }
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "waiting to commit"}),
+        }
+    };
+    let canceled_before = metrics
+        .websocket_deliveries_canceled
+        .load(Ordering::Relaxed);
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if let Some(pause) = &pause {
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("the report must finish admission");
+    } else {
+        timeout(Duration::from_secs(1), async {
+            while metrics
+                .websocket_backpressure_events
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the offer must wait for recipient capacity");
+    }
+
+    let routing_writer = coordinator.room_routing_gates.write(room).await;
+    if let Some(pause) = &pause {
+        super::message_router::disarm_transport_status_delivery_pause(&alice);
+        pause.release.notify_one();
+    } else {
+        let freed_slot = bob_rx.try_recv().unwrap();
+        assert!(matches!(freed_slot.as_ref(), ServerMessage::Pong));
+        timeout(Duration::from_secs(1), async {
+            while bob_rx.capacity() != 0 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the offer must own the available slot before routing resumes");
+    }
+    assert!(
+        timeout(Duration::from_millis(1), &mut dispatch)
+            .await
+            .is_err(),
+        "live delivery waits for the held routing writer"
+    );
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("closed sender must finish before delivery routing resumes");
+    let publication = coordinator.lock_room_event_mutation(&room);
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(&mut publication).is_ready());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    if !transport_report {
+        assert_eq!(
+            bob_rx.capacity(),
+            1,
+            "cancel must release the reserved slot"
+        );
+        for _ in 1..bob_rx.max_capacity() {
+            let queued = bob_rx.try_recv().unwrap();
+            assert!(matches!(queued.as_ref(), ServerMessage::Pong));
+        }
+    }
+    assert_eq!(
+        metrics
+            .websocket_deliveries_canceled
+            .load(Ordering::Relaxed),
+        canceled_before + u64::from(!transport_report),
+        "record a canceled delivery only when there was an attempt"
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routing_writer);
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_waiting_for_delivery_routing_stops_on_sender_close() {
+    assert_close_cancels_delivery_routing(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn reserved_offer_waiting_for_delivery_routing_stops_on_sender_close() {
+    assert_close_cancels_delivery_routing(false).await;
+}
+
+/// A recipient timeout commits its close before route pruning can wait.
+async fn assert_sender_close_releases_recipient_cleanup(transport_report: bool) {
+    use crate::coordination::CloseReason;
+
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let alice_close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let bob_close = server.connection_manager.close_signal_for(&bob).unwrap();
+    for _ in 0..bob_rx.max_capacity() {
+        assert!(coordinator
+            .send_to_player_in_room(&bob, &room, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap());
+    }
+    let message = if transport_report {
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        }
+    } else {
+        ClientMessage::Signal {
+            to: bob,
+            generation: uuid::Uuid::new_v4(),
+            signal: json!({"Offer": "recipient timeout"}),
+        }
+    };
+    let dispatch = server.handle_client_message(&alice, message);
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(Duration::from_secs(1), async {
+        while coordinator
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            == 0
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("delivery must wait for recipient capacity");
+
+    let routing_writer = coordinator.room_routing_gates.write(room).await;
+    let mut recipient_close = bob_close.subscribe();
+    assert_eq!(
+        timeout(
+            coordinator.slow_consumer_timeout + Duration::from_secs(1),
+            recipient_close.closed()
+        )
+        .await
+        .expect("full recipient queue must time out"),
+        Some(CloseReason::SlowConsumer)
+    );
+    assert!(coordinator.local_clients.read().await.contains_key(&bob));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+
+    assert!(alice_close.request_close(CloseReason::Unregistered));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("sender must finish before recipient route pruning can resume");
+    let publication = coordinator.lock_room_event_mutation(&room);
+    tokio::pin!(publication);
+    assert!(futures_util::poll!(&mut publication).is_ready());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+
+    drop(routing_writer);
+    timeout(Duration::from_secs(1), async {
+        while coordinator.local_clients.read().await.contains_key(&bob) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the timed-out physical route must still be pruned");
+    for _ in 0..bob_rx.max_capacity() {
+        let queued = bob_rx.try_recv().unwrap();
+        assert!(matches!(queued.as_ref(), ServerMessage::Pong));
+    }
+    assert_eq!(
+        coordinator
+            .metrics
+            .websocket_slow_consumer_disconnects
+            .load(Ordering::Relaxed),
+        1
+    );
+    assert_eq!(
+        coordinator
+            .metrics
+            .websocket_messages_dropped
+            .load(Ordering::Relaxed),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn offer_recipient_cleanup_releases_closing_sender() {
+    assert_sender_close_releases_recipient_cleanup(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn transport_report_recipient_cleanup_releases_closing_sender() {
+    assert_sender_close_releases_recipient_cleanup(true).await;
+}
+
+/// #826: a pending refusal must release the source lifecycle on close.
+#[tokio::test(start_paused = true)]
+async fn signal_refusal_waiting_for_reply_budget_stops_on_sender_close() {
+    let server = create_test_server_with_signal_limits(600, 1).await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    let entries = server.rate_limiter.hold_player_entries_for_test().await;
+    let dispatch = server.handle_client_message(&alice, refusal(alice));
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    // The same pending refusal waits for the budget while its source is live.
+    let live_dispatch = server.handle_client_message(&bob, refusal(bob));
+    tokio::pin!(live_dispatch);
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+    timeout(Duration::from_millis(10), &mut dispatch)
+        .await
+        .expect("closed sender must finish before the refusal budget unlocks");
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+    drop(entries);
+
+    live_dispatch.await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    server.handle_client_message(&bob, refusal(bob)).await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalRateLimited)
+    );
+    assert!(server.rate_limiter.check_signal_error(&alice).await.is_ok());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+}
+
+#[tokio::test(start_paused = true)]
+async fn signal_refusal_waiting_for_reply_routing_stops_on_sender_close() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    // Neither the refusal limiter nor the outbound queues are contended.
+    let routes = coordinator.local_clients.write().await;
+    let closing_dispatch = server.handle_client_message(&alice, refusal(alice));
+    let live_dispatch = server.handle_client_message(&bob, refusal(bob));
+    tokio::pin!(closing_dispatch, live_dispatch);
+    assert!(timeout(Duration::from_millis(1), &mut closing_dispatch)
+        .await
+        .is_err());
+    assert!(timeout(Duration::from_millis(1), &mut live_dispatch)
+        .await
+        .is_err());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), &mut closing_dispatch)
+        .await
+        .expect("closed sender must finish before the reply route unlocks");
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+    drop(routes);
+
+    live_dispatch.await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::SignalTargetNotFound)
+    );
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    let bob_tail = bob_rx.try_recv();
+    assert!(matches!(bob_tail, Err(mpsc::error::TryRecvError::Empty)));
+}
+
+/// #826: the advisory may be skipped, but the close must proceed.
+#[tokio::test(start_paused = true)]
+async fn signal_error_reply_exhaustion_closes_without_waiting_for_advisory_route() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let config = ServerConfig {
+        rate_limit_config: RateLimitConfig {
+            max_inbound_error_replies: 1,
+            ..RateLimitConfig::default()
+        },
+        ..ServerConfig::default()
+    };
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        config,
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let refusal = |player| ClientMessage::Signal {
+        to: player,
+        generation: uuid::Uuid::new_v4(),
+        signal: json!({"Offer": "self signal"}),
+    };
+
+    for (player, rx) in [(alice, &mut alice_rx), (bob, &mut bob_rx)] {
+        server.handle_client_message(&player, refusal(player)).await;
+        assert_eq!(
+            error_code(recv(rx).await.as_ref()),
+            Some(ErrorCode::SignalTargetNotFound)
+        );
+    }
+
+    let bob_close = server.connection_manager.close_signal_for(&bob).unwrap();
+    server.handle_client_message(&bob, refusal(bob)).await;
+    assert_eq!(
+        error_code(recv(&mut bob_rx).await.as_ref()),
+        Some(ErrorCode::RateLimitExceeded),
+        "an available route carries the advisory"
+    );
+    assert_eq!(
+        bob_close.requested_reason(),
+        Some(crate::coordination::CloseReason::InboundRateLimited)
+    );
+
+    let alice_close = server.connection_manager.close_signal_for(&alice).unwrap();
+    let lifecycle = server.connection_manager.client_lifecycle(&alice).unwrap();
+    let routes = coordinator.local_clients.write().await;
+    timeout(
+        Duration::from_millis(10),
+        server.handle_client_message(&alice, refusal(alice)),
+    )
+    .await
+    .expect("the exhausting signal must finish while the advisory route is locked");
+    assert_eq!(
+        alice_close.requested_reason(),
+        Some(crate::coordination::CloseReason::InboundRateLimited)
+    );
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    let alice_tail = alice_rx.try_recv();
+    assert!(matches!(alice_tail, Err(mpsc::error::TryRecvError::Empty)));
+    drop(routes);
 }
 
 #[tokio::test]
@@ -8904,6 +9664,93 @@ async fn signaling_eligibility_uses_one_current_protocol_profile() {
     }
     server.disconnect_client(&player).await;
     assert!(!server.supports_webrtc_signaling(&player));
+}
+
+/// #826: source eviction during target backpressure cancels the offer.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn parked_offer_is_canceled_when_source_is_evicted() {
+    let server = create_test_server().await;
+    let (alice, alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+    let room = server.get_client_room(&alice).await.unwrap();
+    let coordinator = server.message_coordinator.as_ref();
+    let close = server.connection_manager.close_signal_for(&alice).unwrap();
+    for (player, capacity) in [
+        (alice, alice_rx.max_capacity()),
+        (bob, bob_rx.max_capacity()),
+    ] {
+        for _ in 0..capacity {
+            assert!(coordinator
+                .send_to_player_in_room(&player, &room, Arc::new(ServerMessage::Pong))
+                .await
+                .unwrap());
+        }
+    }
+
+    let eviction = coordinator.send_to_player_in_room(&alice, &room, Arc::new(ServerMessage::Pong));
+    tokio::pin!(eviction);
+    assert!(futures_util::poll!(&mut eviction).is_pending());
+    // Give the offer a later capacity deadline than the source's eviction.
+    tokio::time::advance(Duration::from_millis(100)).await;
+    let offer_server = Arc::clone(&server);
+    let offer = tokio::spawn(async move {
+        offer_server
+            .handle_client_message(
+                &alice,
+                ClientMessage::Signal {
+                    to: bob,
+                    generation: uuid::Uuid::new_v4(),
+                    signal: json!({"Offer": "from a closing socket"}),
+                },
+            )
+            .await;
+    });
+    timeout(Duration::from_secs(1), async {
+        while server
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Relaxed)
+            < 2
+        {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the offer waits for target capacity");
+
+    assert!(!eviction.await.unwrap());
+    assert_eq!(
+        close.requested_reason(),
+        Some(crate::coordination::CloseReason::SlowConsumer)
+    );
+    assert_eq!(
+        coordinator
+            .routed_player_pair(&room, &alice, &bob)
+            .await
+            .unwrap(),
+        Some([false, true])
+    );
+    assert_eq!(server.get_client_room(&alice).await, Some(room));
+    let publication_gate = timeout(
+        Duration::from_millis(10),
+        coordinator.lock_room_event_mutation(&room),
+    )
+    .await
+    .expect("source eviction must release room publication before target capacity returns");
+    drop(publication_gate);
+    assert_eq!(bob_rx.len(), bob_rx.max_capacity());
+    for _ in 0..bob_rx.max_capacity() {
+        assert!(matches!(
+            recv(&mut bob_rx).await.as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    offer.await.unwrap();
+    let tail = bob_rx.try_recv();
+    assert!(
+        matches!(tail, Err(mpsc::error::TryRecvError::Empty)),
+        "target received an offer after the server evicted its sender: {tail:?}"
+    );
 }
 
 /// A closed target queue must not turn an admitted offer into silent success.

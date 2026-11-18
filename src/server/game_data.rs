@@ -113,6 +113,12 @@ impl EnhancedGameServer {
         {
             return;
         }
+        let Some(source_close) = self.connection_manager.close_signal_for(player_id) else {
+            return;
+        };
+        if source_close.requested_reason().is_some() {
+            return;
+        }
 
         // Per-entry size cap, checked before any storage or fan-out
         // (issue #524). The entry is stored verbatim and broadcast to every
@@ -148,15 +154,28 @@ impl EnhancedGameServer {
             return;
         };
 
-        let room_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
-        let route = match self
-            .message_coordinator
-            .lease_room_member_route(&room_id, player_id)
+        // Admission only reads state. A closing source can release its
+        // lifecycle here, before a write or Direct plan publication starts.
+        let Some((room_event_guard, route)) = source_close
+            .while_open(async {
+                let guard = self
+                    .message_coordinator
+                    .lock_room_event_mutation(&room_id)
+                    .await;
+                let route = self
+                    .message_coordinator
+                    .lease_room_member_route(&room_id, player_id)
+                    .await;
+                (guard, route)
+            })
             .await
-        {
+        else {
+            return;
+        };
+        if source_close.requested_reason().is_some() {
+            return;
+        }
+        let route = match route {
             Ok(route) => route,
             Err(error) => {
                 drop(room_event_guard);
@@ -197,9 +216,10 @@ impl EnhancedGameServer {
                     connection_info,
                     stored,
                     room_event_guard,
+                    &source_close,
                 )
                 .await;
-            if !result {
+            if !result && source_close.requested_reason().is_none() {
                 let _ = self
                     .send_error_to_player(
                         player_id,

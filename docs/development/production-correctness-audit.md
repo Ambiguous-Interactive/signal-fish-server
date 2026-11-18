@@ -54,8 +54,8 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502 |
-| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100 |
+| A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
+| A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
 | A13 | `server/game_data.rs`, `coordination/mod.rs` | JSON/binary GameData, acceptance stamps, exact recipient set, fan-out | Initial; embedded gameplay crossing reconnect repaired in F123; exact JSON sizing in F228 |
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
@@ -18969,3 +18969,443 @@ Markdown, doc consistency and shared-renderer anchor control `31818e09` pass.
 Independent review finds no blocker in the code, fault evidence or scope.
 One mistyped policy-package path is a tool failure, not red evidence; the
 corrected policy run is recorded in the original issue. No p95 is claimed.
+
+### F382 — An evicted peer could still publish a transport report
+
+At base `4ab2b729` under #826, the server validates a delayed WebRTC report
+against the sender's room generation. A full sender queue can trigger a
+slow-consumer close and route removal while socket teardown still retains that
+generation. The observer then receives a fallback report from the evicted
+peer. The deterministic router test reproduced the exact unexpected frame on
+Linux ARM64 (Nextest `fabf38da`).
+
+The server checks the sender's physical close state and room generation when
+it prepares fan-out and when each recipient attempts delivery. At queue
+commit, the coordinator pins the sender's seated route and holds its close
+state through the synchronous enqueue. Only delivery with a known sender uses
+this fence. Generic conditional sends can still deliver frames about peers
+without local routes.
+Two paused-clock histories trigger the production slow-consumer deadline.
+One resumes the report after eviction. The other parks it on a full observer
+queue before eviction and releases capacity afterward. Removing only the
+close-state check reproduces the stale frame in the parked case
+(Nextest `f50d3fbf`). Both cases confirm that live reports reach the observer
+and that eviction removes the reporter's route before its assignment clears.
+A separate coordinator test requests close after the last eligibility check.
+The first patch still queues the report (Nextest `21ff03d1`).
+The matched ARM64 live-report allocation probe finds the same allocation
+counts across 80 samples at room sizes from 2 to 255. The sender-aware future
+adds 48 bytes per recipient, or 12,192 bytes in the 255-player case
+(443,526 to 455,718 bytes per warm report). Generic delivery retains its
+one-allocation contract (Nextest `ad1c496e` and `85f68c49`). The probe does
+not measure CPU cost.
+
+The same server process owns the close state, room generation, and outbound
+queue. A close request that wins the queue commit race cancels the report.
+Peers can still observe frames queued before the close request, and a network
+partition can delay close detection. A reconnected sender has a fresh
+membership generation. A process restart loses the room and its transient
+reports. During a partition, a replacement process must refuse a restore
+against unavailable room state. A second room authority cannot infer the
+first server's membership or transport status.
+
+Rust and .NET track the advisory event for known peers. Godot exposes the
+same advisory event to scripts. Live events use the existing formats and
+require no client changes. The tests cover local queue admission. They do
+not establish client delivery under every network schedule or complete A12.
+
+### F383 — An evicted sender could still forward a parked WebRTC offer
+
+At base `5a739213` under #826, the server checks both routes before it waits
+for target capacity. Another delivery can close and remove the sender's route
+while the offer waits. When the target drains its queue, the old path still
+enqueues the offer. Linux ARM64 reproduced the unexpected frame with the real
+router and coordinator (Nextest `a293038c`). The source still had a room
+assignment, and the coordinator had already removed its route.
+
+The coordinator now checks the source route and orders the target queue commit
+against the source's physical close request. The source lifecycle guard and
+room publication fence still order subsequent signals, room changes, and plan
+updates. The server forwards an offer only while the source is routed and open.
+If the source stays live and the target misses its capacity deadline, the
+server still closes the target and returns the existing delivery error.
+
+These guarantees require one authoritative process for the room. After the
+server detects a partition and starts closing the source, the server declines
+pending signals from that socket. A peer can still receive a frame that entered
+its queue before the close, and clients still check the generation against
+their current plan. A reconnect can send new signals from its restored route.
+A restart loses in-memory room state and its pending queues. A different
+instance must refuse signaling or recovery without that room state.
+
+Rust and .NET still receive an opaque payload and generation. Godot still
+emits the same signaling event to its mesh and scripts. The server repair
+requires no client change. Queue admission does not prove network delivery or
+complete the A11 audit.
+
+### F384 — A closed sender kept WebRTC delivery waiting for capacity
+
+At base `7bdc6265` under #826, an offer waiting on a full target queue kept
+the room publication gate after the sender's slow-consumer close. A parked
+transport report also kept waiting after its reporter closed. The server
+checked the sender again only when target capacity returned or expired.
+
+Two paused-clock Linux ARM64 tests drive the client-message router and the
+production slow-consumer deadline. The sender closes while the target queue
+stays full and has a later deadline. The original code fails the 10 ms bound
+on room-gate release for the offer (Nextest `0d076aa5`) and on completion for
+the report (Nextest `9ebc29ab`). Both still check that the target receives no
+stale frame.
+
+The in-memory coordinator now waits for sender close alongside target
+capacity. It releases the reservation wait when close wins and still checks
+sender routing and close state at queue commit. A live sender keeps the
+existing target timeout and plan-before-signal ordering. The close watcher
+uses one additional allocation only when target capacity is full.
+
+Matched warm ARM64 allocation probes keep the same allocation counts. A
+signal to one peer uses 3,440 bytes, up from 3,424. A report to 254 peers uses
+459,782 bytes, up from 455,718. Both add 16 bytes per target. An unboxed
+watcher added 352 bytes per target, so the server allocates the watcher only
+when it has to wait. These probes do not measure CPU cost.
+
+The first PR head raised 255-member publication cost from 549,641 to
+557,833 bytes and failed the hosted allocation gate. Returning the original
+shutdown watch future directly restores 549,641 bytes on ARM64 without
+changing the gate. Nextest `0d70afa8` passes all four allocation probes.
+
+One server process owns the sender's close state and room publication.
+Until that process detects a broken link, a partition can still delay
+signaling up to the normal capacity deadline. Frames queued before close may
+still reach peers. Reconnect uses the restored route and its current plan.
+A restart loses the room and its queues, so another process must refuse
+recovery without authoritative room state. Rust, .NET, and Godot keep their
+existing signaling and transport-report contracts. This covers local queue
+waiting in A11 and A12. The broader audit remains open.
+
+### F385 — A closing sender waited behind room publication
+
+At base `d956efd0` under #826, the WebRTC offer and transport-report handlers
+held the source lifecycle lock while waiting for the room publication gate.
+Close canceled target queue waits. At this earlier wait, both handlers stayed
+parked and blocked socket teardown from taking the lifecycle lock.
+
+Two paused-clock Linux ARM64 tests call the client-message router with an
+exclusive room publication in progress. They confirm that the live command
+holds the lifecycle lock, request source close, and keep the room gate held.
+Both commands miss the 10 ms completion bound on the base (Nextest
+`f2d7d495`). Both finish within the bound after the repair, release the
+lifecycle lock, and leave both queues empty (Nextest `619c492d`).
+
+The handlers now wait for either source close or room access. When both are
+ready, observed close takes precedence. Live offers still wait for the plan,
+and an offer already queued before close can still arrive. Teardown waits for
+room access before it can capture the reconnect snapshot or change membership.
+
+One authoritative server owns the room gate, source close state, and reconnect
+snapshot. A network partition can leave the handler active until the server
+detects the close. A server restart loses that in-memory state. A different
+server without the room and reconnect record must refuse restoration. Rust,
+.NET, and Godot consume the existing signals and reports without migration.
+
+Matched warm ARM64 allocation probes (`20c95ccd`, `f7ffa645`) show unchanged
+counts and bytes. One offer uses 8 allocations and 3,440 bytes. A report to
+254 peers uses 294 allocations and 459,782 bytes. A 255-member publication
+uses 262 allocations and 549,641 bytes. CPU and throughput remain unmeasured.
+This advances A11 and A12. The broader audit remains open.
+
+### F386 — A closing sender waited for routing admission
+
+At `33bf2e13` under #826, an offer or P2P transport report could acquire the
+shared publication gate and then wait for the coordinator's separate routing
+read. Closing the sender at that point left both the sender lifecycle and
+publication gates held until the routing read resumed.
+
+Two Linux ARM64 tests hold the in-memory routing writer and submit the
+commands through the message router. Each observes a waiting publication and
+teardown, requests sender close, and keeps the routing writer held. The base
+misses the 10 ms paused-clock bound in both cases (Nextest `c921be22`). The
+repair releases both guards within the bound and leaves both queues empty.
+
+The server now observes close during routing admission. It keeps the live
+offer behind plan publication and keeps live reports in acceptance order.
+Teardown can take the sender lifecycle, then waits for the room access it
+needs to record recovery or remove the member. Delivery-side routing waits
+remain outside this change.
+
+One authoritative server owns routing and reconnect state. When it detects
+a broken link, it drops pending admission from that socket. Until detection,
+a partition can still leave the sender waiting. A frame already queued can
+arrive later. A restart loses room and reconnect state. An instance without
+that state refuses restoration. A restored socket can signal on its current
+route. Rust and .NET consume the existing generation and advisory status.
+Godot decodes the same signal and status events.
+
+ARM64 allocation probes use the same warm workload in both revisions. An
+offer uses 8 allocations and 3,320 bytes. A 255-member publication uses 262
+allocations and 537,361 bytes. Report allocations stay at 6 for one recipient
+and 294 for 254 recipients. The final close watcher adds 256 bytes per report
+in both cases, from 2,808 to 3,064 and from 429,302 to 429,558. A contended
+admission also allocates the close watcher while parked. These probes do not
+measure CPU or throughput. The broader A11 and A12 audit remains open.
+
+### F387 — A closing sender waited for delivery routing
+
+At base `840d4afb` under #826, the server could finish WebRTC admission and
+then wait again for a routing read. A transport report could wait before
+looking up its recipient. An offer could wait after reserving the recipient's
+last free slot. The offer still held the room publication and source lifecycle
+gates. Source close did not wake either read.
+
+Two Linux ARM64 tests drive the client-message router with the in-memory
+routing writer held. They check that a live delivery waits, request source
+close, and keep the writer held. Both miss the 10 ms paused-clock bound
+on the base (Nextest `dc30f507`). The server now cancels both read waits
+using the source socket's close signal. Cancellation after reservation
+releases the slot and counts one canceled attempt. A replacement socket
+cannot commit an older send. A target timeout that already closes the
+recipient still completes its route cleanup.
+
+One server owns the routing and close state. A partition can defer close
+detection. Live sends wait for the route snapshot, and peers can still
+receive frames already queued at close. Reconnect may resume only on a
+current route after the local server restores membership. Restart loses
+that in-memory authority, so another server with no recovery record refuses
+restore. Rust and .NET keep the same generation and advisory status
+semantics. Godot reads the same signal and status events.
+
+Matched warm ARM64 all-feature probes keep allocation counts. One offer uses
+3,312 bytes, down from 3,440. A report to one recipient uses 3,056 bytes, down
+from 3,184. A report to 254 recipients uses 427,526 bytes, down from 460,038.
+A 255-member publication uses the same 549,641 bytes. The first repair added
+237 watcher allocations for a 254-recipient report when Tokio deferred lock
+polling to yield. The final repair yields before its immediate routing read.
+A contended read can still allocate a watcher. CPU cost and throughput remain
+unmeasured. A11 and A12 advance. The broader audit remains open.
+
+### F388 — A closing sender waited for the signal refusal budget
+
+At base `513bf998` under #826, a rejected WebRTC signal held the source
+lifecycle while waiting for the shared player budget. Other requests and the
+periodic budget cleanup use the same lock. If the socket started closing,
+unregistration could not take the lifecycle until the budget check resumed.
+
+A Linux ARM64 router test submits two self-targeted signals with the real
+budget lock held. It closes one sender and leaves the other connected. The
+original handler misses the 10 ms paused-clock bound before the budget
+unlocks (Nextest `b5c5248c`). The handler now watches the physical socket's
+close signal while it waits for the budget. The canceled check releases the
+lifecycle without charging a refusal or queuing a reply. After the lock
+opens, the live sender receives the existing target error and spends one
+refusal slot. An admitted reply still uses its owned queue completion.
+
+One server owns the socket lifecycle and refusal budget. A partition can delay
+close detection. Live refusals still wait for the authoritative budget, and a
+reply queued before close can still reach its recipient. Reconnect takes a new
+socket lifecycle, so a canceled refusal does not follow the player ID onto a
+replacement socket. A restarted or separate server without the room's pending
+reconnect state refuses recovery. Rust, .NET and Godot use the same live error
+and disconnect events and require no migration. The wider A11 audit remains open.
+
+### F389 — A closing sender waited for the signal reply route
+
+At `bfc76dbf` under #826, a WebRTC refusal could pass both reply budgets
+and park on the coordinator's client-map read. The owned reply held the
+sender's lifecycle until the read finished, even after close was requested.
+
+On Linux ARM64, run `bash scripts/dev-loop.sh --all-features
+signal_refusal_waiting_for_reply_routing_stops_on_sender_close`. The
+test holds the real client-map writer and submits a self-targeted signal
+from each of two connected sockets. The budgets and queues have room.
+The base misses the 10 ms paused-clock deadline after the first source
+closes (Nextest `ef9b9d4c`). With the repair, the sender's dispatch and
+lifecycle become available before the writer unlocks. The live source
+still waits. It receives exactly one target refusal after unlock.
+
+The shipped in-memory coordinator now watches the physical socket's close
+signal during reply route lookup and checks the route still refers to that
+socket. It uses this path for a refusal after a target delivery failure.
+An active sender still waits for its route. An admitted reply retains delivery and
+slow-consumer cleanup. Cancellation during routing leaves budget charges
+with the closing socket. Custom coordinators can override the socket-aware
+method to cancel their own route lookup. The default preserves their send
+completion contract.
+
+One authoritative server owns the route, lifecycle and reconnect record.
+A partition can delay close detection. Clients can still receive a reply
+that entered the queue before close. A canceled route lookup does not
+follow a restored player ID. After restart or on another instance, the
+server must decline reconnect if it lacks the recovery record. Rust treats
+the last server error at disconnect as optional. .NET reports server
+errors and disconnects separately. Godot decodes the same error envelope
+and reads the close reason from the transport.
+
+The eight scoped controls pass (Nextest `057d1cb0`). Matched warm ARM64
+allocation probes (`964f7c23`, `0508e5b6`) keep healthy targeted replies
+at one allocation and 504 bytes. Live signals in 2-, 16- and 64-player
+rooms use eight allocations and 3,312 bytes in both revisions. An early
+repair added 56 bytes to the ordinary reply future. The final repair
+keeps the close-aware wait outside that future. These probes measure
+allocations only. A11 and #826 remain open.
+
+### F390 — A close advisory waited for routing
+
+At `735e6937` under #826, a WebRTC refusal could exhaust the socket's
+reply budget and park on the coordinator's client-map read. The handler
+held the source lifecycle and had yet to request close `4006`. The
+advisory is optional, including during shutdown and player removal.
+
+Run `bash scripts/dev-loop.sh --all-features
+signal_error_reply_exhaustion_closes_without_waiting_for_advisory_route`.
+The Linux ARM64 test holds the real client-map writer. The message router
+on the base misses a 10 ms paused-clock deadline (Nextest `dc6d791b`).
+With the repair (`4db6c74d`), it requests close and releases the lifecycle
+before the writer unlocks. The control with routing available still queues
+the advisory and requests the same close reason.
+
+The in-memory coordinator skips unconditional pre-close sends when its
+route read cannot start immediately. The close request can proceed.
+Membership changes still need the authoritative route. Clients can see a
+queued advisory before close, the close by itself, or a transport failure.
+A partition can delay observation. Reconnect still requires the room and
+pending record on their home server. Another or restarted server declines
+recovery when it lacks that state. The regression measures the ordering of
+these steps with a paused clock. The broader audit remains open.
+
+### F391 — A closing WebRTC sender waited for recipient cleanup
+
+At `06fd64db` under #826, a full recipient queue could pass the slow-consumer
+deadline and close the recipient. The same delivery then waited to prune
+the route. Closing the sender could leave the offer holding the source
+lifecycle and publication guards. A transport report waited in the same
+cleanup path with its report-order guard.
+
+Two Linux ARM64 tests submit an offer and a report through the message
+router, fill the recipient queue, and hold the real room routing writer.
+Both see the recipient close with the route still present. On the base,
+sender close misses the 10 ms paused-clock bound (Nextest `16f53a58`).
+The fix releases the sender before the writer unlocks. Once it unlocks,
+the pending cleanup prunes the timed-out route. Neither message enters
+the full queue.
+
+A live sender still waits for cleanup after a recipient timeout. If the
+sender closes during that wait, the server retries the prune independently.
+It matches the physical queue before removal, so a replacement route
+survives. The close and drop accounting commit once, at the timeout.
+
+Matched ARM64 probes use eight allocations and 3,312 bytes per live offer.
+Live reports to one recipient use six allocations and 3,056 bytes. Reports
+to 254 recipients use 294 allocations and 427,526 bytes. All measured live
+cells match the base (`11324313`, `50469c68`). A canceled prune can add a task
+on the timeout path. The probes do not measure its cost, CPU, or throughput.
+
+One authoritative server owns the room, route, and pending reconnect record.
+A partition can delay close detection, and a frame queued before close can
+still arrive. If a client reconnects on the home server, it uses the restored
+route and current session plan. The server declines restoration after a
+restart or on another instance without that record. A11 and A12 advance.
+The broader audit remains open.
+
+### F392 — Pending peer metadata held the closing socket lifecycle
+
+At `deb4c21d` under #826, a `ProvideConnectionInfo` command held the sender's
+lifecycle during room publication admission, route lookup, or a stored
+Direct endpoint read. An observed close could leave the command parked and
+keep teardown from acquiring the lifecycle.
+
+Three Linux ARM64 tests drive the client-message router while they hold one
+of those waits. They request close and keep the wait blocked. All three miss
+the 10 ms paused-clock bound on the base (Nextest `68a50501`). The live
+control waits for admission, then stores the exact endpoint. The repair
+releases the sender and any acquired room guard within the bound. A canceled
+update leaves the stored metadata and current Direct plan intact and adds no
+frame. Ten focused controls pass (Nextest `139fe1fc`), including an admitted
+write and an atomic Direct refresh.
+
+Live WebSockets receive the exact replacement Direct endpoint and one new
+shared plan generation. The local restart, reconnect, directional blackhole,
+and split-home controls pass (Nextest `ea60f01e`, `f0f392bd`).
+
+Matched warm ARM64 probes keep allocation counts at nine per duplicate and
+52 per changed endpoint. Allocated bytes rise from 2,448 to 2,576 for a
+duplicate and from 13,339 to 13,467 for a changed endpoint. The probes do
+not measure CPU or throughput (Nextest `570ebc35`, `40c76fdf`).
+
+The close signal cancels the read-only waits before a write or plan update.
+The server keeps admitted writes and room publications owned so metadata
+and its corresponding plan can commit in order. The authoritative home
+process still needs access to room state before it can detach the member
+and capture a reconnect record. A partition can delay close detection.
+A peer can receive a plan already queued when the sender closes. A restored
+socket uses the metadata and plan on its home server. A restart or a different
+server without the pending record must decline restoration. This advances
+A04 and A11. The broader audit remains open.
+
+### F393 — Pending transport reports held closing sockets
+
+At `0c0f4966` under #826, the server could keep a closing socket waiting
+for the lifecycle gate used by inbound activity, the per-socket report
+order, or the report's own lifecycle gate. On Linux ARM64, three router
+controls miss a 10 ms paused-clock bound while those gates stay held
+(Nextest `765c0953`, `cb1d4a5c`). The live control waits for admission
+and then records the exact transition.
+
+The server now binds the report to its physical socket before awaiting
+activity or admission. A pending report returns on close without changing
+the reported state or fallback counter. If activity persistence is pending,
+close also releases the lifecycle gate for teardown. In-memory activity or
+storage work that already completed can stand. A report already admitted
+can also retain its local state and metrics. Queue admission still checks
+the source connection and membership. The owner keeps report order even
+if the caller stops waiting. These cases pass on Linux ARM64, including the
+reconnect, ordering, eviction, and partial delivery controls (Nextest
+`cf9173e2`, `b85981fd`).
+
+Eight socket controls pass on Linux ARM64 (Nextest `8862c9e9`). They cover
+deduplication, ordered state changes, reconnect reset, a slow recipient,
+restart refusal, and symmetric and directional blackholes. The home
+server owns membership and the last accepted report. A partition can
+delay close detection, and a peer can still read an event already queued
+before close. A reconnect starts a fresh report generation. A process
+without the pending reconnect record must decline the restore.
+
+Matched ARM64 allocation probes record the same allocation counts in all
+82 report samples, with 128 more allocated bytes per sample. A warm
+duplicate remains one allocation (896 to 1,024 bytes). Reports to one and
+254 peers remain six and 294 allocations (3,056 to 3,184 bytes and 427,526
+to 427,654 bytes). These probes measure heap use and exact delivery
+(Nextest `3a4bb681`, `bbbfa4ed`). This advances A04 and A11.
+
+### F394 — Inbound activity could hold a closing socket
+
+At `fd624258` under #826, transport reports used a close-aware activity
+refresh, but the router still let other text commands wait for the source
+lifecycle or for activity storage while holding that lifecycle. WebSocket
+Ping and Pong used a separate refresh with the same waits. On Linux ARM64,
+two WebRTC offer controls and one WebSocket control-frame test miss a 10 ms
+paused-clock bound after close (Nextest `84063e09`). A live offer waits for
+storage and then reaches the target with the exact sender, generation and body.
+
+The router and WebSocket control frames now share one activity refresh bound
+to the physical socket. Close interrupts the pending lock or storage wait.
+An unadmitted offer never reaches the recipient, and teardown can take the
+released lifecycle while the test still holds the storage lock. Activity
+updates already applied can stand. A canceled persistence attempt releases
+its throttle reservation. Live traffic continues to wait for the activity
+store and still checks the source identity under the lifecycle gate.
+
+The home process owns room membership and the pending reconnect record. A
+partition can delay close detection, and peers can receive frames the server
+already queued. Teardown still needs access to the room to detach the player.
+A replacement socket uses its own lifecycle. A process without the pending
+record must decline restoration. These controls advance A04 and A11.
+
+Nine real-socket controls pass on ARM64 (Nextest `bbb00203`). They cover
+matching Pong, client WebSocket Ping, exact WebRTC signaling, three-peer mesh,
+report reset on reconnect, restart refusal, and three blackhole cases.
+
+Matched warm Linux ARM64 allocation probes show no change across three
+routed offer samples and 82 transport report samples (Nextest `f05ce833`,
+`d4c0113f`). The routed offer uses eight allocations and 3,184 bytes in
+rooms of 2, 16 and 64 players. The probes cover exact delivery and warm heap
+use. Contended allocations, CPU and throughput were outside the measurement.
