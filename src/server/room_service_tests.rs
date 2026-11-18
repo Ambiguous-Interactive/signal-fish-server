@@ -3185,6 +3185,232 @@ async fn setup_joined_pair_with_reconnection_config_and_coordinator(
     }
 }
 
+/// #826: close before room admission must leave the seat available to reconnect.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_player_leave() {
+    for correlated in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let (message, _) = queued_player_leave_frame(&fixture, correlated);
+        let lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+        let gate = fixture
+            .server
+            .message_coordinator
+            .lock_room_event_mutation(&fixture.room_id)
+            .await;
+        let attempts = gate.mutation_attempt_count_for_test();
+        let mut dispatch = Box::pin(fixture.server.handle_client_message_from_lifecycle(
+            &fixture.leaver,
+            message,
+            Arc::clone(&lifecycle),
+        ));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("leave must queue for room mutation");
+
+        assert!(fixture
+            .server
+            .connection_manager
+            .request_close_for(&fixture.leaver, CloseReason::ActivityTimeout));
+        timeout(Duration::from_millis(10), dispatch)
+            .await
+            .expect("close must cancel leave while the room gate is held");
+        drop(
+            timeout(Duration::from_millis(10), lifecycle.lock())
+                .await
+                .expect("close must release the source lifecycle for teardown"),
+        );
+        assert_queued_leave_preserves_seat(&mut fixture).await;
+        drop(gate);
+        restore_joined_pair_authority(&mut fixture).await;
+        assert_eq!(
+            fixture.server.get_client_room(&fixture.leaver).await,
+            Some(fixture.room_id)
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_correlated_leave_waiting_at_router() {
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let (message, _) = queued_player_leave_frame(&fixture, true);
+    let lifecycle = fixture.server.client_lifecycle(&fixture.leaver).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(fixture.leaver);
+    let mut dispatch = Box::pin(fixture.server.handle_client_message_from_lifecycle(
+        &fixture.leaver,
+        message,
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("leave must finish refreshing activity before the lifecycle is held");
+    let gate = lifecycle.lock().await;
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    pause.release.notify_one();
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(
+        Duration::from_secs(1),
+        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("correlated leave must queue for the router's lifecycle check");
+
+    assert!(fixture
+        .server
+        .connection_manager
+        .request_close_for(&fixture.leaver, CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close must release the router while the lifecycle gate is held");
+    assert_queued_leave_preserves_seat(&mut fixture).await;
+    drop(gate);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_during_room_gate_handoff_cancels_queued_player_leave() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    let (message, _) = queued_player_leave_frame(&fixture, true);
+    let close = fixture
+        .server
+        .connection_manager
+        .close_signal_for(&fixture.leaver)
+        .unwrap();
+    *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+    fixture
+        .server
+        .handle_client_message(&fixture.leaver, message)
+        .await;
+    assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    assert_queued_leave_preserves_seat(&mut fixture).await;
+    restore_joined_pair_authority(&mut fixture).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn queued_player_leave_preserves_admitted_departure_after_close() {
+    for close_after_removal in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let (message, operation_id) = queued_player_leave_frame(&fixture, true);
+        let stamp = fixture
+            .server
+            .connection_manager
+            .current_relay_stamp_in_room(&fixture.leaver, &fixture.room_id)
+            .unwrap();
+        fixture.database.pause_next_removed_player_for_test();
+        let mut dispatch = Box::pin(
+            fixture
+                .server
+                .handle_client_message(&fixture.leaver, message),
+        );
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            fixture.database.wait_for_removed_player_for_test(),
+        )
+        .await
+        .expect("leave reaches durable removal");
+        assert_no_queued_message(&mut fixture.survivor_rx, "removal has not published yet");
+        if close_after_removal {
+            assert!(fixture
+                .server
+                .connection_manager
+                .request_close_for(&fixture.leaver, CloseReason::ActivityTimeout));
+        }
+        fixture.database.release_removed_player_for_test();
+        timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("admitted leave must finish publication");
+        assert_eq!(fixture.server.get_client_room(&fixture.leaver).await, None);
+        assert_next_message_matches(
+            &mut fixture.survivor_rx,
+            "terminal player departure",
+            |frame| {
+                matches!(frame, ServerMessage::PlayerLeft { player_id, epoch: Some(epoch), final_seq: Some(seq) }
+                if *player_id == fixture.leaver && *epoch == stamp.epoch && *seq == stamp.seq)
+            },
+        );
+        if !close_after_removal {
+            assert_next_message_matches(&mut fixture.leaver_rx, "correlated RoomLeft", |frame| {
+                matches!(frame, ServerMessage::RoomOperationResult { operation_id: id, result }
+                    if Some(*id) == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::RoomLeft))
+            });
+        }
+        assert!(!drain_queued_messages(&mut fixture.survivor_rx)
+            .iter()
+            .any(|frame| matches!(frame.as_ref(), ServerMessage::PlayerLeft { .. })));
+        fixture.server.unregister_client(&fixture.leaver).await;
+        assert_no_queued_message(
+            &mut fixture.survivor_rx,
+            "teardown must not publish a second leave",
+        );
+        assert!(
+            !fixture
+                .server
+                .reconnection_manager()
+                .unwrap()
+                .has_pending_reconnection(&fixture.leaver)
+                .await
+        );
+    }
+}
+
+fn queued_player_leave_frame(
+    fixture: &JoinedPairFixture,
+    correlated: bool,
+) -> (
+    crate::protocol::ClientMessage,
+    Option<crate::protocol::RoomOperationId>,
+) {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+    if correlated {
+        fixture
+            .server
+            .set_client_room_operation_ids(&fixture.leaver, true);
+        let operation_id = uuid::Uuid::from_u128(0x399);
+        (
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::LeaveRoom),
+            },
+            Some(operation_id),
+        )
+    } else {
+        (ClientMessage::LeaveRoom, None)
+    }
+}
+
+async fn assert_queued_leave_preserves_seat(fixture: &mut JoinedPairFixture) {
+    assert_eq!(
+        fixture.server.get_client_room(&fixture.leaver).await,
+        Some(fixture.room_id)
+    );
+    let room = fixture
+        .database
+        .get_room_by_id(&fixture.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(room.players.contains_key(&fixture.leaver));
+    assert_eq!(room.authority_player, Some(fixture.leaver));
+    assert_no_queued_message(&mut fixture.leaver_rx, "a canceled leave sends no reply");
+    assert_no_queued_message(
+        &mut fixture.survivor_rx,
+        "a canceled leave sends no departure",
+    );
+}
+
 async fn restore_joined_pair_authority(
     fixture: &mut JoinedPairFixture,
 ) -> mpsc::Receiver<Arc<ServerMessage>> {

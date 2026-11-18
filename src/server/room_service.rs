@@ -3,7 +3,9 @@ use super::{
     MaxRoomsExceededError, MaxRoomsPerApplicationExceededError, MaxRoomsPerGameExceededError,
     PendingApplicationClaimRollback,
 };
-use crate::coordination::{RoomEventMutationGuard, RoomOperationCoordinatorTrait};
+use crate::coordination::{
+    ConnectionCloseSignal, RoomEventMutationGuard, RoomOperationCoordinatorTrait,
+};
 use crate::database::{CreateRoomError, PendingRoomCreation};
 use crate::distributed::{LeaseRenewalGuard, LockHandle};
 use crate::protocol::validation;
@@ -1482,6 +1484,7 @@ impl EnhancedGameServer {
             super::OwnedRoomOperationPanicPoint::LeaveBeforeTerminal,
         );
         let player_id = &player_id;
+        let socket_dispatched = source_lifecycle.is_some();
         let Some(lifecycle) =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id))
         else {
@@ -1492,7 +1495,21 @@ impl EnhancedGameServer {
             // before the old request resumes; it must not leave that seat.
             return;
         };
-        let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let lock_lifecycle = Arc::clone(&lifecycle).lock_owned();
+        let (source_close, _lifecycle_guard) = if socket_dispatched {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, &lifecycle)
+            else {
+                return;
+            };
+            let Some(guard) = close.while_open(lock_lifecycle).await else {
+                return;
+            };
+            (Some(close), guard)
+        } else {
+            (None, lock_lifecycle.await)
+        };
         let effective_player_id = lifecycle.player_id();
         if effective_player_id != *player_id
             || !self
@@ -1507,6 +1524,7 @@ impl EnhancedGameServer {
             operation_id,
             terminal_response_committed,
             None,
+            source_close.as_ref(),
         )
         .await;
     }
@@ -1522,6 +1540,7 @@ impl EnhancedGameServer {
             notify_player,
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
             None,
         )
         .await;
@@ -1539,6 +1558,7 @@ impl EnhancedGameServer {
             None,
             Arc::new(AtomicBool::new(false)),
             Some(departure),
+            None,
         )
         .await;
     }
@@ -1560,6 +1580,7 @@ impl EnhancedGameServer {
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
         departure: Option<Arc<UnregisterDeparture>>,
+        source_close: Option<&ConnectionCloseSignal>,
     ) {
         let departure = departure.or_else(|| {
             self.connection_manager
@@ -1572,7 +1593,9 @@ impl EnhancedGameServer {
             .map(|progress| progress.room_id)
             .or(self.get_client_room(player_id).await)
         else {
-            if let Some(operation_id) = operation_id {
+            if let Some(operation_id) = operation_id
+                .filter(|_| source_close.is_none_or(|close| close.requested_reason().is_none()))
+            {
                 let _ = self
                     .send_room_operation_failure_to_player(
                         player_id,
@@ -1585,10 +1608,19 @@ impl EnhancedGameServer {
             return;
         };
         leave_span.record("room_id", tracing::field::display(room_id));
-        let room_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
+        let lock_room = self.message_coordinator.lock_room_event_mutation(&room_id);
+        let room_event_guard = if let Some(close) = source_close {
+            let Some(guard) = close.while_open(lock_room).await else {
+                return;
+            };
+            // Close and voluntary leave compete for the seat until room admission.
+            let Some(guard) = close.commit_if_open(|| guard) else {
+                return;
+            };
+            guard
+        } else {
+            lock_room.await
+        };
 
         let retained_authority = departure.as_ref().is_some_and(|progress| {
             progress.was_authority.load(Ordering::Acquire)

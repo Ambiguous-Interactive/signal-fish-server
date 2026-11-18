@@ -1780,6 +1780,12 @@ async fn real_socket_teardown_reaches_room_gate_while_authority_waits() {
     .await;
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_reaches_room_gate_while_player_leave_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::LeaveRoom).await;
+}
+
 async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
     use crate::coordination::CloseReason;
     use futures_util::{SinkExt, StreamExt};
