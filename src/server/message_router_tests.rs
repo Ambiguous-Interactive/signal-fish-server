@@ -869,6 +869,173 @@ async fn pending_transport_report_stops_when_reporter_is_evicted() {
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
+async fn closing_transport_report_stops_waiting_to_refresh_activity() {
+    let server = create_test_server().await;
+    let (reporter, _receiver) = register_router_test_client(&server).await;
+    let lifecycle = server.client_lifecycle(&reporter).unwrap();
+    let guard = lifecycle.lock().await;
+    let mut pending = Box::pin(server.handle_client_message_from_lifecycle(
+        &reporter,
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&reporter, crate::coordination::CloseReason::Unregistered));
+    timeout(Duration::from_millis(10), pending)
+        .await
+        .expect("close must finish the report before the activity gate opens");
+    drop(guard);
+    assert_eq!(server.client_transport_status(&reporter), None);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_transport_report_releases_lifecycle_during_activity_write() {
+    let server = create_test_server().await;
+    let (reporter, _receiver) = register_router_test_client(&server).await;
+    let room = server
+        .database
+        .create_room(
+            "closing-report".into(),
+            None,
+            2,
+            false,
+            reporter,
+            "relay".into(),
+            "test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+    server.assign_client_to_room(&reporter, room.id).await;
+    let database = server
+        .database
+        .as_any()
+        .downcast_ref::<InMemoryDatabase>()
+        .unwrap();
+    let storage = database.hold_room_writes_for_test().await;
+    let lifecycle = server.client_lifecycle(&reporter).unwrap();
+    let mut pending = Box::pin(server.handle_client_message_from_lifecycle(
+        &reporter,
+        ClientMessage::TransportStatus {
+            transport: Transport::WebRtc,
+            connected: true,
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(pending.as_mut()).is_pending());
+    let mut teardown = Box::pin(lifecycle.lock());
+    assert!(futures_util::poll!(teardown.as_mut()).is_pending());
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&reporter, crate::coordination::CloseReason::Unregistered));
+    let bound = Duration::from_millis(10);
+    timeout(bound, pending)
+        .await
+        .expect("close must interrupt the pending activity refresh");
+    let _guard = timeout(bound, teardown)
+        .await
+        .expect("teardown must acquire the lifecycle while storage stays held");
+    drop(storage);
+    assert_eq!(server.client_transport_status(&reporter), None);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_transport_report_stops_waiting_for_report_order() {
+    assert_pending_transport_report_admission(false, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_transport_report_stops_waiting_for_source_lifecycle() {
+    assert_pending_transport_report_admission(true, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn live_transport_report_waits_for_admission() {
+    assert_pending_transport_report_admission(false, false).await;
+    assert_pending_transport_report_admission(true, false).await;
+}
+
+async fn assert_pending_transport_report_admission(hold_lifecycle: bool, close_source: bool) {
+    let server = create_test_server().await;
+    let (reporter, _receiver) = register_router_test_client(&server).await;
+    server.set_client_protocol(
+        &reporter,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![Transport::Relay, Transport::WebRtc],
+            topologies: vec![Topology::Relay, Topology::Mesh],
+        },
+    );
+    let report = |connected| ClientMessage::TransportStatus {
+        transport: Transport::WebRtc,
+        connected,
+    };
+    server.handle_client_message(&reporter, report(true)).await;
+    let lifecycle = server.client_lifecycle(&reporter).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(reporter);
+    let caller_server = Arc::clone(&server);
+    let source = Arc::clone(&lifecycle);
+    let mut caller = tokio::spawn(async move {
+        caller_server
+            .handle_client_message_from_lifecycle(&reporter, report(false), source)
+            .await;
+    });
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("report passed the router's activity refresh");
+
+    let held = if hold_lifecycle {
+        lifecycle.lock().await
+    } else {
+        lifecycle.lock_transport_reports().await
+    };
+    pause.release.notify_one();
+    let bound = Duration::from_millis(10);
+    assert!(timeout(bound, &mut caller).await.is_err());
+    assert_eq!(
+        server.client_transport_status(&reporter),
+        Some((Transport::WebRtc, true))
+    );
+
+    if close_source {
+        assert!(server
+            .connection_manager
+            .request_close_for(&reporter, crate::coordination::CloseReason::Unregistered));
+        timeout(bound, &mut caller)
+            .await
+            .expect("close must finish the report while its admission gate stays held")
+            .expect("router caller completes");
+        drop(held);
+    } else {
+        drop(held);
+        timeout(bound, &mut caller)
+            .await
+            .expect("live report completes when admission becomes available")
+            .expect("router caller completes");
+    }
+    assert_eq!(
+        server.client_transport_status(&reporter),
+        Some((Transport::WebRtc, close_source))
+    );
+    assert_eq!(
+        server.metrics.relay_fallback.load(Ordering::Relaxed),
+        u64::from(!close_source)
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
 async fn parked_transport_report_stops_when_reporter_is_evicted() {
     assert_evicted_reporter_status_is_canceled(true).await;
 }

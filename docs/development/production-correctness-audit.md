@@ -19340,3 +19340,38 @@ A peer can receive a plan already queued when the sender closes. A restored
 socket uses the metadata and plan on its home server. A restart or a different
 server without the pending record must decline restoration. This advances
 A04 and A11. The broader audit remains open.
+
+### F393 — Pending transport reports held closing sockets
+
+At `0c0f4966` under #826, the server could keep a closing socket waiting
+for the lifecycle gate used by inbound activity, the per-socket report
+order, or the report's own lifecycle gate. On Linux ARM64, three router
+controls miss a 10 ms paused-clock bound while those gates stay held
+(Nextest `765c0953`, `cb1d4a5c`). The live control waits for admission
+and then records the exact transition.
+
+The server now binds the report to its physical socket before awaiting
+activity or admission. A pending report returns on close without changing
+the reported state or fallback counter. If activity persistence is pending,
+close also releases the lifecycle gate for teardown. In-memory activity or
+storage work that already completed can stand. A report already admitted
+can also retain its local state and metrics. Queue admission still checks
+the source connection and membership. The owner keeps report order even
+if the caller stops waiting. These cases pass on Linux ARM64, including the
+reconnect, ordering, eviction, and partial delivery controls (Nextest
+`cf9173e2`, `b85981fd`).
+
+Eight socket controls pass on Linux ARM64 (Nextest `8862c9e9`). They cover
+deduplication, ordered state changes, reconnect reset, a slow recipient,
+restart refusal, and symmetric and directional blackholes. The home
+server owns membership and the last accepted report. A partition can
+delay close detection, and a peer can still read an event already queued
+before close. A reconnect starts a fresh report generation. A process
+without the pending reconnect record must decline the restore.
+
+Matched ARM64 allocation probes record the same allocation counts in all
+82 report samples, with 128 more allocated bytes per sample. A warm
+duplicate remains one allocation (896 to 1,024 bytes). Reports to one and
+254 peers remain six and 294 allocations (3,056 to 3,184 bytes and 427,526
+to 427,654 bytes). These probes measure heap use and exact delivery
+(Nextest `3a4bb681`, `bbbfa4ed`). This advances A04 and A11.

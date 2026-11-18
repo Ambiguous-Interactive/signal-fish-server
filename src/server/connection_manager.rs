@@ -1675,6 +1675,16 @@ impl ConnectionManager {
         self.clients.get(player_id).map(|entry| entry.close.clone())
     }
 
+    /// Bind a pre-admission wait to its physical socket before taking the lifecycle gate.
+    pub(super) fn close_signal_for_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        lifecycle: &Arc<ClientLifecycle>,
+    ) -> Option<ConnectionCloseSignal> {
+        let entry = self.clients.get(player_id)?;
+        Arc::ptr_eq(&entry.lifecycle, lifecycle).then(|| entry.close.clone())
+    }
+
     #[cfg(test)]
     pub fn remove_client(&self, player_id: &PlayerId) -> Option<ClientConnection> {
         // Test fixtures use this convenience to simulate a complete departure;

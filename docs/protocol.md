@@ -1953,6 +1953,7 @@ reports in that generation do not move counters. Room joins, leaves, same-room r
 and reconnects start fresh generations. The server accepts a report only from a negotiated v3 connection and
 only when `transport` is in that connection's negotiated transport set. Reports from non-v3 clients or for
 unnegotiated transports are ignored and do not update stored state or metrics.
+The server discards a report if its socket starts closing while the report waits for admission.
 
 ```json
 {
