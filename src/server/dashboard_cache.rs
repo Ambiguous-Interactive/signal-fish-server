@@ -104,6 +104,7 @@ struct DashboardMetricsSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardHistoryEntry {
+    #[serde(serialize_with = "crate::wall_time::serialize_timestamp")]
     pub fetched_at: jiff::Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_rooms: Option<usize>,

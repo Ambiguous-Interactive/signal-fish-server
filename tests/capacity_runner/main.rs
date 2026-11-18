@@ -1469,6 +1469,26 @@ fn host_evidence_fixture() -> config::ExternalHostEvidence {
     }
 }
 
+#[test]
+fn external_host_evidence_requires_rfc3339_collection_time() {
+    let mut evidence = host_evidence_fixture();
+    for (timestamp, accepted) in [
+        ("2024-06-19T15:22:45.100Z", true),
+        ("2024-06-19T15:22:45-04:00", true),
+        ("2024-06-19T15:22:45.1234567891Z", true),
+        ("2024-06-19T15:22:45-04:00[America/New_York]", false),
+        ("2024-06-19T15:22:45-04", false),
+        ("2024-06-19T15:22:45+24:00", false),
+    ] {
+        evidence.collected_at_rfc3339 = timestamp.into();
+        assert_eq!(
+            evidence.validate(Some(&evidence.endpoint)).is_ok(),
+            accepted,
+            "collection timestamp {timestamp}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn external_host_evidence_refuses_invalid_inputs_before_artifacts_or_connections() {
     let valid = host_evidence_fixture();

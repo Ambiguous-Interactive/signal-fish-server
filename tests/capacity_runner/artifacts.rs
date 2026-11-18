@@ -30,6 +30,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, BufWriter, Read as _, Write as _};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use hdrhistogram::serialization::Serializer as _;
 use serde_json::Value;
@@ -153,8 +154,21 @@ impl ExternalHostEvidence {
                 ));
             }
         }
-        str::parse::<jiff::Timestamp>(&self.collected_at_rfc3339)
-            .map_err(|_| "external host evidence collection time must be RFC 3339".to_string())?;
+        // Validate the original archival string. The offset and fractional
+        // digits need no conversion because the oracle does not use this time.
+        static RFC3339: LazyLock<regex::Regex> = LazyLock::new(|| {
+            regex::Regex::new(
+                r"\A([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.[0-9]+)?(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])\z",
+            )
+            .expect("constant RFC 3339 pattern")
+        });
+        let valid_collection_time = RFC3339
+            .captures(&self.collected_at_rfc3339)
+            .and_then(|captures| captures.get(1))
+            .is_some_and(|wall_time| wall_time.as_str().parse::<jiff::civil::DateTime>().is_ok());
+        if !valid_collection_time {
+            return Err("external host evidence collection time must be RFC 3339".into());
+        }
         for (name, hash) in [
             ("effective_sha256", &self.effective_sha256),
             ("loaded_sha256", &self.loaded_sha256),

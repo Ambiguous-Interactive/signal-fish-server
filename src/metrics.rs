@@ -406,6 +406,7 @@ struct OperationLatencyHistogram {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct MetricsSnapshot {
+    #[serde(serialize_with = "crate::wall_time::serialize_timestamp")]
     pub timestamp: jiff::Timestamp,
     pub connections: ConnectionMetrics,
     pub rooms: RoomMetrics,
@@ -1997,6 +1998,14 @@ pub struct DashboardCacheMetrics {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn metrics_snapshot_preserves_fractional_timestamp_bytes() {
+        let mut snapshot = ServerMetrics::new().snapshot().await;
+        snapshot.timestamp = "2024-01-02T03:04:05.100Z".parse().unwrap();
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["timestamp"], "2024-01-02T03:04:05.100Z");
+    }
 
     #[test]
     fn test_average_matches_full_metrics_for_all_histogram_states() {

@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Breaking:** Use Jiff timestamps and signed durations in the Rust server API.
-  Existing v2 timestamp bytes and frame budgets stay compatible.
+  Preserve v2 and metrics timestamp bytes and the existing v2 frame budget.
 - Reduce server work and memory use for repeated disconnects and bulk reconnect cleanup that removes no records (#636).
 - Reduce server locking for repeated departures and unchanged player names or connection information (#636).
 - Reduce server work and room-table contention when checking application room limits (#636).
