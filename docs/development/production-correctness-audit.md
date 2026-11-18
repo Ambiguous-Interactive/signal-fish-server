@@ -19425,6 +19425,10 @@ closing first consumes no sequence and adds no frame. A stamped frame
 retains its owned delivery. The held-gate tests cover JSON and binary and
 check the unchanged watermark and empty recipient queue after cancellation.
 Six focused tests pass on Linux ARM64 (Nextest `27d440e9`).
+An uncontended control requests close just before the source's stamp.
+Removing only the source close fence wrongly consumes sequence 1
+(Nextest `30a4ccc1`). The restored fence preserves sequence 0 and
+leaves the open recipient's queue empty for JSON and binary.
 
 The room's home process owns membership and relay stamps. The server
 delays live work while routing is busy and can finish an admitted relay

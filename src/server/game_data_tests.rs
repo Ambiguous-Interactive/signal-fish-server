@@ -384,10 +384,8 @@ mod handler_honesty {
         tokio::pin!(relay);
         assert!(futures_util::poll!(&mut relay).is_pending());
         assert_eq!(server.metrics.game_data_messages.load(Ordering::Relaxed), 1);
-        assert!(matches!(
-            recipient_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        let pending = recipient_rx.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
 
         if close_source {
             assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
@@ -402,10 +400,8 @@ mod handler_honesty {
                 .current_relay_stamp_in_room(&source, &room)
                 .unwrap();
             assert_eq!((after.epoch, after.seq), (before.epoch, before.seq));
-            assert!(matches!(
-                recipient_rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Empty)
-            ));
+            let canceled = recipient_rx.try_recv();
+            assert!(matches!(canceled, Err(mpsc::error::TryRecvError::Empty)));
         }
         drop(route_writer);
         drop(prior_relay);
@@ -414,10 +410,9 @@ mod handler_honesty {
             timeout(Duration::from_millis(10), relay)
                 .await
                 .expect("a live sender must finish once the gate opens");
+            let delivered = recipient_rx.try_recv().unwrap();
             expect_ordered_payload(
-                crate::coordination::outbound_queue::OutboundPayload::Message(
-                    recipient_rx.try_recv().unwrap(),
-                ),
+                crate::coordination::outbound_queue::OutboundPayload::Message(delivered),
                 source,
                 before.epoch,
                 before.seq + 1,
@@ -446,6 +441,69 @@ mod handler_honesty {
             for wait_for_order in [false, true] {
                 assert_socket_relay_wait_observes_close(binary, wait_for_order, false).await;
             }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn source_close_before_relay_stamp_prevents_fast_path_delivery() {
+        use crate::coordination::outbound_queue::TryReceiveError;
+        use crate::server::game_data::{arm_relay_admission_pause, RelayAdmissionStage};
+
+        for binary in [false, true] {
+            let RelayOrderFixture {
+                server,
+                source,
+                room,
+                mut target_receiver,
+                ..
+            } = relay_order_fixture().await;
+            let lifecycle = server.connection_manager.client_lifecycle(&source).unwrap();
+            let close = server.connection_manager.close_signal_for(&source).unwrap();
+            // Clear the recipient queue so the next delivery has a synchronous
+            // route and capacity. Only the source close prevents admission.
+            let prefill = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+            let pause = arm_relay_admission_pause(source, RelayAdmissionStage::BeforeRoomBudget);
+            let relay = async {
+                if binary {
+                    server
+                        .handle_game_data_binary_from_lifecycle(
+                            &source,
+                            GameDataEncoding::MessagePack,
+                            Bytes::from_static(b"stale"),
+                            lifecycle,
+                        )
+                        .await;
+                } else {
+                    server
+                        .handle_client_message_from_lifecycle(
+                            &source,
+                            crate::protocol::ClientMessage::GameData {
+                                data: serde_json::json!("stale"),
+                                class: None,
+                                key: None,
+                            },
+                            lifecycle,
+                        )
+                        .await;
+                }
+            };
+            tokio::pin!(relay);
+            assert!(futures_util::poll!(&mut relay).is_pending());
+            timeout(Duration::from_millis(10), pause.reached.notified())
+                .await
+                .expect("relay has entered budget admission");
+            assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+            pause.release.notify_one();
+            timeout(Duration::from_millis(10), relay).await.unwrap();
+
+            let stamp = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!(stamp.seq, 0, "a closing source must consume no sequence");
+            let canceled = target_receiver.try_recv();
+            assert!(matches!(canceled, Err(TryReceiveError::Empty)));
         }
     }
 
