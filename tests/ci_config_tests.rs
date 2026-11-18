@@ -5521,14 +5521,16 @@ fn test_markdownlint_install_guidance_includes_local_and_global_options() {
             missing_local.push(relative_path.to_string());
         }
         let has_global_guidance = match relative_path {
-            "scripts/check-markdown.sh" => {
-                content.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
+            "scripts/check-markdown.sh" => content
+                .contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
+            "scripts/enable-hooks.sh" => content
+                .contains("or global: see the Markdownlint section of docs/git-hooks-guide.md"),
+            _ => {
+                content.contains(r#"npm install -g "markdownlint-cli2@$(node -p "#)
+                    && content.contains(
+                        r#"require("./package.json").devDependencies["markdownlint-cli2"]"#,
+                    )
             }
-            "scripts/enable-hooks.sh" => {
-                content.contains("or global: see the Markdownlint section of docs/git-hooks-guide.md")
-            }
-            _ => content.contains(r#"npm install -g "markdownlint-cli2@$(node -p "#)
-                && content.contains(r#"require("./package.json").devDependencies["markdownlint-cli2"]"#),
         };
         if !has_global_guidance {
             missing_global.push(relative_path.to_string());
