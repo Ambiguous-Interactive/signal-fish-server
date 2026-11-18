@@ -19375,3 +19375,37 @@ duplicate remains one allocation (896 to 1,024 bytes). Reports to one and
 254 peers remain six and 294 allocations (3,056 to 3,184 bytes and 427,526
 to 427,654 bytes). These probes measure heap use and exact delivery
 (Nextest `3a4bb681`, `bbbfa4ed`). This advances A04 and A11.
+
+### F394 — Inbound activity could hold a closing socket
+
+At `fd624258` under #826, transport reports used a close-aware activity
+refresh, but the router still let other text commands wait for the source
+lifecycle or for activity storage while holding that lifecycle. WebSocket
+Ping and Pong used a separate refresh with the same waits. On Linux ARM64,
+two WebRTC offer controls and one WebSocket control-frame test miss a 10 ms
+paused-clock bound after close (Nextest `84063e09`). A live offer waits for
+storage and then reaches the target with the exact sender, generation and body.
+
+The router and WebSocket control frames now share one activity refresh bound
+to the physical socket. Close interrupts the pending lock or storage wait.
+An unadmitted offer never reaches the recipient, and teardown can take the
+released lifecycle while the test still holds the storage lock. Activity
+updates already applied can stand. A canceled persistence attempt releases
+its throttle reservation. Live traffic continues to wait for the activity
+store and still checks the source identity under the lifecycle gate.
+
+The home process owns room membership and the pending reconnect record. A
+partition can delay close detection, and peers can receive frames the server
+already queued. Teardown still needs access to the room to detach the player.
+A replacement socket uses its own lifecycle. A process without the pending
+record must decline restoration. These controls advance A04 and A11.
+
+Nine real-socket controls pass on ARM64 (Nextest `bbb00203`). They cover
+matching Pong, client WebSocket Ping, exact WebRTC signaling, three-peer mesh,
+report reset on reconnect, restart refusal, and three blackhole cases.
+
+Matched warm Linux ARM64 allocation probes show no change across three
+routed offer samples and 82 transport report samples (Nextest `f05ce833`,
+`d4c0113f`). The routed offer uses eight allocations and 3,184 bytes in
+rooms of 2, 16 and 64 players. The probes cover exact delivery and warm heap
+use. Contended allocations, CPU and throughput were outside the measurement.

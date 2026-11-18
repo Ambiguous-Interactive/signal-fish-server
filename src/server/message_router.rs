@@ -207,28 +207,6 @@ impl EnhancedGameServer {
             .await;
     }
 
-    async fn refresh_routed_activity(
-        &self,
-        player_id: &PlayerId,
-        source_lifecycle: Option<&Arc<ClientLifecycle>>,
-    ) -> bool {
-        let _source_guard = match source_lifecycle {
-            Some(lifecycle) => Some(lifecycle.lock().await),
-            None => None,
-        };
-        if source_lifecycle.is_some_and(|lifecycle| {
-            lifecycle.player_id() != *player_id
-                || !self
-                    .connection_manager
-                    .lifecycle_matches(player_id, lifecycle)
-        }) {
-            return false;
-        }
-        self.record_client_activity(player_id);
-        self.maybe_update_last_seen(player_id).await;
-        true
-    }
-
     async fn handle_client_message_with_lifecycle(
         self: &Arc<Self>,
         player_id: &PlayerId,
@@ -237,25 +215,27 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        let report_close = if matches!(message, ClientMessage::TransportStatus { .. }) {
-            let Some(close) = source_lifecycle.as_ref().and_then(|lifecycle| {
-                self.connection_manager
-                    .close_signal_for_lifecycle(player_id, lifecycle)
-            }) else {
+        let report_close = if let Some(lifecycle) = &source_lifecycle {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+            else {
                 return;
             };
-            Some(close)
+            if !self
+                .refresh_socket_activity(player_id, lifecycle, &close)
+                .await
+            {
+                return;
+            }
+            matches!(message, ClientMessage::TransportStatus { .. }).then_some(close)
         } else {
+            if matches!(message, ClientMessage::TransportStatus { .. }) {
+                return;
+            }
+            self.refresh_client_activity(player_id).await;
             None
         };
-        let activity = self.refresh_routed_activity(player_id, source_lifecycle.as_ref());
-        let is_current = match &report_close {
-            Some(close) => close.while_open(activity).await.unwrap_or(false),
-            None => activity.await,
-        };
-        if !is_current {
-            return;
-        }
         #[cfg(all(test, signal_fish_repository_tests))]
         if let Some((_, pause)) = SOCKET_DISPATCH_PAUSES.remove(player_id) {
             pause.reached.notify_one();

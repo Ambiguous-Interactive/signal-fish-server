@@ -989,6 +989,10 @@ socket-progress deadline rather than inheriting unresolved reliable queue age.
 
 ### Close codes
 
+After the server requests close, it can discard an inbound text command or
+WebSocket Ping or Pong that is still waiting to refresh activity. A peer can
+still receive a message that the server queued before close.
+
 Farewell `Error` frames are best-effort: on the congested socket a
 slow-consumer eviction escapes, they frequently cannot be delivered at all.
 The WebSocket close frame's code travels in the closing handshake itself, so
