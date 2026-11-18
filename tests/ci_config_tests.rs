@@ -28795,10 +28795,16 @@ fn test_pinned_nightly_staleness_warning() {
     let date_part = nightly_version
         .strip_prefix("nightly-")
         .expect("nightly version must start with 'nightly-'");
-    let nightly_date = date_part.parse::<jiff::civil::Date>()
+    let nightly_date = date_part
+        .parse::<jiff::civil::Date>()
         .unwrap_or_else(|error| panic!("Invalid nightly date '{date_part}': {error}"));
-    let today = jiff::Timestamp::now().to_zoned_datetime(jiff::tz::TimeZone::UTC).date();
-    let age_days = today.since(nightly_date).expect("days between UTC dates").get_days();
+    let today = jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .date();
+    let age_days = today
+        .since(nightly_date)
+        .expect("days between UTC dates")
+        .get_days();
     assert!(
         age_days >= 0,
         "Pinned nightly '{nightly_version}' is {age_days} days in the future relative to {today}."
