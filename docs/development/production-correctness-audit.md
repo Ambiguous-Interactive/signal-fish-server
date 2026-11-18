@@ -19477,3 +19477,30 @@ unread while dispatch is waiting, and a partition can delay detection.
 An admitted command can publish after close. A reconnect restores the same
 membership from the home process's pending record. A process without that
 record declines restoration. This advances A04, A08, and A11.
+
+### F397 — A pending authority request could hold a closing socket
+
+At `f3a8c245` under #826, an `AuthorityRequest` held the source lifecycle
+while it waited for the room mutation lock or the live route lease. Both
+waits missed a 10 ms paused-clock deadline after close. A real WebSocket
+received close code 4003, but teardown missed a five-second deadline to
+enter the held room queue. The live control passed (Linux ARM64,
+Nextest `d94fa169`).
+
+The server now races both admission waits against the physical socket's
+close signal. After both guards arrive, it orders admission against close
+before the request can change storage. The owned request still completes
+publication after admission. Held-gate tests cover both claims and
+releases. Pre-admission close preserves stored authority and sends no
+reply, live role event, or replay event. A live request replies before
+publishing its role event. Close after storage commit preserves the role
+event for a live peer and a peer waiting to reconnect. Teardown reaches
+the held room queue after the real 4003 close. All 14 focused controls
+passed on Linux ARM64 (Nextest `562c3318`).
+
+The room's home process orders authority and reconnect state. A busy room
+or route delays a live request until it can verify membership. A partition
+can delay physical close detection. A request admitted before close can
+commit and publish. After reconnect, the snapshot gives the current
+role. A restarted or separate process without the pending record must
+refuse restoration. This advances A04, A08, and A11.
