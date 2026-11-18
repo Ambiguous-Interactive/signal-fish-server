@@ -19305,3 +19305,38 @@ still arrive. If a client reconnects on the home server, it uses the restored
 route and current session plan. The server declines restoration after a
 restart or on another instance without that record. A11 and A12 advance.
 The broader audit remains open.
+
+### F392 — Pending peer metadata held the closing socket lifecycle
+
+At `deb4c21d` under #826, a `ProvideConnectionInfo` command held the sender's
+lifecycle during room publication admission, route lookup, or a stored
+Direct endpoint read. An observed close could leave the command parked and
+keep teardown from acquiring the lifecycle.
+
+Three Linux ARM64 tests drive the client-message router while they hold one
+of those waits. They request close and keep the wait blocked. All three miss
+the 10 ms paused-clock bound on the base (Nextest `68a50501`). The live
+control waits for admission, then stores the exact endpoint. The repair
+releases the sender and any acquired room guard within the bound. A canceled
+update leaves the stored metadata and current Direct plan intact and adds no
+frame. Ten focused controls pass (Nextest `139fe1fc`), including an admitted
+write and an atomic Direct refresh.
+
+Live WebSockets receive the exact replacement Direct endpoint and one new
+shared plan generation. The local restart, reconnect, directional blackhole,
+and split-home controls pass (Nextest `ea60f01e`, `f0f392bd`).
+
+Matched warm ARM64 probes keep allocation counts at nine per duplicate and
+52 per changed endpoint. Allocated bytes rise from 2,448 to 2,576 for a
+duplicate and from 13,339 to 13,467 for a changed endpoint. The probes do
+not measure CPU or throughput (Nextest `570ebc35`, `40c76fdf`).
+
+The close signal cancels the read-only waits before a write or plan update.
+The server keeps admitted writes and room publications owned so metadata
+and its corresponding plan can commit in order. The authoritative home
+process still needs access to room state before it can detach the member
+and capture a reconnect record. A partition can delay close detection.
+A peer can receive a plan already queued when the sender closes. A restored
+socket uses the metadata and plan on its home server. A restart or a different
+server without the pending record must decline restoration. This advances
+A04 and A11. The broader audit remains open.

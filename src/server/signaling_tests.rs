@@ -2283,6 +2283,120 @@ async fn transport_report_waiting_for_routing_admission_stops_on_sender_close() 
     assert_close_cancels_routing_admission(true).await;
 }
 
+/// #826: a pending metadata write must release the sender before admission resumes.
+async fn assert_peer_metadata_admission_observes_close(block_routing: bool, close_source: bool) {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (player, mut receiver, room) = register_refusal_source(&server).await;
+    let lifecycle = server.connection_manager.client_lifecycle(&player).unwrap();
+    let close = server.connection_manager.close_signal_for(&player).unwrap();
+    let update = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    let (publication, routing) = if block_routing {
+        (None, Some(coordinator.room_routing_gates.write(room).await))
+    } else {
+        (
+            Some(coordinator.lock_room_event_mutation(&room).await),
+            None,
+        )
+    };
+    let dispatch = server.handle_client_message(
+        &player,
+        ClientMessage::ProvideConnectionInfo {
+            connection_info: update.clone(),
+        },
+    );
+    tokio::pin!(dispatch);
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let lock = Arc::clone(&lifecycle).lock_owned();
+            tokio::pin!(lock);
+            if futures_util::poll!(&mut lock).is_pending() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("the metadata update owns the lifecycle while waiting");
+
+    if close_source {
+        assert!(close.request_close(crate::coordination::CloseReason::SlowConsumer));
+        timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .expect("closing the sender must release pending metadata admission");
+        let teardown = timeout(Duration::from_millis(10), lifecycle.lock_owned())
+            .await
+            .expect("teardown can take the lifecycle before admission resumes");
+        drop(teardown);
+        if block_routing {
+            let next_publication = timeout(
+                Duration::from_millis(10),
+                coordinator.lock_room_event_mutation(&room),
+            )
+            .await
+            .expect("canceled metadata admission must release the room gate");
+            drop(next_publication);
+        }
+    } else {
+        assert!(timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .is_err());
+    }
+    let snapshot = server
+        .database
+        .get_room_by_id(&room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.players[&player].connection_info.is_none());
+    drop(routing);
+    drop(publication);
+
+    if !close_source {
+        timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("a live metadata update must finish once admission opens");
+        let snapshot = server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.players[&player].connection_info, Some(update));
+    }
+    let tail = receiver.try_recv();
+    assert!(matches!(
+        tail,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_waiting_for_publication_stops_on_sender_close() {
+    assert_peer_metadata_admission_observes_close(false, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_waiting_for_routing_stops_on_sender_close() {
+    assert_peer_metadata_admission_observes_close(true, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn live_peer_metadata_waits_for_publication_and_routing() {
+    assert_peer_metadata_admission_observes_close(false, false).await;
+    assert_peer_metadata_admission_observes_close(true, false).await;
+}
+
 /// #826: close must cancel routing waits on both sides of capacity reservation.
 async fn assert_close_cancels_delivery_routing(transport_report: bool) {
     let coordinator = Arc::new(InMemoryMessageCoordinator::new());
