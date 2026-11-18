@@ -2224,8 +2224,13 @@ pub trait MessageCoordinator: Send + Sync {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()>;
 
-    /// Send a reply while the caller holds the source lifecycle. The in-memory
-    /// coordinator checks the socket identity and cancels route lookup on close.
+    /// Send a reply while the caller holds the source lifecycle.
+    ///
+    /// The default checks close before delegating to the existing send.
+    /// A coordinator with a blocking route lookup should override this method
+    /// to cancel the lookup on close and check the route's socket identity.
+    /// Keep delivery and cleanup owned after the send starts, because the
+    /// existing send contract permits side effects before completion.
     #[doc(hidden)]
     async fn send_to_player_on_socket(
         &self,

@@ -19222,12 +19222,14 @@ closes (Nextest `ef9b9d4c`). With the repair, the sender's dispatch and
 lifecycle become available before the writer unlocks. The live source
 still waits. It receives exactly one target refusal after unlock.
 
-The server now uses the physical socket's close signal during reply route
-lookup and checks the route still refers to that socket. It uses the
-same path for a refusal after a target delivery failure. An active sender
-still waits for its route, and an admitted reply retains its delivery and
+The shipped in-memory coordinator now watches the physical socket's close
+signal during reply route lookup and checks the route still refers to that
+socket. It uses this path for a refusal after a target delivery failure.
+An active sender still waits for its route. An admitted reply retains delivery and
 slow-consumer cleanup. Cancellation during routing leaves budget charges
-with the closing socket.
+with the closing socket. Custom coordinators can override the socket-aware
+method to cancel their own route lookup. The default preserves their send
+completion contract.
 
 One authoritative server owns the route, lifecycle and reconnect record.
 A partition can delay close detection. Clients can still receive a reply
