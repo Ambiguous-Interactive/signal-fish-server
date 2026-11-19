@@ -1290,6 +1290,7 @@ struct DrainAfterCreateDatabase {
     pause_after_create_once: AtomicBool,
     create_committed_reached: Notify,
     release_committed_create: Notify,
+    close_after_total_room_count: StdMutex<Option<crate::coordination::ConnectionCloseSignal>>,
     pause_empty_cleanup_once: AtomicBool,
     empty_cleanup_reached: Notify,
     release_empty_cleanup: Notify,
@@ -1323,6 +1324,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1363,6 +1365,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1396,6 +1399,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1429,6 +1433,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(true),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1462,6 +1467,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1922,7 +1928,11 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn get_total_room_count(&self) -> anyhow::Result<usize> {
-        self.inner.get_total_room_count().await
+        let count = self.inner.get_total_room_count().await?;
+        if let Some(close) = self.close_after_total_room_count.lock().unwrap().take() {
+            close.request_close(CloseReason::ActivityTimeout);
+        }
+        Ok(count)
     }
 
     async fn health_check(&self) -> bool {
@@ -11284,12 +11294,16 @@ enum CloseDuringRoomCount {
 async fn assert_close_cancels_room_creation_during_cap_count(stage: CloseDuringRoomCount) {
     let database = Arc::new(InMemoryDatabase::new());
     database.initialize().await.unwrap();
+    let mut database_adapter = DrainAfterCreateDatabase::new(database.clone());
+    database_adapter.trigger_drain_after_create = false;
+    database_adapter.conforming_pending_creation = true;
+    let database_adapter = Arc::new(database_adapter);
     let lock = Arc::new(InMemoryDistributedLock::new());
     let server = create_test_server_with_message_coordinator_and_lock(
         ServerConfig::default(),
         Arc::new(InMemoryMessageCoordinator::new()),
         lock.clone(),
-        database.clone(),
+        database_adapter.clone(),
     )
     .await;
     let (creator, mut messages) =
@@ -11305,7 +11319,10 @@ async fn assert_close_cancels_room_creation_during_cap_count(stage: CloseDuringR
         }
         CloseDuringRoomCount::Server => database.pause_next_get_total_room_count_for_test(),
         CloseDuringRoomCount::Handoff => {
-            database.close_after_next_total_room_count_for_test(close.clone())
+            *database_adapter
+                .close_after_total_room_count
+                .lock()
+                .unwrap() = Some(close.clone());
         }
     }
     let mut dispatch = Box::pin(server.handle_client_message(

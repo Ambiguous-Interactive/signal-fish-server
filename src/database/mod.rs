@@ -1576,9 +1576,6 @@ pub struct InMemoryDatabase {
     #[cfg(test)]
     release_get_total_room_count: tokio::sync::Notify,
     #[cfg(test)]
-    close_after_total_room_count:
-        std::sync::Mutex<Option<crate::coordination::ConnectionCloseSignal>>,
-    #[cfg(test)]
     pause_update_room_code: std::sync::atomic::AtomicU8,
     #[cfg(test)]
     update_room_code_reached: tokio::sync::Notify,
@@ -1934,8 +1931,6 @@ impl InMemoryDatabase {
             #[cfg(test)]
             release_get_total_room_count: tokio::sync::Notify::new(),
             #[cfg(test)]
-            close_after_total_room_count: std::sync::Mutex::new(None),
-            #[cfg(test)]
             pause_update_room_code: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             update_room_code_reached: tokio::sync::Notify::new(),
@@ -2087,6 +2082,7 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn pause_next_get_application_room_count_for_test(&self) {
         self.get_application_room_count_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -2095,6 +2091,7 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
+    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn wait_for_paused_get_application_room_count_for_test(&self) {
         self.get_application_room_count_reached.notified().await;
     }
@@ -2126,14 +2123,6 @@ impl InMemoryDatabase {
     #[cfg(test)]
     pub(crate) fn release_paused_get_total_room_count_for_test(&self) {
         self.release_get_total_room_count.notify_one();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn close_after_next_total_room_count_for_test(
-        &self,
-        close: crate::coordination::ConnectionCloseSignal,
-    ) {
-        *self.close_after_total_room_count.lock().unwrap() = Some(close);
     }
 
     /// Rotation-stall determinism gate: used only by repository-only test
@@ -3882,12 +3871,8 @@ impl GameDatabase for InMemoryDatabase {
             self.get_total_room_count_reached.notify_one();
             self.release_get_total_room_count.notified().await;
         }
-        let count = self.rooms.read().await.len();
-        #[cfg(test)]
-        if let Some(close) = self.close_after_total_room_count.lock().unwrap().take() {
-            close.request_close(crate::coordination::CloseReason::ActivityTimeout);
-        }
-        Ok(count)
+        let rooms = self.rooms.read().await;
+        Ok(rooms.len())
     }
 
     async fn health_check(&self) -> bool {

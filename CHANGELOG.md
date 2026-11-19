@@ -88,7 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Let WebSockets close promptly while room creation waits for capacity (#826).
+- Release the room code when a queued creation is canceled on WebSocket close so a fresh socket can retry (#826).
 - Release a queued room restore when its WebSocket closes so a fresh socket can retry the reconnect (#826).
 - Cancel a queued spectator join when the server closes its WebSocket before admission (#826).
 - Cancel a queued join to an existing room when the server closes the player's WebSocket before admission (#826).

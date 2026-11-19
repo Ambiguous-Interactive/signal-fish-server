@@ -19681,12 +19681,12 @@ leases, including the room-code lease. If close wins at the final count
 handoff, the server does not insert a room. Once storage admission wins, the
 owned transaction finishes publication or rolls back.
 
-Thirteen focused ARM64 checks pass (Nextest `b3f5c5a8`). They cover all three
+Sixteen focused ARM64 checks pass (Nextest `c0389996`). They cover all three
 cap locks, stalled application and server counts, room cap refusal, generated
 code collisions, shutdown drain, and rollback after storage admission. A real
 WebSocket tears down with the cap still held. A fresh socket then gets a
 `RoomJoined` baseline. Removing only the final close check caused one insert
-before rollback. The handoff regression caught it (Nextest `5e1a6618`).
+before rollback. The handoff regression caught it (Nextest `c70a083b`).
 
 One home process orders the capacity checks and insert. A live creator must
 wait for those checks or receive a refusal if the cap is full. Other processes
