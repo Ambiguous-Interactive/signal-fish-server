@@ -19782,3 +19782,34 @@ check a fresh room snapshot after reconnecting. An in-memory restart
 loses room and reconnect state, so the replacement process cannot resolve
 the old kick. This advances A04,
 A05, and A09. The campaign stays open.
+
+### F408 — A queued player ban could commit after WebSocket close
+
+At `5fda7320` under #826, a v3 `BanPlayer` waited at the room gate.
+After source close, releasing the gate put the target on the ban list.
+On a real WebSocket, the 4003 close frame arrived while teardown remained
+blocked by dispatch. Both controls failed on Linux ARM64 (Nextest
+`947296a2`). A separate control dropped dispatch after storage removed the
+target. The observer missed the departure (Nextest `12aa052e`).
+
+Kicks and bans now use the same close-aware room admission. The server
+waits for the relevant lifecycles and the room mutation gate. If close
+wins, the ban leaves the target's live seat, token, or pending claim intact.
+If admission wins, the server keeps the room gate across the ban write and
+the eviction decision. The owned task completes removal and publishes the
+sequenced departure after a source close or dispatch cancellation.
+
+All three controls pass on Linux ARM64 (Nextest `0246d9bc`). The real socket
+reconnects the authority, retains the target in the roster, and receives no
+replayed departure for it. The target can still exchange messages with the
+server. The open-source control observes a departure before the correlated
+ban result for a live target and a tombstone for a pending target.
+
+One authoritative server orders the write against reconnect and admission.
+A network partition or a client close frame waiting behind dispatch can
+delay detection. A ban can pass admission during that delay and the
+requester can lose its result. The reconnect
+snapshot and replay report membership, and the ban list governs later
+admission. The server needs its room state to apply the operation or restore
+the seat. Another process or an in-memory restart cannot infer that decision
+from the old token. This advances A04, A05, and A09. The campaign stays open.
