@@ -1725,12 +1725,14 @@ The moderation operations are authority-only (v3 only):
   a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current
   members and their reconnection tokens are unaffected. The password is stored only as a salted hash and never
   logged or echoed. The requester receives `RoomAccessUpdated { requires_password }`.
-- `BanPlayer` names a seated `player_id` or the holder of this room's pending reconnection record and evicts it
-  exactly like `KickPlayer`, then records the id on the
-  room's in-memory ban list: while the room lives, the banned id cannot rejoin it as a player or spectator. The
-  settled operation tombstones the pending record, so a reconnection attempt refuses with `KICKED`; a record that
-  survived a raced eviction refuses with `BANNED` (the record stays claimable, so a mid-window unban lets the token
-  work again). The ban dies with the room. The requester receives `PlayerBanned`.
+- `BanPlayer` names a seated `player_id` or the holder of this room's pending reconnection record.
+  The server records the id on the room's in-memory ban list and evicts the target as it does for `KickPlayer`.
+  The banned id cannot rejoin as a player or spectator while the room lives. A tombstoned reconnect record is
+  refused with `KICKED`. A claimable record for a banned id is refused with `BANNED` and can be used after an
+  unban within the reconnect window. If the server detects or requests closure of the authority's WebSocket
+  while the ban waits for admission, it cancels the ban. An admitted ban still completes and the remaining members
+  receive the departure when the server removes a seated member. The requester receives `PlayerBanned` on success
+  if it stays connected.
 - `UnbanPlayer` lifts a room ban (idempotent). The requester receives `PlayerUnbanned`.
 - `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
   `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives

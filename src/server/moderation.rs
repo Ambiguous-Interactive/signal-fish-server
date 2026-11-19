@@ -68,6 +68,12 @@ struct ModerationTarget {
 type ModerationResolution =
     std::result::Result<Option<ModerationTarget>, (&'static str, ErrorCode)>;
 
+#[derive(Clone, Copy, Debug)]
+enum PlayerEviction {
+    Kick,
+    Ban,
+}
+
 impl EnhancedGameServer {
     /// Handle an authority-initiated `KickPlayer` room operation (v3 only,
     /// issue #525).
@@ -102,6 +108,24 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
+        self.handle_player_eviction(
+            authority_id,
+            operation_id,
+            target_id,
+            source_lifecycle,
+            PlayerEviction::Kick,
+        )
+        .await;
+    }
+
+    async fn handle_player_eviction(
+        self: &Arc<Self>,
+        authority_id: &PlayerId,
+        operation_id: RoomOperationId,
+        target_id: PlayerId,
+        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        eviction: PlayerEviction,
+    ) {
         let Some(lifecycle) =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
         else {
@@ -111,20 +135,21 @@ impl EnhancedGameServer {
         let authority_id = *authority_id;
         let task = tokio::spawn(async move {
             server
-                .kick_player_owned(&authority_id, operation_id, target_id, lifecycle)
+                .evict_player_owned(&authority_id, operation_id, target_id, lifecycle, eviction)
                 .await;
         });
         if let Err(error) = task.await {
-            tracing::error!(%authority_id, %target_id, %error, "Player kick transaction failed");
+            tracing::error!(%authority_id, %target_id, ?eviction, %error, "Player eviction transaction failed");
         }
     }
 
-    async fn kick_player_owned(
+    async fn evict_player_owned(
         self: &Arc<Self>,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
         lifecycle: Arc<ClientLifecycle>,
+        eviction: PlayerEviction,
     ) {
         let Some(close) = self
             .connection_manager
@@ -136,11 +161,7 @@ impl EnhancedGameServer {
             .while_open(async {
                 let guard = self.lock_moderation_players(*authority_id, target_id).await;
                 let resolved = self
-                    .resolve_kick_style_target(
-                        authority_id,
-                        &target_id,
-                        Some(Arc::clone(&lifecycle)),
-                    )
+                    .resolve_kick_style_target(authority_id, &target_id, &lifecycle)
                     .await;
                 (guard, resolved)
             })
@@ -158,9 +179,11 @@ impl EnhancedGameServer {
             Err((message, code)) => {
                 drop(moderation_lifecycle_guard);
                 #[cfg(all(test, signal_fish_repository_tests))]
-                if let Some((_, pause)) = KICK_REFUSAL_PAUSES.remove(authority_id) {
-                    pause.reached.notify_one();
-                    pause.release.notified().await;
+                if matches!(eviction, PlayerEviction::Kick) {
+                    if let Some((_, pause)) = KICK_REFUSAL_PAUSES.remove(authority_id) {
+                        pause.reached.notify_one();
+                        pause.release.notified().await;
+                    }
                 }
                 let Some(_authority_lifecycle_guard) = close.while_open(lifecycle.lock()).await
                 else {
@@ -183,32 +206,73 @@ impl EnhancedGameServer {
             return;
         };
 
-        if !self
-            .evict_member_by_authority(
-                authority_id,
-                &target_id,
-                room_id,
-                target_seated_in_row,
-                target_lifecycle_guard,
-                &_authority_lifecycle_guard,
-                Some(&close),
-            )
-            .await
-        {
+        let admission = async {
+            #[cfg(test)]
+            self.pause_after_moderation_resolve_for_test().await;
+            self.lock_moderation_eviction(&room_id, &target_id, target_lifecycle_guard)
+                .await
+        };
+        let Some(guards) = close.while_open(admission).await else {
             return;
+        };
+        // Close and room admission choose one order. Once admitted, this
+        // owned task must finish even if socket dispatch stops observing it.
+        let Some((room_event_guard, target_lifecycle_guard)) = close.commit_if_open(|| guards)
+        else {
+            return;
+        };
+        if matches!(eviction, PlayerEviction::Ban) {
+            // One room gate covers the ban, the reconnect tombstone, and
+            // removal. A failed ban write must leave the target in place.
+            if let Err(error) = self.database.set_room_ban(&room_id, &target_id, true).await {
+                tracing::error!(
+                    %authority_id, %target_id, %room_id, %error,
+                    "Ban failed to persist; refusing the eviction"
+                );
+                drop(room_event_guard);
+                drop(target_lifecycle_guard);
+                drop(moderation_lifecycle_guard);
+                self.send_ban_storage_failure(*authority_id, operation_id, &close)
+                    .await;
+                return;
+            }
+            tracing::info!(
+                authority = %authority_id, player_id = %target_id, %room_id,
+                "Authority banned a player from the room"
+            );
         }
+        self.evict_member_by_authority(
+            authority_id,
+            &target_id,
+            room_id,
+            target_seated_in_row,
+            room_event_guard,
+        )
+        .await;
+        drop(target_lifecycle_guard);
         drop(moderation_lifecycle_guard);
 
-        self.metrics.increment_room_kicks();
+        let result = match eviction {
+            PlayerEviction::Kick => {
+                self.metrics.increment_room_kicks();
+                RoomOperationResult::PlayerKicked {
+                    player_id: target_id,
+                }
+            }
+            PlayerEviction::Ban => {
+                self.metrics.increment_room_bans();
+                RoomOperationResult::PlayerBanned {
+                    player_id: target_id,
+                }
+            }
+        };
         let _ = self
             .message_coordinator
             .send_to_player(
                 authority_id,
                 Arc::new(ServerMessage::RoomOperationResult {
                     operation_id,
-                    result: Box::new(RoomOperationResult::PlayerKicked {
-                        player_id: target_id,
-                    }),
+                    result: Box::new(result),
                 }),
             )
             .await;
@@ -241,93 +305,52 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
     ) {
-        let moderation_lifecycle_guard =
-            self.lock_moderation_players(*authority_id, target_id).await;
-        let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id, source_lifecycle)
-            .await;
-        let Some(ModerationTarget {
-            room_id,
-            target_seated_in_row,
-            target_lifecycle_guard,
-            _authority_lifecycle_guard,
-        }) = (match resolved {
-            Ok(target) => target,
-            Err((message, code)) => {
-                drop(moderation_lifecycle_guard);
-                self.fail_operation(authority_id, operation_id, message, code)
-                    .await;
-                return;
-            }
-        })
-        else {
-            return;
-        };
-
-        // Record the ban before the eviction, under the room mutation gate:
-        // the gate serializes the durable write with any admission already
-        // resolved onto this room lane. A storage failure keeps the seat —
-        // a ban that cannot be persisted must not silently evict without
-        // its refusal semantics.
-        let ban_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
-        let ban_applied = self.database.set_room_ban(&room_id, &target_id, true).await;
-        drop(ban_event_guard);
-        if let Err(error) = ban_applied {
-            tracing::error!(
-                %authority_id,
-                %target_id,
-                %room_id,
-                %error,
-                "Ban failed to persist; refusing the eviction"
-            );
-            drop(moderation_lifecycle_guard);
-            drop(target_lifecycle_guard);
-            drop(_authority_lifecycle_guard);
-            self.fail_operation(
-                authority_id,
-                operation_id,
-                "Failed to ban the player",
-                ErrorCode::StorageError,
-            )
-            .await;
-            return;
-        }
-
-        tracing::info!(
-            authority = %authority_id,
-            player_id = %target_id,
-            room_id = %room_id,
-            "Authority banned a player from the room"
-        );
-
-        self.evict_member_by_authority(
+        self.handle_player_eviction(
             authority_id,
-            &target_id,
-            room_id,
-            target_seated_in_row,
-            target_lifecycle_guard,
-            &_authority_lifecycle_guard,
-            None,
+            operation_id,
+            target_id,
+            source_lifecycle,
+            PlayerEviction::Ban,
         )
         .await;
-        drop(moderation_lifecycle_guard);
+    }
 
-        self.metrics.increment_room_bans();
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                authority_id,
-                Arc::new(ServerMessage::RoomOperationResult {
-                    operation_id,
-                    result: Box::new(RoomOperationResult::PlayerBanned {
-                        player_id: target_id,
-                    }),
-                }),
-            )
-            .await;
+    async fn send_ban_storage_failure(
+        &self,
+        authority_id: PlayerId,
+        operation_id: RoomOperationId,
+        close: &ConnectionCloseSignal,
+    ) {
+        if close
+            .while_open(self.connection_manager.charge_error_reply(&authority_id))
+            .await
+            != Some(true)
+        {
+            return;
+        }
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let socket = close.clone();
+        // Keep normal reply order while the source is open. If it closes,
+        // release the caller's lifecycle but finish any started delivery.
+        let reply = tokio::spawn(async move {
+            if let Err(error) = coordinator
+                .send_to_player_on_socket(
+                    &authority_id,
+                    &socket,
+                    Arc::new(ServerMessage::room_operation_failed(
+                        operation_id,
+                        "Failed to ban the player",
+                        Some(ErrorCode::StorageError),
+                    )),
+                )
+                .await
+            {
+                tracing::warn!(%authority_id, %error, "Ban refusal delivery failed");
+            }
+        });
+        if let Some(Err(error)) = close.while_open(reply).await {
+            tracing::error!(%authority_id, %error, "Ban refusal task failed");
+        }
     }
 
     /// Handle an authority-initiated `UnbanPlayer` room operation (v3 only,
@@ -1287,25 +1310,20 @@ impl EnhancedGameServer {
         self: &Arc<Self>,
         authority_id: &PlayerId,
         target_id: &PlayerId,
-        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        lifecycle: &Arc<ClientLifecycle>,
     ) -> ModerationResolution {
         // Fix the authority's connection identity and membership with its
         // lifecycle gate (same prologue as every room operation handler).
         // The guard is carried out through [`ModerationTarget`] so the
         // eviction it authorizes cannot interleave with the authority's own
         // disconnect/leave processing.
-        let Some(lifecycle) =
-            source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(authority_id))
-        else {
-            return Ok(None);
-        };
-        let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let authority_lifecycle_guard = Arc::clone(lifecycle).lock_owned().await;
         #[cfg(test)]
         self.pause_after_moderation_authority_lock_for_test().await;
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
-                .lifecycle_matches(authority_id, &lifecycle)
+                .lifecycle_matches(authority_id, lifecycle)
         {
             return Ok(None);
         }
@@ -1414,9 +1432,10 @@ impl EnhancedGameServer {
     /// Shared eviction core for `KickPlayer` and `BanPlayer` (issue #525).
     ///
     /// Callers have validated authority and target membership via
-    /// [`Self::resolve_kick_style_target`] and still hold the returned
-    /// target lifecycle guard. Every reconnection path is tombstoned before
-    /// the durable removal. A target still routed in this room receives a
+    /// [`Self::resolve_kick_style_target`] and still hold the authority
+    /// lifecycle guard and any live target guard. The server tombstones a
+    /// pending record for this room before durable removal. A target still
+    /// routed in this room receives a
     /// best-effort farewell and the `4007 kicked` close, and the seat is
     /// removed through the ordinary departure machinery. A target whose live
     /// route is in another room — a seated route or a spectator session —
@@ -1429,12 +1448,8 @@ impl EnhancedGameServer {
         target_id: &PlayerId,
         room_id: RoomId,
         target_seated_in_row: bool,
-        target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-        _authority_lifecycle_guard: &tokio::sync::OwnedMutexGuard<()>,
-        source_close: Option<&ConnectionCloseSignal>,
-    ) -> bool {
-        #[cfg(test)]
-        self.pause_after_moderation_resolve_for_test().await;
+        room_event_guard: RoomEventMutationGuard,
+    ) {
         // The target's live route decides what this eviction removes: a
         // route in THIS room is the seat being evicted, while a route in any
         // other room means this room's row is stale residue (a
@@ -1442,19 +1457,6 @@ impl EnhancedGameServer {
         // residue must not disturb the target's live membership elsewhere —
         // its farewell, credential, and close all belong to the room it is
         // actually in (issue #396).
-
-        let admission = self.lock_moderation_eviction(&room_id, target_id, target_lifecycle_guard);
-        let (room_event_guard, target_lifecycle_guard) = if let Some(close) = source_close {
-            let Some(guards) = close.while_open(admission).await else {
-                return false;
-            };
-            let Some(guards) = close.commit_if_open(|| guards) else {
-                return false;
-            };
-            guards
-        } else {
-            admission.await
-        };
 
         // Reconnect checks the tombstone under this same room gate. It
         // either restored before admission (and we hold the new target
@@ -1580,8 +1582,6 @@ impl EnhancedGameServer {
                 close.request_close(CloseReason::Kicked);
             }
         }
-        drop(target_lifecycle_guard);
-        true
     }
 
     /// Take the target lifecycle before the room gate. If the target had no
