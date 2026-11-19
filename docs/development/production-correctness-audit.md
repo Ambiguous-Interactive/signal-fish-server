@@ -52,7 +52,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer on close repaired in F406 |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
@@ -19753,3 +19753,32 @@ the write win. A client that lost its result can use the reconnect snapshot
 to learn the current role. A process without the room or pending reconnect
 record cannot recover the prior role, including after an in-memory restart.
 This advances A04, A05 and A09. The broader campaign stays open.
+
+### F407 — A queued player kick could remove a peer after WebSocket close
+
+At `7b00c8c4` under #826, a v3 `KickPlayer` waited at the room gate.
+After a close request, releasing the gate let the command remove the target
+from storage. The paused-clock baseline failed on Linux ARM64 (Nextest
+`0e1b065a`).
+
+The kick waits for the player and room gates while its physical source
+socket is open. Close can cancel the wait and release the source lifecycle
+without touching the target. The room gate also protects the check for a
+reconnected target before the kick admits any change. An admitted kick
+finishes the target's departure and publishes the usual sequenced event.
+
+The real WebSocket test reconnects the authority and checks that the target
+stays in the roster and sees no kick. The paused-clock cases check the live
+target's token and the disconnected target's pending record. An observer
+still receives the sequenced departure when the source closes after the
+removal. All 18 focused controls pass on Linux ARM64 (Nextest `3e4f0eb9`).
+
+One room home orders kick admission, departure, and reconnect. The server
+waits for the target lifecycle and room gate before admitting a kick.
+A network partition can delay close detection and let the kick win.
+A different server cannot apply the kick or restore the same seat without
+the home server's room state. If the result is lost, the requester can
+check a fresh room snapshot after reconnecting. An in-memory restart
+loses room and reconnect state, so the replacement process cannot resolve
+the old kick. This advances A04,
+A05, and A09. The campaign stays open.

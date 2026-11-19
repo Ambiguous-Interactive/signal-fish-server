@@ -1710,7 +1710,9 @@ The moderation operations are authority-only (v3 only):
   success; refusals use
   `NOT_ROOM_AUTHORITY` (sender is not the authority), `KICK_TARGET_NOT_FOUND` (target is not a seated member or a
   holder of this room's pending reconnection record), or
-  `INVALID_INPUT` (the authority cannot kick itself).
+  `INVALID_INPUT` (the authority cannot kick itself). If the authority's WebSocket starts closing while the kick
+  waits for admission, the server cancels the kick. An admitted kick still completes and the remaining members
+  receive the departure when the server removes a seated member.
 - `RegenerateRoomCode` replaces the room code with a freshly generated one. Existing members stay connected and
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
   code stops resolving to the room immediately, and a join that names it behaves like any unknown code:
