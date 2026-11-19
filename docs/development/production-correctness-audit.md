@@ -51,7 +51,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592; queued access changes repaired in F413 |
-| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
+| A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592; refusal reply waits released on close in F414 |
 | A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410; queued unban repaired in F412; queued access changes repaired in F413 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
@@ -19974,3 +19974,38 @@ setting. A network partition can delay close detection, so the setting can
 take effect even if the requester never observes the result. A process
 without the home room and recovery record refuses restore. Restart loses
 the in-memory room. This advances A04, A07, and A09. #826 remains open.
+
+### F414 — A lobby refusal could hold teardown after WebSocket close
+
+At `302eba34`, a refused `StartGame` kept the source lifecycle while its
+private error waited for routing or queue space. Both waits exceeded a 10 ms
+virtual deadline after close on Linux ARM64. On v3 WebSockets, the old server
+sent close 4003 while teardown remained blocked before the held room gate.
+All three regressions fail at these assertions in Nextest `48d8da48`.
+
+The server now addresses `PlayerReady` and `StartGame` refusals to the
+source socket. Close ends the dispatch and releases the source lifecycle
+if the command waits for a reply. An already started delivery still accounts
+for its outcome. The room worker keeps ownership of admitted room work.
+
+Open sockets receive the exact refusal. Caller cancellation preserves reply
+order. In the live test, two v3 peers start a game. One sends a duplicate
+start while routing is held. After close 4003, teardown reaches the room gate
+while routing remains held. The replacement restores the same player and
+finalized room, receives no obsolete refusal, and gets Pong. The healthy
+peer also gets Pong. The 13 focused tests pass in Nextest `084514cf`.
+The mesh, restart, and partition controls pass in `7a9c7bec`. The separate
+split-home catalog passes.
+
+Matched Linux ARM64 debug probes measure 14 allocations and 2,503 to
+2,383 allocated bytes for each refused start. Successful two-player mesh
+starts keep all allocation counts and allocate 128 fewer bytes per sample.
+The probes measure allocation only.
+
+The home process orders room admission, departure, and restore. Close can
+release a private reply wait while teardown still needs the room gate to
+capture authoritative state. The bound starts when the server requests close.
+A partition can delay that request, and an already queued reply can reach
+the old socket. A replacement uses the current room baseline and bounded
+replay. A restart loses the room and reconnect record. A process without
+the home record refuses restore. This advances A04 and A08. #826 remains open.
