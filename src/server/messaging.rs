@@ -1,4 +1,5 @@
 use super::{ClientLifecycle, EnhancedGameServer};
+use crate::coordination::ConnectionCloseSignal;
 use crate::protocol::{ErrorCode, PlayerId, ServerMessage};
 use std::sync::Arc;
 
@@ -148,19 +149,27 @@ impl EnhancedGameServer {
         reason: String,
         error_code: Option<ErrorCode>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        source_close: Option<&ConnectionCloseSignal>,
     ) -> anyhow::Result<()> {
+        if source_close.is_some_and(|close| close.requested_reason().is_some()) {
+            return Ok(());
+        }
         if !self.connection_manager.charge_error_reply(player_id).await {
             return Ok(());
         }
-        self.message_coordinator
-            .send_to_player(
-                player_id,
-                Arc::new(
-                    (ServerMessage::SpectatorJoinFailed { reason, error_code })
-                        .correlate_room_operation(operation_id),
-                ),
-            )
-            .await
+        let reply = Arc::new(
+            (ServerMessage::SpectatorJoinFailed { reason, error_code })
+                .correlate_room_operation(operation_id),
+        );
+        if let Some(close) = source_close {
+            self.message_coordinator
+                .send_to_player_on_socket(player_id, close, reply)
+                .await
+        } else {
+            self.message_coordinator
+                .send_to_player(player_id, reply)
+                .await
+        }
     }
 
     /// Send the `ReconnectionFailed` refusal for one reconnect frame.

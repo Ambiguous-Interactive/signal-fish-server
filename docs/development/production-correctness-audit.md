@@ -19606,3 +19606,34 @@ detection can let a join win admission. `join_only` refuses a missing room on
 the wrong process, and reconnect requires a pending record at the home process.
 Restart loses that in-memory state. Room-creation cap waits and refusal delivery
 remain separate paths. This advances A04 and A11.
+
+### F402 — A queued spectator join could hold teardown
+
+At `e78d3579` under #826, a spectator join held the socket lifecycle while
+waiting for the room-code lease or the room mutation gate. After close, both
+waits missed a 10 ms paused-clock deadline. Close in the poll that returned the
+room gate still wrote a spectator row. A real WebSocket received 4003, and
+teardown missed a five-second deadline while the gate stayed held
+(Linux ARM64, Nextest `1de7e576`).
+Independent review found the same wait at the shared join limiter. Holding
+that limiter reproduced the missed deadline (Nextest `04961b68`).
+
+The server now cancels lifecycle, join limiter, and room access waits on the
+source connection's close signal. It releases any code lease that it acquired
+and checks close again before admitting the join. A canceled request adds no spectator or replay
+event. A join that wins admission owns the existing baseline publication or
+rollback. A new socket can request its own spectator baseline.
+
+Sixteen focused Linux ARM64 tests pass (Nextest `0622c3d4`). They cover the
+plain and correlated commands, fresh admission, and rollback after close
+prevents baseline delivery. A matched allocation probe with 0, 16, and 254
+stored spectators measured 130, 178, and 892 allocations on each head.
+The fix adds 424 transient allocated bytes per join in all three cases
+(Nextest `82891fdc`, `062695b3`).
+
+The room's home process orders spectator snapshots and roster events. A
+partition or an unread close frame can delay close detection and let admission
+win. If the room gate is busy, the server waits for access before reading the
+baseline and changing the roster. The shipped server refuses a join to a
+missing room, including on a fresh process after the home process restarts.
+Restart loses the old roster and replay history. This advances A04 and A10.

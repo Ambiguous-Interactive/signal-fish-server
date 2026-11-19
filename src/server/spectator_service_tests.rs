@@ -2419,6 +2419,7 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
                 "WATCH8".into(),
                 "Observer".into(),
                 None,
+                None,
                 Arc::new(std::sync::Mutex::new(None)),
             );
             let change = async {
