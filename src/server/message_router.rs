@@ -215,7 +215,7 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        let report_close = if let Some(lifecycle) = &source_lifecycle {
+        let source_close = if let Some(lifecycle) = &source_lifecycle {
             let Some(close) = self
                 .connection_manager
                 .close_signal_for_lifecycle(player_id, lifecycle)
@@ -228,7 +228,7 @@ impl EnhancedGameServer {
             {
                 return;
             }
-            matches!(message, ClientMessage::TransportStatus { .. }).then_some(close)
+            Some(close)
         } else {
             if matches!(message, ClientMessage::TransportStatus { .. }) {
                 return;
@@ -384,8 +384,13 @@ impl EnhancedGameServer {
                 operation_id,
                 operation,
             } => {
-                let _guard = if let Some(lifecycle) = &source_lifecycle {
-                    let guard = Arc::clone(lifecycle).lock_owned().await;
+                let _guard = if let (Some(lifecycle), Some(close)) =
+                    (&source_lifecycle, &source_close)
+                {
+                    let Some(guard) = close.while_open(Arc::clone(lifecycle).lock_owned()).await
+                    else {
+                        return;
+                    };
                     if lifecycle.player_id() != *player_id
                         || !self
                             .connection_manager
@@ -570,7 +575,7 @@ impl EnhancedGameServer {
                 transport,
                 connected,
             } => {
-                if let (Some(lifecycle), Some(close)) = (source_lifecycle, report_close) {
+                if let (Some(lifecycle), Some(close)) = (source_lifecycle, source_close) {
                     self.handle_transport_status(player_id, transport, connected, lifecycle, close)
                         .await;
                 }

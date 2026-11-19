@@ -19524,3 +19524,30 @@ detection, and a reply already admitted may still reach the old socket.
 A replacement socket can send a fresh Ping. Pong carries no durable
 room state and is not replayed after reconnect or process restart. This
 advances A04 and A11. The broader audit stays open.
+
+### F399 — A queued player leave could erase the reconnect seat
+
+At `a38c177b` under #826, a socket leave held its physical lifecycle while
+waiting for room mutation. Close missed a 10 ms paused-clock deadline.
+Close during the room gate handoff removed the seat. On a real socket,
+the client received 4003, but teardown missed a five-second deadline to
+enter the room queue. The admitted leave control passed (Linux ARM64,
+Nextest `9433d500`). A separate control held the correlated command's
+lifecycle check in the router. With the original router, that wait also
+missed the 10 ms deadline (Nextest `8da07d76`).
+
+Close now releases pending admission waits. The server orders room
+admission against the physical close signal before changing storage.
+When close wins, teardown can capture the seat and token. When leave
+wins, its owned transaction can finish the departure and publish the
+terminal relay watermark even if the leaver cannot receive its reply.
+Seventeen focused Linux ARM64 controls pass (Nextest `555e2043`).
+They cover both leave formats, old connections after reconnect, the
+live and close-after-removal outcomes, and the real 4003 close.
+
+The room's home process orders membership, departures and reconnect
+snapshots. A busy room can delay teardown before it registers the token.
+A partition or an unread frame can delay close detection. Reconnect
+requires a pending record from the home process. A restarted or separate
+process without that record declines restoration. This advances A04
+and A11.
