@@ -2492,7 +2492,7 @@ impl EnhancedGameServer {
                                     client_app_context.as_ref().and_then(|app| app.max_rooms)
                                 {
                                     match self
-                                        .acquire_application_room_cap_lock(app_id, app_limit)
+                                        .acquire_application_room_cap_lock(app_id, app_limit, None)
                                         .await
                                     {
                                         Ok(guard) => {
@@ -2637,40 +2637,35 @@ impl EnhancedGameServer {
                         ));
                     }
 
-                    let creation_owner = PendingRoomCreation::new(Arc::clone(&self.metrics));
                     let creation_result = async {
                         if let (Some(app_id), Some(app_limit)) = (
                             client_app_id,
                             client_app_context.as_ref().and_then(|app| app.max_rooms),
                         ) {
                             application_cap_lock = Some(
-                                self.acquire_application_room_cap_lock(app_id, app_limit)
+                                self.acquire_application_room_cap_lock(app_id, app_limit, source_close)
                                     .await?,
                             );
                         }
 
                         let cap_lock_key = format!("game_room_cap:{game_name}");
-                        game_cap_lock = Some(self.keep_lock_renewed(
-                            self.distributed_lock
-                                .acquire(
-                                    &cap_lock_key,
-                                    self.coordination_lock_ttl(GAME_ROOM_CAP_LOCK_TTL),
-                                )
-                                .await
-                                .map_err(|error| {
-                                    tracing::error!(%game_name, %error, "Failed to acquire game room-cap lock");
-                                    self.metrics.increment_room_cap_lock_failures();
-                                    JoinRoomError::Internal(error)
-                                })?,
-                            self.coordination_lock_ttl(GAME_ROOM_CAP_LOCK_TTL),
-                        ));
-                        self.metrics.increment_room_cap_lock_acquisitions();
+                        game_cap_lock = Some(
+                            self.acquire_room_cap_lock(
+                                &cap_lock_key,
+                                GAME_ROOM_CAP_LOCK_TTL,
+                                source_close,
+                            )
+                            .await?,
+                        );
 
                         if self.is_draining() {
                             return Err(JoinRoomError::ServerDraining);
                         }
-                        let current_room_count =
-                            self.database.get_game_room_count(game_name).await?;
+                        let current_room_count = Self::wait_for_room_cap(
+                            source_close,
+                            self.database.get_game_room_count(game_name),
+                        )
+                        .await??;
                         if current_room_count >= self.config.max_rooms_per_game {
                             self.metrics.increment_room_cap_denials();
                             return Err(JoinRoomError::MaxRoomsPerGameExceeded(
@@ -2686,23 +2681,20 @@ impl EnhancedGameServer {
                         // faces no aggregate bound. Checked under a server-global
                         // lock so concurrent creations across games cannot
                         // overshoot, mirroring the per-game and per-app caps.
-                        server_cap_lock = Some(self.keep_lock_renewed(
-                            self.distributed_lock
-                                .acquire(
-                                    "server_room_cap",
-                                    self.coordination_lock_ttl(SERVER_ROOM_CAP_LOCK_TTL),
-                                )
-                                .await
-                                .map_err(|error| {
-                                    tracing::error!(%error, "Failed to acquire server room-cap lock");
-                                    self.metrics.increment_room_cap_lock_failures();
-                                    JoinRoomError::Internal(error)
-                                })?,
-                            self.coordination_lock_ttl(SERVER_ROOM_CAP_LOCK_TTL),
-                        ));
-                        self.metrics.increment_room_cap_lock_acquisitions();
+                        server_cap_lock = Some(
+                            self.acquire_room_cap_lock(
+                                "server_room_cap",
+                                SERVER_ROOM_CAP_LOCK_TTL,
+                                source_close,
+                            )
+                            .await?,
+                        );
 
-                        let total_room_count = self.database.get_total_room_count().await?;
+                        let total_room_count = Self::wait_for_room_cap(
+                            source_close,
+                            self.database.get_total_room_count(),
+                        )
+                        .await??;
                         if total_room_count >= self.config.max_rooms {
                             self.metrics.increment_room_cap_denials();
                             return Err(JoinRoomError::MaxRoomsExceeded(MaxRoomsExceededError {
@@ -2720,6 +2712,13 @@ impl EnhancedGameServer {
                         // resolves by code) can observe an unlocked row.
                         let creation_password = password.map(RoomPasswordCredential::new);
                         let sealed_creation = creation_password.is_some();
+                        // A ready count can return in the same poll that
+                        // requests close. Order the write admission against
+                        // close, then own storage and publication or rollback.
+                        if source_close.is_some_and(|close| close.commit_if_open(|| ()).is_none()) {
+                            return Err(JoinRoomError::ConnectionClosed);
+                        }
+                        let creation_owner = PendingRoomCreation::new(Arc::clone(&self.metrics));
                         let room = match self
                             .database
                             .create_pending_room_owned_classified(
@@ -2866,12 +2865,12 @@ impl EnhancedGameServer {
                             return Err(JoinRoomError::ServerDraining);
                         }
 
-                        Ok(room)
+                        Ok((room, creation_owner))
                     }
                     .await;
 
                     match creation_result {
-                        Ok(mut room) => {
+                        Ok((mut room, creation_owner)) => {
                             // The database generates a new room id, so no other
                             // room-scoped publisher can address its lane before
                             // creation. Retain the lane through routing and
@@ -3074,37 +3073,66 @@ impl EnhancedGameServer {
         self.release_renewed_cap_lock(&mut lock).await;
     }
 
+    async fn wait_for_room_cap<T>(
+        source_close: Option<&ConnectionCloseSignal>,
+        work: impl std::future::Future<Output = T>,
+    ) -> Result<T, JoinRoomError> {
+        match source_close {
+            Some(close) => close
+                .while_open(work)
+                .await
+                .ok_or(JoinRoomError::ConnectionClosed),
+            None => Ok(work.await),
+        }
+    }
+
+    async fn acquire_room_cap_lock(
+        &self,
+        key: &str,
+        ttl: Duration,
+        source_close: Option<&ConnectionCloseSignal>,
+    ) -> Result<LeaseRenewalGuard, JoinRoomError> {
+        let ttl = self.coordination_lock_ttl(ttl);
+        let handle = Self::wait_for_room_cap(source_close, self.distributed_lock.acquire(key, ttl))
+            .await?
+            .map_err(|error| {
+                tracing::error!(%key, %error, "Failed to acquire room-cap lock");
+                self.metrics.increment_room_cap_lock_failures();
+                JoinRoomError::Internal(error)
+            })?;
+        self.metrics.increment_room_cap_lock_acquisitions();
+        Ok(self.keep_lock_renewed(handle, ttl))
+    }
+
     async fn acquire_application_room_cap_lock(
         &self,
         app_id: uuid::Uuid,
         app_limit: u32,
+        source_close: Option<&ConnectionCloseSignal>,
     ) -> Result<LeaseRenewalGuard, JoinRoomError> {
         let cap_lock_key = format!("application_room_cap:{app_id}");
         // The renewal guard must be alive before the enforcement read below:
         // the whole point of this lock (issue #550) is that the cap count is
         // decided under a live lease, so a stalled storage read cannot let a
         // second claimer acquire the expired key and pass the same check.
-        let mut cap_lock = self.keep_lock_renewed(
-            self.distributed_lock
-                .acquire(
-                    &cap_lock_key,
-                    self.coordination_lock_ttl(APPLICATION_ROOM_CAP_LOCK_TTL),
-                )
-                .await
-                .map_err(|error| {
-                    tracing::error!(%app_id, %error, "Failed to acquire application room-cap lock");
-                    self.metrics.increment_room_cap_lock_failures();
-                    JoinRoomError::Internal(error)
-                })?,
-            self.coordination_lock_ttl(APPLICATION_ROOM_CAP_LOCK_TTL),
-        );
-        self.metrics.increment_room_cap_lock_acquisitions();
-        let current = match self.database.get_application_room_count(&app_id).await {
-            Ok(current) => current,
-            Err(error) => {
+        let mut cap_lock = self
+            .acquire_room_cap_lock(&cap_lock_key, APPLICATION_ROOM_CAP_LOCK_TTL, source_close)
+            .await?;
+        let count = Self::wait_for_room_cap(
+            source_close,
+            self.database.get_application_room_count(&app_id),
+        )
+        .await;
+        let current = match count {
+            Ok(Ok(current)) => current,
+            Ok(Err(error)) => {
                 tracing::error!(%app_id, %error, "Failed to count application rooms");
                 self.release_renewed_lock(&mut cap_lock).await;
                 return Err(JoinRoomError::Internal(error));
+            }
+            Err(closed) => {
+                self.release_renewed_lock(&mut cap_lock).await;
+                return Err(closed);
             }
         };
         let limit = usize::try_from(app_limit).unwrap_or(usize::MAX);

@@ -19666,3 +19666,32 @@ record refuses the restore, including after restart. An admitted restore
 can delay another claim until it commits a baseline or rolls back. If
 delivery fails after baseline commit, the original token was already
 spent. This advances A04 and A05.
+
+### F404 — Queued room creation could hold WebSocket teardown
+
+At `792475cc` under #826, a room creation held the socket lifecycle while
+waiting for room capacity. The paused-clock check missed its 10 ms bound.
+A real WebSocket received 4003, but its handler still occupied a connection
+slot five seconds later. The game cap stayed held through both checks
+(Linux ARM64, Nextest `f159b3ff`).
+
+The server cancels queued application, game, and server cap waits and pending
+capacity reads when it starts closing the source socket. It releases earlier
+leases, including the room-code lease. If close wins at the final count
+handoff, the server does not insert a room. Once storage admission wins, the
+owned transaction finishes publication or rolls back.
+
+Sixteen focused ARM64 checks pass (Nextest `c0389996`). They cover all three
+cap locks, stalled application and server counts, room cap refusal, generated
+code collisions, shutdown drain, and rollback after storage admission. A real
+WebSocket tears down with the cap still held. A fresh socket then gets a
+`RoomJoined` baseline. Removing only the final close check caused one insert
+before rollback. The handoff regression caught it (Nextest `c70a083b`).
+
+One home process orders the capacity checks and insert. A live creator must
+wait for those checks or receive a refusal if the cap is full. Other processes
+cannot enforce this home's caps or restore its rooms. A partition can delay
+close detection and let storage admission win. On restart, the in-memory
+rooms and their reconnect records are lost. A client that never got a
+`RoomJoined` baseline can make a fresh request after it reconnects and must
+use the returned room identity. This advances A04 and A11.

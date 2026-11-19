@@ -77,6 +77,12 @@ Creation-specific fields such as `max_players` and `supports_authority`
 apply only when a room is created (implicit or explicit). When joining an
 existing room, current room settings remain unchanged.
 
+Room creation waits for the home server to check capacity. If the server
+starts closing the WebSocket before it admits the storage write, it cancels
+creation and releases the reserved room code. After admission, the server
+finishes publishing the room or rolls it back if it cannot queue the initial
+`RoomJoined` response.
+
 ## Joining an Existing Room
 
 Other players join by including the `room_code` in their `JoinRoom`

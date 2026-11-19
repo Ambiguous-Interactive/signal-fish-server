@@ -1290,6 +1290,7 @@ struct DrainAfterCreateDatabase {
     pause_after_create_once: AtomicBool,
     create_committed_reached: Notify,
     release_committed_create: Notify,
+    close_after_total_room_count: StdMutex<Option<crate::coordination::ConnectionCloseSignal>>,
     pause_empty_cleanup_once: AtomicBool,
     empty_cleanup_reached: Notify,
     release_empty_cleanup: Notify,
@@ -1323,6 +1324,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1363,6 +1365,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1396,6 +1399,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1429,6 +1433,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(true),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1462,6 +1467,7 @@ impl DrainAfterCreateDatabase {
             pause_after_create_once: AtomicBool::new(false),
             create_committed_reached: Notify::new(),
             release_committed_create: Notify::new(),
+            close_after_total_room_count: StdMutex::new(None),
             pause_empty_cleanup_once: AtomicBool::new(false),
             empty_cleanup_reached: Notify::new(),
             release_empty_cleanup: Notify::new(),
@@ -1922,7 +1928,11 @@ impl GameDatabase for DrainAfterCreateDatabase {
     }
 
     async fn get_total_room_count(&self) -> anyhow::Result<usize> {
-        self.inner.get_total_room_count().await
+        let count = self.inner.get_total_room_count().await?;
+        if let Some(close) = self.close_after_total_room_count.lock().unwrap().take() {
+            close.request_close(CloseReason::ActivityTimeout);
+        }
+        Ok(count)
     }
 
     async fn health_check(&self) -> bool {
@@ -11164,15 +11174,333 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
 
 struct LockAttemptProbe {
     inner: InMemoryDistributedLock,
-    key: &'static str,
+    key: String,
     changed: watch::Sender<usize>,
 }
 
+fn queued_room_creation_frame(room_code: Option<String>) -> crate::protocol::ClientMessage {
+    crate::protocol::ClientMessage::JoinRoom {
+        game_name: "creation-close".to_string(),
+        room_code,
+        player_name: "Creator".to_string(),
+        max_players: None,
+        supports_authority: None,
+        relay_transport: None,
+        password: None,
+        join_only: None,
+    }
+}
+
+const CREATION_TEST_APP_ID: uuid::Uuid = uuid::Uuid::from_u128(404);
+
+async fn set_room_creation_test_app(server: &EnhancedGameServer, creator: &PlayerId) {
+    let mut context = server
+        .app_id_allowlist
+        .resolve_app_id("creation-close", std::net::Ipv4Addr::LOCALHOST.into())
+        .await
+        .unwrap();
+    context.id = CREATION_TEST_APP_ID;
+    context.max_rooms = Some(2);
+    server.set_client_app_context(creator, context);
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_room_creation() {
+    let app_key = format!("application_room_cap:{CREATION_TEST_APP_ID}");
+    let keys = [
+        app_key.as_str(),
+        "game_room_cap:creation-close",
+        "server_room_cap",
+    ];
+    for (index, key) in keys.into_iter().enumerate() {
+        let lock = Arc::new(LockAttemptProbe::new(key));
+        let server = create_test_server_with_message_coordinator_and_lock(
+            ServerConfig::default(),
+            Arc::new(InMemoryMessageCoordinator::new()),
+            lock.clone(),
+            create_test_database().await,
+        )
+        .await;
+        let held = lock.acquire(key, Duration::from_secs(10)).await.unwrap();
+        let (creator, mut messages) =
+            register_client(&server, "127.0.0.1:48102".parse().unwrap()).await;
+        set_room_creation_test_app(&server, &creator).await;
+        let mut dispatch = Box::pin(server.handle_client_message(
+            &creator,
+            queued_room_creation_frame(Some("NEW001".to_string())),
+        ));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        tokio::select! {
+            biased;
+            () = &mut dispatch => panic!("creation returned before waiting for {key}"),
+            () = lock.wait_for_attempts(2) => {}
+        }
+        assert!(server
+            .connection_manager
+            .request_close_for(&creator, CloseReason::ActivityTimeout));
+        let bound = Duration::from_millis(10);
+        timeout(bound, dispatch)
+            .await
+            .unwrap_or_else(|_| panic!("close must cancel creation while {key} is held"));
+        timeout(bound, server.unregister_client(&creator))
+            .await
+            .expect("teardown must finish before the cap lock opens");
+        let code_key = "room_join:creation-close:NEW001";
+        assert!(!lock.is_locked(code_key).await.unwrap());
+        for earlier_key in keys.iter().take(index) {
+            assert!(
+                !lock.is_locked(earlier_key).await.unwrap(),
+                "leaked {earlier_key}"
+            );
+        }
+        assert!(
+            lock.release(&held).await.unwrap(),
+            "original owner kept {key}"
+        );
+        assert_no_queued_message(&mut messages, "canceled creation sends no reply");
+        assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            server
+                .metrics
+                .room_cap_lock_failures
+                .load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(server.database.get_total_room_count().await.unwrap(), 0);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_room_creation_during_cap_count() {
+    assert_close_cancels_room_creation_during_cap_count(CloseDuringRoomCount::Application).await;
+    assert_close_cancels_room_creation_during_cap_count(CloseDuringRoomCount::Server).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_at_room_creation_cap_handoff_prevents_the_insert() {
+    assert_close_cancels_room_creation_during_cap_count(CloseDuringRoomCount::Handoff).await;
+}
+
+#[derive(Debug)]
+enum CloseDuringRoomCount {
+    Application,
+    Server,
+    Handoff,
+}
+
+async fn assert_close_cancels_room_creation_during_cap_count(stage: CloseDuringRoomCount) {
+    let database = Arc::new(InMemoryDatabase::new());
+    database.initialize().await.unwrap();
+    let mut database_adapter = DrainAfterCreateDatabase::new(database.clone());
+    database_adapter.trigger_drain_after_create = false;
+    database_adapter.conforming_pending_creation = true;
+    let database_adapter = Arc::new(database_adapter);
+    let lock = Arc::new(InMemoryDistributedLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database_adapter.clone(),
+    )
+    .await;
+    let (creator, mut messages) =
+        register_client(&server, "127.0.0.1:48102".parse().unwrap()).await;
+    set_room_creation_test_app(&server, &creator).await;
+    let close = server
+        .connection_manager
+        .close_signal_for(&creator)
+        .unwrap();
+    match stage {
+        CloseDuringRoomCount::Application => {
+            database.pause_next_get_application_room_count_for_test()
+        }
+        CloseDuringRoomCount::Server => database.pause_next_get_total_room_count_for_test(),
+        CloseDuringRoomCount::Handoff => {
+            *database_adapter
+                .close_after_total_room_count
+                .lock()
+                .unwrap() = Some(close.clone());
+        }
+    }
+    let mut dispatch = Box::pin(server.handle_client_message(
+        &creator,
+        queued_room_creation_frame(Some("NEW002".to_string())),
+    ));
+    if !matches!(stage, CloseDuringRoomCount::Handoff) {
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        let count_read = async {
+            if matches!(stage, CloseDuringRoomCount::Application) {
+                database
+                    .wait_for_paused_get_application_room_count_for_test()
+                    .await;
+            } else {
+                database
+                    .wait_for_paused_get_total_room_count_for_test()
+                    .await;
+            }
+        };
+        tokio::select! {
+            biased;
+            () = &mut dispatch => panic!("creation finished before the {stage:?} count"),
+            result = timeout(Duration::from_secs(1), count_read) => {
+                result.expect("creator must reach the count under its leases");
+            }
+        }
+        assert!(close.request_close(CloseReason::ActivityTimeout));
+    }
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close must cancel the count without waiting for storage");
+    assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    for key in [
+        "server_room_cap",
+        "game_room_cap:creation-close",
+        "room_join:creation-close:NEW002",
+        &format!("application_room_cap:{CREATION_TEST_APP_ID}"),
+    ] {
+        assert!(!lock.is_locked(key).await.unwrap(), "leaked {key}");
+    }
+    assert_eq!(database.get_total_room_count().await.unwrap(), 0);
+    assert_eq!(
+        server.metrics.rooms_created.load(Ordering::Relaxed),
+        0,
+        "close must prevent even a later-rolled-back insert ({stage:?})"
+    );
+    assert_no_queued_message(&mut messages, "canceled creation sends no reply");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn room_creation_rolls_back_when_socket_closes_after_storage_admission() {
+    let database = Arc::new(DrainAfterCreateDatabase::with_paused_create(
+        create_test_database().await,
+    ));
+    let lock = Arc::new(InMemoryDistributedLock::new());
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        database.clone(),
+    )
+    .await;
+    let (creator, mut messages) =
+        register_client(&server, "127.0.0.1:48102".parse().unwrap()).await;
+    let mut dispatch = Box::pin(server.handle_client_message(
+        &creator,
+        queued_room_creation_frame(Some("NEW003".to_string())),
+    ));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    tokio::select! {
+        biased;
+        () = &mut dispatch => panic!("creation finished before the write"),
+        result = timeout(Duration::from_secs(1), database.wait_for_committed_create()) => {
+            result.expect("creator must enter the write before close");
+        }
+    }
+    assert!(server
+        .connection_manager
+        .request_close_for(&creator, CloseReason::ActivityTimeout));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    assert!(lock
+        .is_locked("room_join:creation-close:NEW003")
+        .await
+        .unwrap());
+    database.unblock_create();
+    timeout(Duration::from_secs(1), dispatch)
+        .await
+        .expect("the admitted creation must finish rollback");
+    assert!(!lock
+        .is_locked("room_join:creation-close:NEW003")
+        .await
+        .unwrap());
+    server.unregister_client(&creator).await;
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+    assert_eq!(server.metrics.rooms_deleted.load(Ordering::Relaxed), 1);
+    assert_eq!(database.get_total_room_count().await.unwrap(), 0);
+    assert_no_queued_message(&mut messages, "closed creator gets no baseline");
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_finishes_while_room_creation_cap_is_held() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let key = "game_room_cap:creation-close";
+    let lock = Arc::new(LockAttemptProbe::new(key));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        create_test_database().await,
+    )
+    .await;
+    let held = lock.acquire(key, Duration::from_secs(30)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let app = crate::websocket::create_router("*").with_state(Arc::clone(&server));
+    let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop.await;
+        })
+        .await
+        .unwrap();
+    });
+    let bound = Duration::from_secs(5);
+    let (mut socket, _) = timeout(bound, connect_async(&url)).await.unwrap().unwrap();
+    let frame = serde_json::to_string(&queued_room_creation_frame(None)).unwrap();
+    socket.send(Message::text(frame.clone())).await.unwrap();
+    lock.wait_for_attempts(2).await;
+    let [creator] = server.connection_manager.client_ids().try_into().unwrap();
+    assert!(server
+        .connection_manager
+        .request_close_for(&creator, CloseReason::ActivityTimeout));
+    let close = timeout(bound, socket.next()).await;
+    drop(socket);
+    let remaining = server.wait_for_shutdown_connections(bound).await;
+    assert!(
+        matches!(close, Ok(Some(Ok(Message::Close(Some(frame))))) if u16::from(frame.code) == 4003)
+    );
+    assert_eq!(
+        remaining, 0,
+        "teardown must finish before the cap lock opens"
+    );
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 0);
+    assert!(lock.release(&held).await.unwrap());
+
+    let (mut replacement, _) = timeout(bound, connect_async(&url)).await.unwrap().unwrap();
+    replacement.send(Message::text(frame)).await.unwrap();
+    let baseline = timeout(bound, replacement.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(
+            serde_json::from_str::<ServerMessage>(baseline.to_text().unwrap()).unwrap(),
+            ServerMessage::RoomJoined { .. }
+        ),
+        "replacement gets its own creation baseline"
+    );
+    assert_eq!(server.metrics.rooms_created.load(Ordering::Relaxed), 1);
+    drop(replacement);
+    shutdown.send(()).unwrap();
+    timeout(bound, serve).await.unwrap().unwrap();
+}
+
 impl LockAttemptProbe {
-    fn new(key: &'static str) -> Self {
+    fn new(key: &str) -> Self {
         Self {
             inner: InMemoryDistributedLock::new(),
-            key,
+            key: key.to_string(),
             changed: watch::channel(0).0,
         }
     }

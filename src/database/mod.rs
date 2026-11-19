@@ -1213,13 +1213,13 @@ pub trait GameDatabase: Send + Sync {
         anyhow::bail!("room publication state is not supported by this database")
     }
 
-    /// Get room count for a specific game (for rate limiting)
+    /// Get the room count for a specific game. The caller can drop a pending read.
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize>;
 
     /// Get the authoritative live-room count for one application across every
     /// game name. Backends that cannot provide this query must return an error;
     /// configured application quotas fail closed rather than using a cache or
-    /// silently bypassing the limit.
+    /// silently bypassing the limit. The caller can drop a pending read.
     async fn get_application_room_count(&self, _application_id: &Uuid) -> Result<usize> {
         anyhow::bail!("application room counting is not supported by this database")
     }
@@ -1227,7 +1227,8 @@ pub trait GameDatabase: Send + Sync {
     /// Get the authoritative live-room count across every game name
     /// (server-wide ceiling). Backends that cannot provide this query must
     /// return an error; configured server-wide ceilings fail closed rather
-    /// than using a cache or silently bypassing the limit.
+    /// than using a cache or silently bypassing the limit. The caller can drop
+    /// a pending read.
     async fn get_total_room_count(&self) -> Result<usize> {
         anyhow::bail!("total room counting is not supported by this database")
     }
