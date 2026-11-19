@@ -19637,3 +19637,32 @@ win. If the room gate is busy, the server waits for access before reading the
 baseline and changing the roster. The shipped server refuses a join to a
 missing room, including on a fresh process after the home process restarts.
 Restart loses the old roster and replay history. This advances A04 and A10.
+
+### F403 — A queued reconnect could hold teardown and keep its claim
+
+At `26bb130c` under #826, a real WebSocket received close code 4003 after
+claiming a pending record. The socket still occupied a teardown slot at the
+five-second deadline while the room gate stayed held. Paused-clock controls
+also found that close could leave a reconnect waiting for its socket lifecycle
+or allow it to enter a storage write at the room gate handoff. All three
+regressions failed on Linux ARM64 (Nextest `273102b9`).
+
+The server ties the lifecycle, claim, and room admission waits to the source
+socket. If close wins room admission, the server releases the claim before
+changing the room. The replacement socket can claim the same token while the
+gate is still held. If admission wins first, the transaction must finish
+publication or roll back before releasing its claim.
+
+All six focused checks pass on Linux ARM64 (Nextest `890fa0a9`). The real
+socket test covers plain and correlated reconnects. Each gets one restore
+baseline and one observer restore after retry. The paused-clock cases cover
+a pinned expired record, close at the gate handoff, and rollback after close
+during an admitted write. The previous lost-baseline and owned publication
+recovery controls still pass.
+
+The room's home process orders restoration with other membership changes.
+A partition can delay close detection. A process that lacks the pending
+record refuses the restore, including after restart. An admitted restore
+can delay another claim until it commits a baseline or rolls back. If
+delivery fails after baseline commit, the original token was already
+spent. This advances A04 and A05.

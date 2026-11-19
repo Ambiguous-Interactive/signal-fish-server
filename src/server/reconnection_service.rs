@@ -8,7 +8,8 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use crate::coordination::{
-    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
+    ConnectionCloseSignal, RoomEventMutationGuard, RoomMessageTransactionOutcome,
+    RoomRecipientMessages,
 };
 
 use super::session_policy::{membership_session_decision, ActiveSessionPlan};
@@ -148,6 +149,13 @@ impl ReconnectionClaimGuard {
 
     fn retained_claim(&self) -> Option<Arc<ClaimedReconnection>> {
         self.claim.as_ref().map(Arc::clone)
+    }
+
+    /// Release a claim that has made no room changes.
+    async fn release(mut self) {
+        if let Some(claim) = self.claim.take() {
+            self.manager.release_reconnection_claim(&claim).await;
+        }
     }
 
     /// Return this reservation for retry with its current unpublished-role ownership.
@@ -948,6 +956,7 @@ impl EnhancedGameServer {
         let publication_progress_in_task = Arc::clone(&publication_progress);
         let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
+            let socket_dispatched = source_lifecycle.is_some();
             let Some(lifecycle) = source_lifecycle.or_else(|| {
                 server
                     .connection_manager
@@ -955,7 +964,24 @@ impl EnhancedGameServer {
             }) else {
                 return false;
             };
-            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let lock_lifecycle = Arc::clone(&lifecycle).lock_owned();
+            let (source_close, _lifecycle_guard) = if socket_dispatched {
+                let Some(close) = server
+                    .connection_manager
+                    .close_signal_for_lifecycle(&current_player_id, &lifecycle)
+                else {
+                    return false;
+                };
+                let Some(guard) = close.while_open(lock_lifecycle).await else {
+                    return false;
+                };
+                if close.requested_reason().is_some() {
+                    return false;
+                }
+                (Some(close), guard)
+            } else {
+                (None, lock_lifecycle.await)
+            };
             if lifecycle.player_id() != current_player_id
                 || !server
                     .connection_manager
@@ -970,6 +996,7 @@ impl EnhancedGameServer {
                 auth_token,
                 effective_player_id,
                 operation_id,
+                source_close.as_ref(),
                 terminal_response_committed_in_task,
                 lifecycle_finalized_in_task,
                 publication_progress_in_task,
@@ -1123,6 +1150,7 @@ impl EnhancedGameServer {
         auth_token: String,
         effective_player_id: Option<Arc<tokio::sync::RwLock<PlayerId>>>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        source_close: Option<&ConnectionCloseSignal>,
         terminal_response_committed: Arc<std::sync::atomic::AtomicBool>,
         lifecycle_finalized: Arc<std::sync::atomic::AtomicBool>,
         publication_progress: Arc<ReconnectPublicationProgress>,
@@ -1198,16 +1226,24 @@ impl EnhancedGameServer {
         // room or connection side effects. The record is only removed after
         // the restore succeeds; post-claim failures release it for retry.
         let reconnect_identity = self.client_reconnection_identity(current_player_id);
-        let claim = match reconnection_manager
-            .claim_reconnection_with_identity(
-                current_player_id,
-                reconnect_player_id,
-                room_id,
-                auth_token,
-                reconnect_identity.as_deref(),
-            )
-            .await
-        {
+        let claim = reconnection_manager.claim_reconnection_with_identity(
+            current_player_id,
+            reconnect_player_id,
+            room_id,
+            auth_token,
+            reconnect_identity.as_deref(),
+        );
+        // Claim insertion and return happen in the same poll. Close may
+        // cancel the lock wait, but every acquired claim stays owned below.
+        let claim = if let Some(close) = source_close {
+            let Some(result) = close.while_open(claim).await else {
+                return false;
+            };
+            result
+        } else {
+            claim.await
+        };
+        let claim = match claim {
             Ok(claim) => claim,
             Err(error) => {
                 // Typed classification: the error variant maps to its own
@@ -1270,11 +1306,24 @@ impl EnhancedGameServer {
         // Reconnected baseline, and PlayerReconnected enqueue are one room
         // mutation transaction. In particular, a ready/spectator/join snapshot
         // cannot observe the restored DB member before its route is published.
-        let mut room_event_guard = Some(
-            self.message_coordinator
-                .lock_room_event_mutation(room_id)
-                .await,
-        );
+        let lock_room = self.message_coordinator.lock_room_event_mutation(room_id);
+        let mut room_event_guard = if let Some(close) = source_close {
+            // The room gate admits restoration only while this socket is open.
+            // Once admitted, the owned transaction must finish or roll back.
+            match close
+                .while_open(lock_room)
+                .await
+                .and_then(|guard| close.commit_if_open(|| guard))
+            {
+                Some(guard) => Some(guard),
+                None => {
+                    claim_guard.release().await;
+                    return false;
+                }
+            }
+        } else {
+            Some(lock_room.await)
+        };
         panic_recovery
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
