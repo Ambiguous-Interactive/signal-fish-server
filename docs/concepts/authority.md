@@ -256,6 +256,11 @@ claim) and works even when no member was primed to claim: the departing
 authority picks any seated member, including one that never requested the
 role.
 
+If the server starts closing your WebSocket before it admits the transfer,
+it drops the command. An admitted transfer can still complete after close.
+Use the room snapshot after reconnect to learn who holds the role before
+deciding whether to request a transfer again.
+
 ### The Role and the Transport Host Are Not the Same Thing
 
 When a v3 room finalizes, the server elects a **transport host** for the

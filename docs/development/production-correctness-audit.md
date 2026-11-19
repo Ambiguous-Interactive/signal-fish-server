@@ -52,7 +52,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483 |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer on close repaired in F406 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
@@ -19722,3 +19722,34 @@ partition can delay close detection. Reconnect uses the current routing
 and session plan after restoration. A process without the pending record
 declines recovery, including after restart. This advances A04 and A11.
 The broader audit stays open.
+
+### F406 — A queued authority transfer could commit after WebSocket close
+
+At `9c43425a` under #826, a v3 authority transfer held the source lifecycle
+while it waited for the room gate. After a close request, opening the gate
+let the old command change the stored authority. A real WebSocket received
+4003, but its teardown could not reach the held room gate within five
+seconds. Both controls failed on Linux ARM64 (Nextest `7333f09f`).
+
+The server ties the lifecycle, room gate, routing lease and storage read
+waits to the physical source socket. It checks close again before admitting
+the write. This lets teardown reach the room gate when close wins. Once
+admitted, the server still finishes the role write and publishes any
+committed change in room event and replay order.
+
+The live control preserves one personalized authority change and the
+correlated result. The route wait control checks that close leaves the
+stored role intact and emits no transfer. The real WebSocket resumes with
+the original player, room and authority in its reconnect snapshot. The
+other live socket sees no grant to the target. The commit fence control
+closes the source after the write and confirms that the survivor still
+sees the committed transfer. All 12 focused controls pass on Linux ARM64
+(Nextest `5eb4be56`).
+
+The room's home server orders the authority change with departure and
+reconnect. It waits for the room gate, live routes and membership state
+before granting a transfer. A partition can delay close detection and let
+the write win. A client that lost its result can use the reconnect snapshot
+to learn the current role. A process without the room or pending reconnect
+record cannot recover the prior role, including after an in-memory restart.
+This advances A04, A05 and A09. The broader campaign stays open.
