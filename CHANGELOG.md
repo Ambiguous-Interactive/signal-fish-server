@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Require custom coordination locks to leave no lease behind when a pending `try_acquire` is canceled.
 - **Breaking:** Use Jiff timestamps and signed durations in the Rust server API.
   Preserve v2 and metrics timestamp bytes and the existing v2 frame budget.
 - Reduce server work and memory use for repeated disconnects and bulk reconnect cleanup that removes no records (#636).

@@ -11176,6 +11176,7 @@ pub(super) struct LockAttemptProbe {
     inner: InMemoryDistributedLock,
     key: String,
     changed: watch::Sender<usize>,
+    try_acquire_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn queued_room_creation_frame(room_code: Option<String>) -> crate::protocol::ClientMessage {
@@ -11502,6 +11503,14 @@ impl LockAttemptProbe {
             inner: InMemoryDistributedLock::new(),
             key: key.to_string(),
             changed: watch::channel(0).0,
+            try_acquire_gate: None,
+        }
+    }
+
+    pub(super) fn with_try_acquire_gate(key: &str, gate: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            try_acquire_gate: Some(gate),
+            ..Self::new(key)
         }
     }
 
@@ -11530,6 +11539,10 @@ impl DistributedLock for LockAttemptProbe {
     }
 
     async fn try_acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<Option<LockHandle>> {
+        if let Some(gate) = self.try_acquire_gate.as_ref().filter(|_| key == self.key) {
+            self.changed.send_modify(|attempts| *attempts += 1);
+            gate.notified().await;
+        }
         self.inner.try_acquire(key, ttl).await
     }
 

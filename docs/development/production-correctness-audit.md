@@ -19856,10 +19856,12 @@ At `b56d4e9e` under #826, a rotation waiting for the old-code join lease or
 the room mutation gate ignored the source socket's close signal. Both
 paused-clock controls exceeded 10 ms with the gate held. Releasing the gate
 let the closed socket's command replace the code. The open-socket controls
-passed (Linux ARM64, Nextest `f38bfa18`).
+passed (Linux ARM64, Nextest `f38bfa18`). The first repair still held the
+old lease while a candidate lookup stalled. A paused provider reproduced
+that teardown wait (Nextest `6c51e6e5`).
 
-The server now checks the source lifecycle and waits for the old-code
-lease and room mutation gate only while the source stays open. It orders
+The server now checks the source lifecycle and waits for either code
+lease and the room mutation gate only while the source stays open. It orders
 each storage attempt against close after taking the room gate and both
 code leases. If close wins, the existing mapping stays valid and the
 server releases any leases from the attempt. If admission wins, the owned
@@ -19867,7 +19869,7 @@ task completes the storage attempt before releasing the guards. A storage
 collision requires another admission decision before retry. A successful
 reply goes to the requesting socket.
 
-On Linux ARM64, 18 controls passed (Nextest `af1e79eb`). A real v3 socket
+On Linux ARM64, 21 controls passed (Nextest `91a821f5`). A real v3 socket
 received close 4003. Teardown reached the held room gate. The requester
 reconnected with the original code and a newcomer used it to join the
 same room. A second control closed after storage started, then verified

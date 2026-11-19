@@ -6364,24 +6364,43 @@ fn assert_eviction_result(
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn closing_socket_cancels_rotation_waiting_for_room_gate() {
-    qualify_queued_room_code_rotation(false, true).await;
+    qualify_queued_room_code_rotation(RotationWait::RoomMutation, true).await;
 }
 
 /// #826: a rotation must yield while an old-code join holds its lease.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn closing_socket_cancels_rotation_waiting_for_old_code() {
-    qualify_queued_room_code_rotation(true, true).await;
+    qualify_queued_room_code_rotation(RotationWait::OldCode, true).await;
+}
+
+/// #826: a pending candidate acquisition must release the old-code lease on close.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_rotation_waiting_for_candidate_code() {
+    qualify_queued_room_code_rotation(RotationWait::CandidateCode, true).await;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RotationWait {
+    RoomMutation,
+    OldCode,
+    CandidateCode,
 }
 
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
 async fn open_socket_completes_queued_room_code_rotation() {
-    qualify_queued_room_code_rotation(false, false).await;
-    qualify_queued_room_code_rotation(true, false).await;
+    for wait in [
+        RotationWait::RoomMutation,
+        RotationWait::OldCode,
+        RotationWait::CandidateCode,
+    ] {
+        qualify_queued_room_code_rotation(wait, false).await;
+    }
 }
 
-async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source: bool) {
+async fn qualify_queued_room_code_rotation(wait: RotationWait, close_source: bool) {
     use super::room_service_tests::{
         create_test_server_with_message_coordinator_and_lock, LockAttemptProbe,
     };
@@ -6390,7 +6409,12 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
     const OLD_LOCK: &str = "room_join:moderation-game:QUEOLD";
     const NEW_LOCK: &str = "room_join:moderation-game:QUENEW";
 
-    let lock = Arc::new(LockAttemptProbe::new(OLD_LOCK));
+    let candidate_gate = Arc::new(tokio::sync::Notify::new());
+    let lock = Arc::new(if wait == RotationWait::CandidateCode {
+        LockAttemptProbe::with_try_acquire_gate(NEW_LOCK, Arc::clone(&candidate_gate))
+    } else {
+        LockAttemptProbe::new(OLD_LOCK)
+    });
     let server = create_test_server_with_message_coordinator_and_lock(
         ServerConfig::default(),
         Arc::new(super::InMemoryMessageCoordinator::new()),
@@ -6415,7 +6439,7 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
     let lifecycle = server.client_lifecycle(&authority).unwrap();
     server.script_room_codes_for_test(["QUENEW"]);
 
-    let held_code = if wait_for_old_code {
+    let held_code = if wait == RotationWait::OldCode {
         Some(
             lock.try_acquire(OLD_LOCK, super::room_service::ROOM_JOIN_LOCK_TTL)
                 .await
@@ -6425,17 +6449,17 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
     } else {
         None
     };
-    let gate = if wait_for_old_code {
-        None
-    } else {
+    let room_gate = if wait == RotationWait::RoomMutation {
         Some(
             server
                 .message_coordinator
                 .lock_room_event_mutation(&room_id)
                 .await,
         )
+    } else {
+        None
     };
-    let attempts = gate
+    let attempts = room_gate
         .as_ref()
         .map(RoomEventMutationGuard::mutation_attempt_count_for_test);
     let operation_id = RoomOperationId::new_v4();
@@ -6448,18 +6472,22 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
         Arc::clone(&lifecycle),
     ));
     assert!(futures_util::poll!(&mut dispatch).is_pending());
-    if let (Some(gate), Some(attempts)) = (&gate, attempts) {
+    if let (Some(gate), Some(attempts)) = (&room_gate, attempts) {
         timeout(
             Duration::from_secs(1),
             gate.wait_for_mutation_attempt_after_for_test(attempts),
         )
         .await
         .expect("rotation waits at the room gate");
-        assert!(lock.is_locked(OLD_LOCK).await.unwrap());
-        assert!(lock.is_locked(NEW_LOCK).await.unwrap());
     } else {
-        lock.wait_for_attempts(2).await;
+        let attempts = if wait == RotationWait::OldCode { 2 } else { 1 };
+        lock.wait_for_attempts(attempts).await;
     }
+    assert!(lock.is_locked(OLD_LOCK).await.unwrap());
+    assert_eq!(
+        lock.is_locked(NEW_LOCK).await.unwrap(),
+        wait == RotationWait::RoomMutation
+    );
 
     let released_on_close = if close_source {
         assert!(server
@@ -6473,7 +6501,10 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
                 .await
                 .expect("rotation must release the source lifecycle");
             drop(teardown);
-            assert_eq!(lock.is_locked(OLD_LOCK).await.unwrap(), wait_for_old_code);
+            assert_eq!(
+                lock.is_locked(OLD_LOCK).await.unwrap(),
+                wait == RotationWait::OldCode
+            );
             assert!(!lock.is_locked(NEW_LOCK).await.unwrap());
         }
         done
@@ -6481,7 +6512,8 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
         assert!(futures_util::poll!(&mut dispatch).is_pending());
         false
     };
-    drop(gate);
+    drop(room_gate);
+    candidate_gate.notify_one();
     if let Some(held) = held_code {
         assert!(lock.release(&held).await.unwrap());
     }
@@ -6498,7 +6530,7 @@ async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source
                 .unwrap()
                 .map(|room| room.id),
             exists.then_some(room_id),
-            "room code {code}, close={close_source}, old-code wait={wait_for_old_code}"
+            "room code {code}, close={close_source}, wait={wait:?}"
         );
     }
     assert!(!lock.is_locked(OLD_LOCK).await.unwrap());

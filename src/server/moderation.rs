@@ -1194,7 +1194,14 @@ impl EnhancedGameServer {
             // not wait here while holding the old-code lock: another rotation
             // can hold this candidate as its old code while seeking ours.
             let lock_key = format!("room_join:{}:{}", room.game_name, candidate);
-            let lock_handle = match self.distributed_lock.try_acquire(&lock_key, ttl).await {
+            let Some(acquired) = close
+                .while_open(self.distributed_lock.try_acquire(&lock_key, ttl))
+                .await
+            else {
+                self.release_renewed_lock(&mut old_lock_renewal).await;
+                return;
+            };
+            let lock_handle = match acquired {
                 Ok(Some(handle)) => handle,
                 Ok(None) => continue,
                 Err(error) => {
