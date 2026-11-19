@@ -19551,3 +19551,28 @@ A partition or an unread frame can delay close detection. Reconnect
 requires a pending record from the home process. A restarted or separate
 process without that record declines restoration. This advances A04
 and A11.
+
+### F400 — A queued spectator leave could hold teardown
+
+At `bbe28c77` under #826, a spectator leave held the socket lifecycle
+while it waited for room mutation. Close missed the 10 ms paused-clock
+deadline (Linux ARM64, Nextest `f5fa6d67`). A WebSocket received close
+4003, and teardown missed the five-second bound to enter the held room
+queue (Nextest `5f4900f5`). The queued leave could otherwise take the
+room gate before teardown and publish `voluntary_leave`.
+
+Socket-originated leaves now observe close while waiting for the
+lifecycle and room gates. The server orders the room gate handoff
+against close before it changes the roster. The regression tests cover
+plain and correlated leaves, close during handoff, and a live reply
+with the original operation ID. Close before admission yields one
+`disconnected` event from teardown. Once admitted, the leave finishes
+and the room receives one `voluntary_leave` event even if the socket
+closes after storage removal.
+
+The room's home process orders departures with later roster changes
+and records them for seated-player replay. Teardown still waits for
+access to a busy room. An unread close frame or a network partition can
+delay detection and let the leave win. A spectator uses a fresh join
+after physical loss. A restarted or separate process cannot continue
+the old in-memory roster or replay history. This advances A04 and A10.

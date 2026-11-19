@@ -1786,6 +1786,12 @@ async fn real_socket_teardown_reaches_room_gate_while_player_leave_waits() {
     check_socket_teardown_at_room_gate(ClientMessage::LeaveRoom).await;
 }
 
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_reaches_room_gate_while_spectator_leave_waits() {
+    check_socket_teardown_at_room_gate(ClientMessage::LeaveSpectator).await;
+}
+
 async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
     use crate::coordination::CloseReason;
     use futures_util::{SinkExt, StreamExt};
@@ -1813,15 +1819,30 @@ async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
         .await
         .expect("WebSocket upgrade deadline")
         .expect("WebSocket upgrade succeeds");
-    let join = ClientMessage::JoinRoom {
+    let join_room = ClientMessage::JoinRoom {
         game_name: "closing-command".into(),
-        room_code: None,
+        room_code: Some("CLOSE8".into()),
         player_name: "Closing".into(),
         max_players: Some(2),
         supports_authority: Some(matches!(command, ClientMessage::AuthorityRequest { .. })),
         relay_transport: None,
         password: None,
         join_only: None,
+    };
+    let mut member_messages = None;
+    let join = if matches!(command, ClientMessage::LeaveSpectator) {
+        let (member, mut messages) = register_client(&server).await;
+        server.handle_client_message(&member, join_room).await;
+        drain_pending(&mut messages);
+        member_messages = Some(messages);
+        ClientMessage::JoinAsSpectator {
+            game_name: "closing-command".into(),
+            room_code: "CLOSE8".into(),
+            spectator_name: "Observer".into(),
+            password: None,
+        }
+    } else {
+        join_room
     };
     socket
         .send(Message::text(serde_json::to_string(&join).unwrap()))
@@ -1833,13 +1854,22 @@ async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
         .unwrap()
         .unwrap();
     let joined = serde_json::from_str::<ServerMessage>(frame.to_text().unwrap()).unwrap();
-    let ServerMessage::RoomJoined(joined) = joined else {
-        panic!("expected RoomJoined, received {joined:?}");
+    let (room_id, actor_id) = match joined {
+        ServerMessage::RoomJoined(joined) => (joined.room_id, joined.player_id),
+        ServerMessage::SpectatorJoined(joined) => (joined.room_id, joined.spectator_id),
+        _ => panic!("expected a join response, received {joined:?}"),
     };
+    if let Some(messages) = &mut member_messages {
+        let event = timeout(bound, messages.recv()).await.unwrap().unwrap();
+        assert!(matches!(
+            event.as_ref(),
+            ServerMessage::NewSpectatorJoined { spectator, .. } if spectator.id == actor_id
+        ));
+    }
 
     let gate = server
         .message_coordinator
-        .lock_room_event_mutation(&joined.room_id)
+        .lock_room_event_mutation(&room_id)
         .await;
     let attempts = gate.mutation_attempt_count_for_test();
     let command = serde_json::to_string(&command).unwrap();
@@ -1853,7 +1883,7 @@ async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
     let attempts = gate.mutation_attempt_count_for_test();
     assert!(server
         .connection_manager
-        .request_close_for(&joined.player_id, CloseReason::ActivityTimeout));
+        .request_close_for(&actor_id, CloseReason::ActivityTimeout));
 
     let (teardown_arrival, close_frame) = tokio::join!(
         timeout(
@@ -1882,6 +1912,16 @@ async fn check_socket_teardown_at_room_gate(command: ClientMessage) {
         Some(4003)
     );
     teardown_arrival.expect("teardown must enter the room mutation queue before the gate opens");
+    if let Some(messages) = &mut member_messages {
+        assert!(matches!(
+            messages.try_recv().unwrap().as_ref(),
+            ServerMessage::SpectatorDisconnected {
+                spectator_id, reason: Some(crate::protocol::SpectatorStateChangeReason::Disconnected),
+                ..
+            } if *spectator_id == actor_id
+        ));
+        assert!(messages.is_empty());
+    }
 }
 
 #[tokio::test(start_paused = true)]

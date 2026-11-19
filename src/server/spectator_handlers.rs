@@ -153,8 +153,16 @@ impl EnhancedGameServer {
     ) {
         let lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        if let Some(lifecycle) = &lifecycle {
-            let guard = lifecycle.lock().await;
+        let source_close = if let Some(lifecycle) = &lifecycle {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+            else {
+                return;
+            };
+            let Some(_guard) = close.while_open(lifecycle.lock()).await else {
+                return;
+            };
             if lifecycle.player_id() != *player_id
                 || !self
                     .connection_manager
@@ -162,36 +170,20 @@ impl EnhancedGameServer {
             {
                 return;
             }
-            drop(guard);
-        }
-        let outcome = match operation_id {
-            Some(operation_id) => {
-                self.spectator_service
-                    .leave_operation_from_lifecycle(player_id, operation_id, lifecycle.clone())
-                    .await
-            }
-            None => {
-                self.spectator_service
-                    .leave_from_lifecycle(player_id, lifecycle.clone())
-                    .await
-            }
-        };
-        let _guard = if let Some(lifecycle) = &lifecycle {
-            let guard = lifecycle.lock().await;
-            if lifecycle.player_id() != *player_id
-                || !self
-                    .connection_manager
-                    .lifecycle_matches(player_id, lifecycle)
-            {
-                return;
-            }
-            Some(guard)
+            Some(close)
         } else {
             None
         };
-        match outcome {
-            Ok(()) => tracing::info!(%player_id, "Spectator left room"),
-            Err(err) => match operation_id {
+        let Err(err) = self
+            .spectator_service
+            .leave_operation_from_lifecycle(player_id, operation_id, lifecycle.clone())
+            .await
+        else {
+            tracing::info!(%player_id, "Spectator left room");
+            return;
+        };
+        let reply = async {
+            match operation_id {
                 Some(operation_id) => {
                     let _ = self
                         .send_room_operation_failure_to_player(
@@ -207,7 +199,23 @@ impl EnhancedGameServer {
                         .send_error_to_player(player_id, err.message, err.code)
                         .await;
                 }
-            },
+            }
+        };
+        if let (Some(lifecycle), Some(close)) = (&lifecycle, source_close) {
+            let _ = close
+                .while_open(async {
+                    let _guard = lifecycle.lock().await;
+                    if lifecycle.player_id() == *player_id
+                        && self
+                            .connection_manager
+                            .lifecycle_matches(player_id, lifecycle)
+                    {
+                        reply.await;
+                    }
+                })
+                .await;
+        } else {
+            reply.await;
         }
     }
 }

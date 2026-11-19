@@ -910,7 +910,7 @@ async fn missing_room_detach_registration_panic_preserves_correlated_acknowledge
             .store(timing, Ordering::Release);
         let operation_id = Uuid::new_v4();
         let outcome = service
-            .leave_operation_from_lifecycle(&spectator_id, operation_id, None)
+            .leave_operation_from_lifecycle(&spectator_id, Some(operation_id), None)
             .await;
         assert!(
             outcome.is_ok(),
@@ -980,7 +980,7 @@ async fn assert_panicked_detach_terminal_events(
         .store(registration_fault as u8, Ordering::Release);
     let operation_id = Uuid::new_v4();
     service
-        .leave_operation_from_lifecycle(&spectator_id, operation_id, None)
+        .leave_operation_from_lifecycle(&spectator_id, Some(operation_id), None)
         .await
         .expect("committed detach succeeds");
     assert!(!service.is_spectating(&spectator_id));
@@ -2551,6 +2551,106 @@ async fn spectator_baseline_and_lobby_changes_follow_the_same_room_gate() {
     }
 }
 
+/// #826: teardown owns the departure when close wins room admission.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_spectator_leave() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    for correlated in [false, true] {
+        let SpectatorLobbyFixture {
+            server,
+            mut member_messages,
+            observer,
+            mut observer_messages,
+            room_id,
+            ..
+        } = spectator_lobby_fixture().await;
+        server
+            .handle_join_as_spectator(
+                &observer,
+                "spectator-lobby-order".into(),
+                "WATCH8".into(),
+                "Observer".into(),
+                None,
+            )
+            .await;
+        assert!(matches!(
+            observer_messages.try_recv().unwrap().as_ref(),
+            ServerMessage::SpectatorJoined(_)
+        ));
+        assert!(matches!(
+            member_messages.try_recv().unwrap().as_ref(),
+            ServerMessage::NewSpectatorJoined { .. }
+        ));
+        let message = if correlated {
+            server.set_client_room_operation_ids(&observer, true);
+            ClientMessage::RoomOperation {
+                operation_id: uuid::Uuid::from_u128(0x400),
+                operation: Box::new(RoomOperationRequest::LeaveSpectator),
+            }
+        } else {
+            ClientMessage::LeaveSpectator
+        };
+        let lifecycle = server.client_lifecycle(&observer).unwrap();
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let attempts = gate.mutation_attempt_count_for_test();
+        let mut leave = Box::pin(server.handle_client_message_from_lifecycle(
+            &observer,
+            message,
+            Arc::clone(&lifecycle),
+        ));
+        assert!(futures_util::poll!(&mut leave).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("leave must wait at the room gate");
+
+        assert!(server
+            .connection_manager
+            .request_close_for(&observer, crate::coordination::CloseReason::ActivityTimeout,));
+        timeout(Duration::from_millis(10), leave)
+            .await
+            .expect("close must release the queued leave before the room gate opens");
+        drop(
+            timeout(Duration::from_millis(10), lifecycle.lock())
+                .await
+                .expect("close must release the lifecycle for teardown"),
+        );
+        assert_eq!(
+            server.spectator_service.spectator_room(&observer),
+            Some(room_id)
+        );
+        assert!(observer_messages.is_empty());
+        assert!(member_messages.is_empty());
+
+        drop(gate);
+        server.unregister_client(&observer).await;
+        assert_eq!(server.spectator_service.spectator_room(&observer), None);
+        assert!(server
+            .database
+            .get_room_spectators(&room_id)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(matches!(
+            member_messages.try_recv().unwrap().as_ref(),
+            ServerMessage::SpectatorDisconnected {
+                spectator_id, reason: Some(SpectatorStateChangeReason::Disconnected),
+                current_spectators, spectator_count: Some(0),
+            } if *spectator_id == observer && current_spectators.is_empty()
+        ));
+        assert!(member_messages.is_empty());
+    }
+}
+
 /// #826: departure and lobby publication must share the room's mutation gate.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
@@ -2601,6 +2701,7 @@ async fn spectator_departure_and_lobby_changes_follow_the_same_room_gate() {
                 SpectatorStateChangeReason::VoluntaryLeave,
                 true,
                 drain,
+                None,
                 None,
                 None,
             );
