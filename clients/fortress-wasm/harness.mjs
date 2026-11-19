@@ -26,7 +26,7 @@ const reportKeys = [
   "worker_count", "callback_count", "poll_count", "active_callback_count", "callback_intervals",
   "acceptance_thresholds", "max_admissions_per_callback", "current_frame", "confirmed_frame",
   "game_frame", "game_checksum", "frames_advanced", "rollback_count", "max_rollback_depth",
-  "stall_count", "wait_recommendations", "wait_observations", "wait_generation_observations", "confirmation_lag_current", "confirmation_lag_max",
+  "stall_count", "wait_recommendations", "target_reached_callback", "wait_observations", "wait_generation_observations", "confirmation_lag_current", "confirmation_lag_max",
   "checksums_mismatched", "checksums_compared", "checksums_matched", "events_discarded_total",
   "client_game_data_sent", "client_game_data_sent_during_run", "client_game_data_received",
   "client_messages_undecodable", "final_pipeline_queue_depth", "peak_pipeline_queue_depth",
@@ -298,12 +298,13 @@ async function runPhase(pageUrl) {
   } else {
     assertServerLive(server, "server exited before gameplay completion");
     const peerHealth = [
-      ["creator", creatorReport, healthViolations("creator", creatorReport)],
-      ["joiner", joinerReport, healthViolations("joiner", joinerReport)],
+      ["creator", creatorReport, healthViolations("creator", creatorReport, phaseMode === "released")],
+      ["joiner", joinerReport, healthViolations("joiner", joinerReport, phaseMode === "released")],
     ];
     const healthyViolations = peerHealth.flatMap(([, , violations]) => violations);
     if (phaseMode === "released") {
       for (const [name, report, violations] of peerHealth) {
+        validateCompletedWaits(report, name);
         assert(
           report.max_admissions_per_callback > 1,
           `${name}: released graph never attempted multi-send admission`,
@@ -870,7 +871,7 @@ function runDrainGateSelfTests() {
   ]) assert((drainFailureViolations({ ...active, ...patch }).length === 0) === accepted, `drain gate: ${name}`);
 }
 
-function healthViolations(name, report) {
+function healthViolations(name, report, validateWaits = false) {
   const failures = [];
   const check = (condition, description) => {
     if (!condition) failures.push(`${name}: ${description}`);
@@ -892,7 +893,8 @@ function healthViolations(name, report) {
   check(report.relay_inbound_overflow_fault === null && report.overflow_replays_sent === 0, "unexpected overflow probe evidence");
   check(report.peak_pipeline_queue_depth <= 64, `peak pipeline depth=${report.peak_pipeline_queue_depth}`);
   check(report.peak_oldest_queue_age_us <= 500_000, `oldest queue age=${report.peak_oldest_queue_age_us}us`);
-  const forbidden = ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched", "events_discarded_total", "wait_recommendations"];
+  const forbidden = ["relay_malformed", "relay_wrong_destination", "relay_unknown_sender", "relay_outbound_overflow", "relay_inbound_overflow", "relay_encode_failures", "relay_completion_underflow", "client_messages_undecodable", "checksums_mismatched", "events_discarded_total"];
+  if (!validateWaits) forbidden.push("wait_recommendations");
   for (const field of forbidden) check(report[field] === 0, `${field}=${report[field]}`);
   check(
     stallCountWithinThreshold(report),
@@ -954,10 +956,10 @@ function validateWaitObservations(report, name) {
     assertExactKeys(event, [
       "elapsed_us", "callback", "poll", "callback_interval_us", "remote_poll_us", "advance_us", "frame_before_advance",
       "frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead",
-      "local_frames_behind", "remote_frames_behind", "skip_frames", "relay_received",
+      "local_frames_behind", "remote_frames_behind", "skip_frames", "skipped_callbacks", "relay_received",
       "relay_queue_depth",
     ], `${name} wait event`);
-    for (const key of ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "relay_received", "relay_queue_depth"]) {
+    for (const key of ["elapsed_us", "callback", "poll", "remote_poll_us", "skip_frames", "skipped_callbacks", "relay_received", "relay_queue_depth"]) {
       assert(Number.isSafeInteger(event[key]) && event[key] >= 0, `${name}: invalid wait ${key}`);
     }
     for (const key of ["frame_before_poll", "current_frame", "confirmed_frame", "frames_ahead"]) {
@@ -998,19 +1000,60 @@ function validateWaitGenerationObservations(report, name) {
   }
 }
 
+/** Require one consumed event and the exact skipped advances for every live recommendation. */
+function validateCompletedWaits(report, name) {
+  const generated = report.wait_generation_observations;
+  const consumed = report.wait_observations;
+  const target = report.target_reached_callback;
+  assert(Number.isSafeInteger(target) && target > 0 && target <= report.callback_count,
+    `${name}: invalid target callback`);
+  assert(generated.omitted === 0 && consumed.omitted === 0 &&
+    generated.events.length === report.wait_recommendations &&
+    consumed.events.length === report.wait_recommendations, `${name}: incomplete wait accounting`);
+  let priorEnd = 0;
+  for (let index = 0; index < consumed.events.length; index += 1) {
+    const recommendation = generated.events[index];
+    const wait = consumed.events[index];
+    assert(recommendation.skipped_callbacks === 0 && recommendation.skip_frames >= 3,
+      `${name}: invalid Fortress recommendation`);
+    assert(recommendation.callback >= priorEnd && wait.callback === recommendation.callback + 1 &&
+      wait.callback <= target, `${name}: wait was late or overlapped another wait`);
+    assert(wait.skipped_callbacks === Math.min(wait.skip_frames, target - wait.callback),
+      `${name}: wrong number of skipped advances`);
+    priorEnd = wait.callback + wait.skipped_callbacks;
+  }
+}
+
 /** Reject trace overflow and invalid callback identities without changing health limits. */
 function runWaitObservationSelfTests() {
   const event = {
     elapsed_us: 100, callback: 2, poll: 2, callback_interval_us: 17_000,
     remote_poll_us: 42, advance_us: null, frame_before_advance: null, frame_before_poll: 100, current_frame: 100,
     confirmed_frame: 96, frames_ahead: 3, local_frames_behind: -3,
-    remote_frames_behind: 3, skip_frames: 3, relay_received: 123, relay_queue_depth: 2,
+    remote_frames_behind: 3, skip_frames: 3, skipped_callbacks: 0, relay_received: 123, relay_queue_depth: 2,
   };
   const valid = { callback_count: 2, poll_count: 2, wait_recommendations: 1, wait_observations: { events: [event], omitted: 0 } };
   validateWaitObservations(valid, "valid trace");
   const generation = { ...event, callback: 1, poll: 1, elapsed_us: 90, advance_us: 12, frame_before_advance: 99 };
   const generated = { ...valid, wait_generation_observations: { events: [generation], omitted: 0 } };
   validateWaitGenerationObservations(generated, "generated then consumed");
+  const completed = { ...generated, callback_count: 10, poll_count: 10, target_reached_callback: 9,
+    wait_observations: { events: [{ ...event, skipped_callbacks: 3 }], omitted: 0 } };
+  validateCompletedWaits(completed, "all skips applied");
+  validateCompletedWaits({ ...completed, target_reached_callback: 4,
+    wait_observations: { events: [{ ...event, skipped_callbacks: 2 }], omitted: 0 } }, "target ends a wait");
+  for (const changed of [
+    { wait_observations: { events: [], omitted: 0 } },
+    { wait_observations: { events: [{ ...event, skipped_callbacks: 2 }], omitted: 0 } },
+    { wait_observations: { events: [{ ...event, skipped_callbacks: 4 }], omitted: 0 } },
+    { wait_observations: { events: [{ ...event, callback: 3, poll: 3, skipped_callbacks: 3 }], omitted: 0 } },
+  ]) {
+    let rejected = false;
+    try { validateCompletedWaits({ ...completed, ...changed }, "invalid completed wait"); }
+    catch { rejected = true; }
+    assert(rejected, "invalid completed wait passed");
+  }
+
   validateWaitGenerationObservations({ ...generated, wait_observations: { events: [], omitted: 0 } }, "generated but pending");
   validateWaitGenerationObservations({ ...generated, wait_recommendations: 0, wait_observations: { events: [], omitted: 0 },
     wait_generation_observations: { events: [], omitted: 0 } }, "no generated waits");

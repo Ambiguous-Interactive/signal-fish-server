@@ -118,6 +118,7 @@ struct WaitObservation {
     local_frames_behind: Option<i32>,
     remote_frames_behind: Option<i32>,
     skip_frames: u32,
+    skipped_callbacks: u32,
     relay_received: u64,
     relay_queue_depth: usize,
 }
@@ -193,6 +194,7 @@ struct Report {
     max_rollback_depth: u32,
     stall_count: u64,
     wait_recommendations: u64,
+    target_reached_callback: Option<u64>,
     wait_observations: WaitObservations,
     wait_generation_observations: WaitObservations,
     confirmation_lag_current: u64,
@@ -302,6 +304,7 @@ struct Runtime {
     poll_count: u64,
     active_callback_count: u64,
     recommended_skips: u32,
+    target_reached_callback: Option<u64>,
     wait_observations: WaitObservations,
     wait_generation_observations: WaitObservations,
     relay_retries: u64,
@@ -390,6 +393,7 @@ impl Runtime {
             poll_count: 0,
             active_callback_count: 0,
             recommended_skips: 0,
+            target_reached_callback: None,
             wait_observations: WaitObservations::default(),
             wait_generation_observations: WaitObservations::default(),
             relay_retries: 0,
@@ -489,6 +493,7 @@ impl Runtime {
                     local_frames_behind: remote_stats.map(|stats| stats.local_frames_behind),
                     remote_frames_behind: remote_stats.map(|stats| stats.remote_frames_behind),
                     skip_frames: 0,
+                    skipped_callbacks: 0,
                     relay_received: self.relay.counters().accepted_inbound,
                     relay_queue_depth: self.relay.queue_depth(),
                 };
@@ -541,10 +546,18 @@ impl Runtime {
                         fortress.confirmed_frame().as_i32() >= TARGET_CONFIRMED_FRAMES;
                     target_reached =
                         self.config.run_mode == RunMode::Healthy && confirmed_target_reached;
-                    if !target_reached {
+                    if target_reached {
+                        self.target_reached_callback
+                            .get_or_insert(self.callback_count);
+                    } else {
                         self.active_callback_count = self.active_callback_count.saturating_add(1);
                         if self.recommended_skips > 0 {
                             self.recommended_skips = self.recommended_skips.saturating_sub(1);
+                            if self.wait_observations.omitted == 0 {
+                                if let Some(wait) = self.wait_observations.events.last_mut() {
+                                    wait.skipped_callbacks += 1;
+                                }
+                            }
                         } else {
                             let current = fortress.current_frame().as_i32();
                             for handle in fortress.local_player_handles() {
@@ -972,6 +985,7 @@ impl Runtime {
             wait_recommendations: fortress_metrics
                 .as_ref()
                 .map_or(0, |metrics| metrics.wait_recommendations),
+            target_reached_callback: self.target_reached_callback,
             wait_observations: self.wait_observations.clone(),
             wait_generation_observations: self.wait_generation_observations.clone(),
             confirmation_lag_current: fortress_metrics
@@ -1355,6 +1369,7 @@ mod tests {
                 local_frames_behind: Some(-3),
                 remote_frames_behind: Some(3),
                 skip_frames: 3,
+                skipped_callbacks: 0,
                 relay_received: 123,
                 relay_queue_depth: 2,
             });

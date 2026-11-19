@@ -145,6 +145,7 @@ INTERNAL_PATHS=(
     "clients/fortress-wasm/src/nested/peer.rs"
     "clients/fortress-wasm/harness.mjs"
     "clients/fortress-wasm/project/main.gd"
+    "clients/fortress-wasm/README.md"
     "test-fixtures/data.json"
     ".llm/skills/foo.md"
     "target/debug/binary"

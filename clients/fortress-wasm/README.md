@@ -30,8 +30,8 @@ frame, frame advantage, both peer lag estimates, requested skips and relay state
 These values describe event consumption after remote polling; Fortress may have
 generated the event during the preceding advance. Peer lag estimates are not
 synchronized remote clock samples. A pending event can make the cumulative
-`wait_recommendations` metric exceed the consumed observation count. The existing
-zero-recommendation health gate remains unchanged. A second bounded trace,
+`wait_recommendations` metric exceed the consumed observation count in a partial
+report. A second bounded trace,
 `wait_generation_observations`, records each recommendation after the advance
 that produced it, even if the next callback never consumes the event. Its elapsed
 time marks the end of that advance, not the exact internal event time. It includes
@@ -61,10 +61,19 @@ identity gate. Any missing report or invariant violation fails closed as
 `BUSTED`; only the complete two-peer result prints `HEALTHY`. The hosted WASM
 gate bounds stalls as a rate — at most 20 per-mille of confirmed frames — so
 isolated contention-induced stalls on a shared runner cannot fail an otherwise
-healthy run, while any systematic stalling regression still fails. Wait
-recommendations remain forbidden, as do every existing
-loss, overflow, throughput, queue-age, lag, rollback, checksum, and conservation
-violation. The native Fortress gate retains its stricter zero-stall boundary.
+healthy run, while any systematic stalling regression still fails. The live gate accounts for each wait recommendation. The next callback must
+consume the event and skip the requested number of advances, up to the
+confirmed-frame target. Missing, late, overlapping, and misapplied waits fail
+the gate. The loss, overflow, throughput, queue-age, lag, rollback, checksum,
+and conservation limits also apply.
+
+The deterministic native time-sync tests require zero waits with symmetric
+delivery and equal simulation cadence. They also require the released Fortress
+dependency to recommend a three-frame wait under directional delivery delay
+or a peer simulation pause. These cases retain exact message delivery and
+confirmed checksum agreement. The controls reproduce the faulty assumption
+behind the former live zero-wait gate. They do not identify the original
+hosted scheduling trigger (#1616). The native Fortress gate retains its stricter zero-stall boundary.
 
 The runner then executes a one-admission-per-callback negative control and
 requires the same healthy validator to classify that run as the expected
