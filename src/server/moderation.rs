@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::coordination::{CloseReason, ConnectionCloseSignal};
+use crate::coordination::{CloseReason, ConnectionCloseSignal, RoomEventMutationGuard};
 use crate::database::UpdateRoomCodeError;
 use crate::protocol::{
     ErrorCode, PlayerId, Room, RoomId, RoomOperationId, RoomOperationResult,
@@ -56,8 +56,6 @@ struct ModerationTarget {
     /// Whether the target's durable row is currently seated (a
     /// disconnected-but-pending seat is still valid to evict).
     target_seated_in_row: bool,
-    /// The room a pending reconnection record holds a seat for, if any.
-    pending_record_room: Option<RoomId>,
     target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     /// The acting authority's lifecycle gate, held across validation and
     /// every durable removal write so the authority's own
@@ -128,15 +126,31 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         lifecycle: Arc<ClientLifecycle>,
     ) {
-        let moderation_lifecycle_guard =
-            self.lock_moderation_players(*authority_id, target_id).await;
-        let resolved = self
-            .resolve_kick_style_target(authority_id, &target_id, Some(Arc::clone(&lifecycle)))
-            .await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(authority_id, &lifecycle)
+        else {
+            return;
+        };
+        let Some((moderation_lifecycle_guard, resolved)) = close
+            .while_open(async {
+                let guard = self.lock_moderation_players(*authority_id, target_id).await;
+                let resolved = self
+                    .resolve_kick_style_target(
+                        authority_id,
+                        &target_id,
+                        Some(Arc::clone(&lifecycle)),
+                    )
+                    .await;
+                (guard, resolved)
+            })
+            .await
+        else {
+            return;
+        };
         let Some(ModerationTarget {
             room_id,
             target_seated_in_row,
-            pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard,
         }) = (match resolved {
@@ -148,8 +162,12 @@ impl EnhancedGameServer {
                     pause.reached.notify_one();
                     pause.release.notified().await;
                 }
-                let _authority_lifecycle_guard = lifecycle.lock().await;
-                if lifecycle.player_id() != *authority_id
+                let Some(_authority_lifecycle_guard) = close.while_open(lifecycle.lock()).await
+                else {
+                    return;
+                };
+                if close.commit_if_open(|| ()).is_none()
+                    || lifecycle.player_id() != *authority_id
                     || !self
                         .connection_manager
                         .lifecycle_matches(authority_id, &lifecycle)
@@ -165,16 +183,20 @@ impl EnhancedGameServer {
             return;
         };
 
-        self.evict_member_by_authority(
-            authority_id,
-            &target_id,
-            room_id,
-            target_seated_in_row,
-            pending_record_room,
-            target_lifecycle_guard,
-            &_authority_lifecycle_guard,
-        )
-        .await;
+        if !self
+            .evict_member_by_authority(
+                authority_id,
+                &target_id,
+                room_id,
+                target_seated_in_row,
+                target_lifecycle_guard,
+                &_authority_lifecycle_guard,
+                Some(&close),
+            )
+            .await
+        {
+            return;
+        }
         drop(moderation_lifecycle_guard);
 
         self.metrics.increment_room_kicks();
@@ -227,7 +249,6 @@ impl EnhancedGameServer {
         let Some(ModerationTarget {
             room_id,
             target_seated_in_row,
-            pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard,
         }) = (match resolved {
@@ -287,9 +308,9 @@ impl EnhancedGameServer {
             &target_id,
             room_id,
             target_seated_in_row,
-            pending_record_room,
             target_lifecycle_guard,
             &_authority_lifecycle_guard,
+            None,
         )
         .await;
         drop(moderation_lifecycle_guard);
@@ -1368,22 +1389,23 @@ impl EnhancedGameServer {
         // and arms a pending record; from the room's perspective that seat is
         // still held until the window closes. Evicting such a seat tombstones
         // the record instead of removing an already-absent row.
-        let pending_record_room = match &self.reconnection_manager {
-            Some(manager) => manager.pending_reconnection_room(target_id).await,
-            None => None,
-        };
         let target_seated_in_row = room.player.is_some();
-        if !target_seated_in_row && pending_record_room != Some(room_id) {
-            return Err((
-                "Moderation target is not a member of this room",
-                ErrorCode::KickTargetNotFound,
-            ));
+        if !target_seated_in_row {
+            let pending_record_room = match &self.reconnection_manager {
+                Some(manager) => manager.pending_reconnection_room(target_id).await,
+                None => None,
+            };
+            if pending_record_room != Some(room_id) {
+                return Err((
+                    "Moderation target is not a member of this room",
+                    ErrorCode::KickTargetNotFound,
+                ));
+            }
         }
 
         Ok(Some(ModerationTarget {
             room_id,
             target_seated_in_row,
-            pending_record_room,
             target_lifecycle_guard,
             _authority_lifecycle_guard: authority_lifecycle_guard,
         }))
@@ -1407,10 +1429,10 @@ impl EnhancedGameServer {
         target_id: &PlayerId,
         room_id: RoomId,
         target_seated_in_row: bool,
-        pending_record_room: Option<RoomId>,
         target_lifecycle_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
         _authority_lifecycle_guard: &tokio::sync::OwnedMutexGuard<()>,
-    ) {
+        source_close: Option<&ConnectionCloseSignal>,
+    ) -> bool {
         #[cfg(test)]
         self.pause_after_moderation_resolve_for_test().await;
         // The target's live route decides what this eviction removes: a
@@ -1421,78 +1443,29 @@ impl EnhancedGameServer {
         // its farewell, credential, and close all belong to the room it is
         // actually in (issue #396).
 
-        // Tombstone every reconnection path for the seat BEFORE the durable
-        // removal, so a kicked seat can never resurrect through a pending or
-        // in-flight reconnection claim (issue #525).
-        if pending_record_room == Some(room_id) {
-            // Serialize the tombstone with an in-flight claim's restore
-            // transaction through the room mutation gate: the claim's
-            // restore path re-checks the tombstone under this gate, so the
-            // mark lands either before the claim's decision (claim refused)
-            // or after its completion (record consumed; the fresh routing
-            // check below sees the restored seat and the routed branch
-            // removes it). Marking without this gate could lose the race
-            // against a claim that restores and completes between the mark
-            // and the routing check.
-            let tombstone_event_guard = self
-                .message_coordinator
-                .lock_room_event_mutation(&room_id)
-                .await;
-            if let Some(manager) = &self.reconnection_manager {
-                if manager.pending_reconnection_room(target_id).await == Some(room_id) {
-                    manager.mark_reconnection_kicked(target_id).await;
-                }
-            }
-            drop(tombstone_event_guard);
-        }
-
-        // Validation may have found no live target while a reconnect was
-        // restoring its pending seat. The first tombstone can then miss the
-        // consumed record, and the restored socket can disconnect before the
-        // route-based removal below. Reacquire that socket's lifecycle gate
-        // outside the room gate. If there is still no socket, take the room
-        // gate and recheck both identity and the pending record together: a
-        // reconnect either completed before this gate (and has a lifecycle)
-        // or must observe the tombstone before it can restore.
-        let target_lifecycle_guard = if let Some(guard) = target_lifecycle_guard {
-            Some(guard)
+        let admission = self.lock_moderation_eviction(&room_id, target_id, target_lifecycle_guard);
+        let (room_event_guard, target_lifecycle_guard) = if let Some(close) = source_close {
+            let Some(guards) = close.while_open(admission).await else {
+                return false;
+            };
+            let Some(guards) = close.commit_if_open(|| guards) else {
+                return false;
+            };
+            guards
         } else {
-            loop {
-                if let Some(lifecycle) = self.connection_manager.client_lifecycle(target_id) {
-                    let guard = Arc::clone(&lifecycle).lock_owned().await;
-                    if lifecycle.player_id() == *target_id
-                        && self
-                            .connection_manager
-                            .lifecycle_matches(target_id, &lifecycle)
-                    {
-                        break Some(guard);
-                    }
-                    continue;
-                }
-
-                let room_gate = self
-                    .message_coordinator
-                    .lock_room_event_mutation(&room_id)
-                    .await;
-                if self
-                    .connection_manager
-                    .client_lifecycle(target_id)
-                    .is_some()
-                {
-                    drop(room_gate);
-                    continue;
-                }
-                if let Some(manager) = &self.reconnection_manager {
-                    if manager.pending_reconnection_room(target_id).await == Some(room_id) {
-                        manager.mark_reconnection_kicked(target_id).await;
-                    }
-                }
-                drop(room_gate);
-                break None;
-            }
+            admission.await
         };
 
-        // Fresh route read after the tombstone's gate section: a reconnection
+        // Reconnect checks the tombstone under this same room gate. It
+        // either restored before admission (and we hold the new target
+        // lifecycle), or it will see the tombstone before restoring.
+        if let Some(manager) = &self.reconnection_manager {
+            if manager.pending_reconnection_room(target_id).await == Some(room_id) {
+                manager.mark_reconnection_kicked(target_id).await;
+            }
+        }
+
+        // Fresh route read under the room gate: a reconnection
         // claim that completed against the tombstone re-keyed its live
         // connection to the restored seat, and the branch below must observe
         // that route rather than a pre-gate snapshot (issue #396). This
@@ -1553,7 +1526,8 @@ impl EnhancedGameServer {
             // Routed seat: the ordinary departure machinery owns the durable
             // removal, terminal watermark, sequenced replay-recorded
             // `PlayerLeft` broadcast, and departure re-planning.
-            self.leave_room_locked(target_id, false).await;
+            self.leave_room_with_gate(target_id, room_id, room_event_guard)
+                .await;
         } else if target_seated_in_row {
             // Stale durable row: the seat is present in storage without a
             // route in this room (a storage-failed detach, or the target
@@ -1567,10 +1541,6 @@ impl EnhancedGameServer {
             // in-flight claim through the room mutation gate: a claim that
             // restores after this gate re-reads the room, finds no seat, and
             // observes the tombstone.
-            let room_event_guard = self
-                .message_coordinator
-                .lock_room_event_mutation(&room_id)
-                .await;
             match self
                 .database
                 .remove_player_from_room(&room_id, target_id)
@@ -1600,6 +1570,8 @@ impl EnhancedGameServer {
             // member may have hosted the room's active non-relay session.
             self.handle_session_member_departure(&room_id, target_id)
                 .await;
+        } else {
+            drop(room_event_guard);
         }
         // The kick must win before a queued unregister can acquire this gate.
         let kicked_close = self.connection_manager.close_signal_for(target_id);
@@ -1609,6 +1581,48 @@ impl EnhancedGameServer {
             }
         }
         drop(target_lifecycle_guard);
+        true
+    }
+
+    /// Take the target lifecycle before the room gate. If the target had no
+    /// socket, check again under the room gate to catch a completed reconnect.
+    async fn lock_moderation_eviction(
+        &self,
+        room_id: &RoomId,
+        target_id: &PlayerId,
+        mut target_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) -> (
+        RoomEventMutationGuard,
+        Option<tokio::sync::OwnedMutexGuard<()>>,
+    ) {
+        loop {
+            if target_guard.is_none() {
+                if let Some(lifecycle) = self.connection_manager.client_lifecycle(target_id) {
+                    let guard = Arc::clone(&lifecycle).lock_owned().await;
+                    if lifecycle.player_id() != *target_id
+                        || !self
+                            .connection_manager
+                            .lifecycle_matches(target_id, &lifecycle)
+                    {
+                        continue;
+                    }
+                    target_guard = Some(guard);
+                }
+            }
+
+            let room_guard = self
+                .message_coordinator
+                .lock_room_event_mutation(room_id)
+                .await;
+            if target_guard.is_some()
+                || self
+                    .connection_manager
+                    .client_lifecycle(target_id)
+                    .is_none()
+            {
+                return (room_guard, target_guard);
+            }
+        }
     }
 
     /// Check the current role while callers retain their room mutation guard.

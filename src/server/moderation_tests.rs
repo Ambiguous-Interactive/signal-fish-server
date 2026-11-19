@@ -4847,6 +4847,17 @@ async fn closing_socket_cancels_queued_authority_transfer() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn real_socket_close_cancels_queued_authority_transfer_before_reconnect() {
+    qualify_real_socket_close_cancels_room_operation(false).await;
+}
+
+/// #826: a real authority socket can close without evicting its kick target.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_cancels_queued_kick_before_reconnect() {
+    qualify_real_socket_close_cancels_room_operation(true).await;
+}
+
+async fn qualify_real_socket_close_cancels_room_operation(kick: bool) {
     use crate::protocol::{
         ClientMessage, RoomJoinedPayload, RoomOperationRequest, ROOM_OPERATION_IDS_CAPABILITY,
     };
@@ -4956,7 +4967,11 @@ async fn real_socket_close_cancels_queued_authority_transfer_before_reconnect() 
         &mut socket,
         ClientMessage::RoomOperation {
             operation_id: RoomOperationId::new_v4(),
-            operation: Box::new(RoomOperationRequest::TransferAuthority { player_id: target }),
+            operation: Box::new(if kick {
+                RoomOperationRequest::KickPlayer { player_id: target }
+            } else {
+                RoomOperationRequest::TransferAuthority { player_id: target }
+            }),
         },
     )
     .await;
@@ -5009,8 +5024,16 @@ async fn real_socket_close_cancels_queued_authority_transfer_before_reconnect() 
     assert_eq!((restored.player_id, restored.room_id), (authority, room_id));
     assert!(
         restored.is_authority,
-        "the canceled transfer must not spend the authority role"
+        "the canceled operation must preserve the authority role"
     );
+    assert!(restored
+        .current_players
+        .iter()
+        .any(|player| player.id == target));
+    assert!(!restored.missed_events.iter().any(
+        |event| matches!(event, ServerMessage::PlayerLeft { player_id, .. } if *player_id == target)
+    ));
+    assert_eq!(server.get_client_room(&target).await, Some(room_id));
     send(&mut peer, ClientMessage::Ping).await;
     timeout(BOUND, async {
         loop {
@@ -5022,6 +5045,10 @@ async fn real_socket_close_cancels_queued_authority_transfer_before_reconnect() 
                 } if id == target => {
                     panic!("peer saw a transfer from the closed socket");
                 }
+                ServerMessage::Error {
+                    error_code: Some(crate::protocol::ErrorCode::Kicked),
+                    ..
+                } if kick => panic!("peer saw a kick from the closed socket"),
                 _ => {}
             }
         }
@@ -5240,6 +5267,17 @@ async fn transfer_authority_preserves_non_authority_error_precedence() {
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_kick_finishes_committed_departure_and_close() {
+    qualify_admitted_kick_finishes_departure(false).await;
+}
+
+/// #826: physical source close cannot retract an admitted removal.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_preserves_admitted_kick_departure() {
+    qualify_admitted_kick_finishes_departure(true).await;
+}
+
+async fn qualify_admitted_kick_finishes_departure(close_source: bool) {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (authority, mut authority_rx) =
         register_client(&server, "127.0.0.1:49201".parse().unwrap()).await;
@@ -5247,7 +5285,11 @@ async fn canceled_kick_finishes_committed_departure_and_close() {
         register_client_with_close_listener(&server, "127.0.0.1:49202".parse().unwrap()).await;
     join_seated_player(&server, &authority, &mut authority_rx, "KCANCL", "host").await;
     join_seated_player(&server, &target, &mut target_rx, "KCANCL", "peer").await;
+    let (observer, mut observer_rx) =
+        register_client(&server, "127.0.0.1:49212".parse().unwrap()).await;
+    join_seated_player(&server, &observer, &mut observer_rx, "KCANCL", "observer").await;
     drain_receiver(&mut authority_rx);
+    drain_receiver(&mut observer_rx);
     let room_id = server.get_client_room(&authority).await.unwrap();
     let database = server
         .database
@@ -5256,37 +5298,51 @@ async fn canceled_kick_finishes_committed_departure_and_close() {
         .unwrap();
     database.pause_next_removed_player_for_test();
     let operation_id = RoomOperationId::new_v4();
-    let caller = tokio::spawn({
+    let mut caller = Some(tokio::spawn({
         let server = Arc::clone(&server);
         async move {
             server
                 .handle_kick_player_operation(&authority, operation_id, target)
                 .await
         }
-    });
+    }));
     timeout(
         Duration::from_secs(1),
         database.wait_for_removed_player_for_test(),
     )
     .await
     .unwrap();
-    caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
+    if close_source {
+        assert!(server
+            .connection_manager
+            .request_close_for(&authority, CloseReason::ActivityTimeout));
+    } else {
+        let caller = caller.take().unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+    }
     database.release_removed_player_for_test();
-    let departed = recv_until(&mut authority_rx, |message| {
+    let departed = recv_until(&mut observer_rx, |message| {
         matches!(message, ServerMessage::PlayerLeft { .. })
     })
     .await;
     assert!(
         matches!(departed.as_ref(), ServerMessage::PlayerLeft { player_id, epoch: Some(_), final_seq: Some(_)} if *player_id == target)
     );
-    let result = recv_until(&mut authority_rx, |message| {
-        matches!(message, ServerMessage::RoomOperationResult { .. })
-    })
-    .await;
-    assert!(
-        matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target))
-    );
+    if let Some(caller) = caller {
+        timeout(Duration::from_secs(1), caller)
+            .await
+            .unwrap()
+            .unwrap();
+    } else {
+        let result = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert!(
+            matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target))
+        );
+    }
     assert_eq!(server.get_client_room(&target).await, None);
     assert!(!server
         .database
@@ -5869,5 +5925,150 @@ async fn canceled_room_code_change_reports_storage_failure_and_releases_locks() 
             .await
             .unwrap()
             .is_none());
+    }
+}
+
+/// #826: a kick queued at the room gate must yield to physical source close.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_kick() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    for (close_source, pending_target) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let server = create_test_server_with(ServerConfig::default()).await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48211".parse().unwrap()).await;
+        let (target, mut target_rx, target_close) =
+            register_client_with_close_listener(&server, "127.0.0.1:48212".parse().unwrap()).await;
+        for player in [authority, target] {
+            server.set_client_protocol(
+                &player,
+                crate::server::NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![crate::protocol::Transport::Relay],
+                    topologies: vec![crate::protocol::Topology::Relay],
+                },
+            );
+        }
+        join_seated_player(&server, &authority, &mut authority_rx, "QKICK1", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "QKICK1", "peer").await;
+        let room_id = server.get_client_room(&authority).await.unwrap();
+        let reconnect = server.reconnection_manager().unwrap();
+        assert!(reconnect.has_pre_issued_token(&target).await);
+        if pending_target {
+            server.unregister_client(&target).await;
+            assert_eq!(
+                reconnect.pending_reconnection_room(&target).await,
+                Some(room_id)
+            );
+        }
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut target_rx);
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id)
+            .await;
+        let attempts = gate.mutation_attempt_count_for_test();
+        let operation_id = RoomOperationId::new_v4();
+        server.set_client_room_operation_ids(&authority, true);
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &authority,
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::KickPlayer { player_id: target }),
+            },
+            server.client_lifecycle(&authority).unwrap(),
+        ));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("kick must reach the room gate");
+        let completed = if close_source {
+            assert!(server
+                .connection_manager
+                .request_close_for(&authority, CloseReason::ActivityTimeout));
+            timeout(Duration::from_millis(10), &mut dispatch)
+                .await
+                .is_ok()
+        } else {
+            assert!(futures_util::poll!(&mut dispatch).is_pending());
+            false
+        };
+        drop(gate);
+        if !completed {
+            timeout(Duration::from_secs(1), dispatch)
+                .await
+                .expect("dispatch must finish after gate release");
+        }
+
+        let room = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            room.players.contains_key(&target),
+            close_source && !pending_target,
+            "stored target seat after gate release (close={close_source}, pending={pending_target})"
+        );
+        assert_eq!(
+            server.get_client_room(&target).await,
+            (close_source && !pending_target).then_some(room_id)
+        );
+        assert_eq!(
+            target_close.requested_reason(),
+            match (pending_target, close_source) {
+                (true, _) => Some(CloseReason::Unregistered),
+                (false, true) => None,
+                (false, false) => Some(CloseReason::Kicked),
+            }
+        );
+        assert_eq!(
+            reconnect.is_reconnection_kicked(&target).await,
+            pending_target && !close_source
+        );
+        assert_eq!(
+            reconnect.has_pre_issued_token(&target).await,
+            close_source && !pending_target
+        );
+        if pending_target {
+            assert_eq!(
+                reconnect.pending_reconnection_room(&target).await,
+                Some(room_id)
+            );
+        }
+        if close_source {
+            assert!(completed, "close must release the dispatch wait");
+            assert!(drain_receiver(&mut authority_rx).is_empty());
+            assert!(drain_receiver(&mut target_rx).is_empty());
+            continue;
+        }
+
+        if !pending_target {
+            let departure = recv_until(&mut authority_rx, |message| {
+                matches!(
+                    message,
+                    ServerMessage::PlayerLeft { .. } | ServerMessage::RoomOperationResult { .. }
+                )
+            })
+            .await;
+            assert!(
+                matches!(departure.as_ref(), ServerMessage::PlayerLeft { player_id, .. } if *player_id == target)
+            );
+        }
+        let result = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert!(
+            matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result }
+            if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::PlayerKicked { player_id } if *player_id == target))
+        );
     }
 }

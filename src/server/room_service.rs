@@ -73,6 +73,11 @@ const GAME_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const SERVER_ROOM_CAP_LOCK_TTL: Duration = Duration::from_secs(10);
 const GENERATED_ROOM_CODE_MAX_ATTEMPTS: u8 = 8;
 
+enum LeaveRoomAdmission<'a> {
+    Acquire(Option<&'a ConnectionCloseSignal>),
+    Held(RoomId, RoomEventMutationGuard),
+}
+
 #[derive(Clone, Copy)]
 enum RoomAdmissionIntent {
     /// A client-supplied code: join when it resolves, otherwise create the
@@ -1554,12 +1559,13 @@ impl EnhancedGameServer {
             operation_id,
             terminal_response_committed,
             None,
-            source_close.as_ref(),
+            LeaveRoomAdmission::Acquire(source_close.as_ref()),
         )
         .await;
     }
 
     /// Room departure after the caller acquired the connection lifecycle gate.
+    #[cfg(all(test, signal_fish_repository_tests))]
     pub(super) async fn leave_room_locked(
         self: &Arc<Self>,
         player_id: &PlayerId,
@@ -1571,7 +1577,25 @@ impl EnhancedGameServer {
             None,
             Arc::new(AtomicBool::new(false)),
             None,
+            LeaveRoomAdmission::Acquire(None),
+        )
+        .await;
+    }
+
+    /// Finish a moderation departure using its admitted room and lifecycle gates.
+    pub(super) async fn leave_room_with_gate(
+        self: &Arc<Self>,
+        player_id: &PlayerId,
+        room_id: RoomId,
+        room_event_guard: RoomEventMutationGuard,
+    ) {
+        self.leave_room_locked_operation(
+            player_id,
+            false,
             None,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            LeaveRoomAdmission::Held(room_id, room_event_guard),
         )
         .await;
     }
@@ -1588,7 +1612,7 @@ impl EnhancedGameServer {
             None,
             Arc::new(AtomicBool::new(false)),
             Some(departure),
-            None,
+            LeaveRoomAdmission::Acquire(None),
         )
         .await;
     }
@@ -1610,7 +1634,7 @@ impl EnhancedGameServer {
         operation_id: Option<crate::protocol::RoomOperationId>,
         terminal_response_committed: Arc<AtomicBool>,
         departure: Option<Arc<UnregisterDeparture>>,
-        source_close: Option<&ConnectionCloseSignal>,
+        admission: LeaveRoomAdmission<'_>,
     ) {
         let departure = departure.or_else(|| {
             self.connection_manager
@@ -1618,39 +1642,45 @@ impl EnhancedGameServer {
                 .and_then(|lifecycle| lifecycle.unregister_departure(None))
         });
         let leave_span = tracing::Span::current();
-        let Some(room_id) = departure
-            .as_ref()
-            .map(|progress| progress.room_id)
-            .or(self.get_client_room(player_id).await)
-        else {
-            if let Some(operation_id) = operation_id
-                .filter(|_| source_close.is_none_or(|close| close.requested_reason().is_none()))
-            {
-                let _ = self
-                    .send_room_operation_failure_to_player(
-                        player_id,
-                        operation_id,
-                        "Not currently in a room",
-                        Some(crate::protocol::ErrorCode::NotInRoom),
-                    )
-                    .await;
+        let (room_id, room_event_guard) = match admission {
+            LeaveRoomAdmission::Held(room_id, guard) => (room_id, guard),
+            LeaveRoomAdmission::Acquire(source_close) => {
+                let Some(room_id) = departure
+                    .as_ref()
+                    .map(|progress| progress.room_id)
+                    .or(self.get_client_room(player_id).await)
+                else {
+                    if let Some(operation_id) = operation_id.filter(|_| {
+                        source_close.is_none_or(|close| close.requested_reason().is_none())
+                    }) {
+                        let _ = self
+                            .send_room_operation_failure_to_player(
+                                player_id,
+                                operation_id,
+                                "Not currently in a room",
+                                Some(crate::protocol::ErrorCode::NotInRoom),
+                            )
+                            .await;
+                    }
+                    return;
+                };
+                let lock_room = self.message_coordinator.lock_room_event_mutation(&room_id);
+                let guard = if let Some(close) = source_close {
+                    let Some(guard) = close.while_open(lock_room).await else {
+                        return;
+                    };
+                    // Close and voluntary leave compete for the seat until room admission.
+                    let Some(guard) = close.commit_if_open(|| guard) else {
+                        return;
+                    };
+                    guard
+                } else {
+                    lock_room.await
+                };
+                (room_id, guard)
             }
-            return;
         };
         leave_span.record("room_id", tracing::field::display(room_id));
-        let lock_room = self.message_coordinator.lock_room_event_mutation(&room_id);
-        let room_event_guard = if let Some(close) = source_close {
-            let Some(guard) = close.while_open(lock_room).await else {
-                return;
-            };
-            // Close and voluntary leave compete for the seat until room admission.
-            let Some(guard) = close.commit_if_open(|| guard) else {
-                return;
-            };
-            guard
-        } else {
-            lock_room.await
-        };
 
         let retained_authority = departure.as_ref().is_some_and(|progress| {
             progress.was_authority.load(Ordering::Acquire)
