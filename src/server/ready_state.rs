@@ -2,11 +2,12 @@ use crate::coordination::{
     ConnectionCloseSignal, MessageCoordinator, PlayerReadyError, RoomEventMutationGuard,
     RoomOperationCoordinatorTrait, StartGameOutcome,
 };
-use crate::protocol::{ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId};
+use crate::protocol::{ErrorCode, LobbyState, PlayerId, PlayerInfo, Room, RoomId, ServerMessage};
 use std::sync::Arc;
 use tokio::sync::OwnedMutexGuard;
+use tokio::task::{JoinError, JoinHandle};
 
-use super::{ClientLifecycle, EnhancedGameServer};
+use super::{connection_manager::ConnectionManager, ClientLifecycle, EnhancedGameServer};
 
 /// The readiness a room snapshot (`RoomJoined`, `Reconnected`, `SpectatorJoined`)
 /// must report for `room`.
@@ -52,7 +53,7 @@ pub(crate) fn apply_snapshot_readiness(players: &mut [PlayerInfo], ready_players
 
 struct LobbyCommandSource {
     close: ConnectionCloseSignal,
-    _lifecycle_guard: OwnedMutexGuard<()>,
+    lifecycle_guard: OwnedMutexGuard<()>,
 }
 
 impl LobbyCommandSource {
@@ -68,6 +69,61 @@ impl LobbyCommandSource {
         // The optimistic poll can acquire the gate as close is requested.
         // Order admission against close before the worker can change the room.
         self.close.commit_if_open(|| room_guard)
+    }
+
+    /// Keep replies ordered while the socket is open. On close, let teardown
+    /// take the lifecycle while this task accounts for any started delivery.
+    async fn send_refusal(
+        self,
+        connections: &ConnectionManager,
+        coordinator: &dyn MessageCoordinator,
+        player_id: &PlayerId,
+        message: &str,
+        error_code: ErrorCode,
+    ) {
+        let Self {
+            close,
+            lifecycle_guard,
+        } = self;
+        if close
+            .while_open(connections.charge_error_reply(player_id))
+            .await
+            != Some(true)
+        {
+            return;
+        }
+        let reply = coordinator.send_to_player_on_socket(
+            player_id,
+            &close,
+            Arc::new(ServerMessage::Error {
+                message: message.to_string(),
+                error_code: Some(error_code),
+            }),
+        );
+        tokio::pin!(reply);
+        let result = match close.while_open(&mut reply).await {
+            Some(result) => result,
+            None => {
+                drop(lifecycle_guard);
+                reply.await
+            }
+        };
+        if let Err(error) = result {
+            tracing::debug!(%player_id, %error, "Lobby refusal delivery failed");
+        }
+    }
+}
+
+/// Close stops the dispatch wait. The worker still owns admitted room work.
+async fn observe_lobby_command(
+    close: ConnectionCloseSignal,
+    completion: JoinHandle<()>,
+) -> Result<(), JoinError> {
+    let mut listener = close.subscribe();
+    tokio::select! {
+        biased;
+        result = completion => result,
+        _ = listener.closed() => Ok(()),
     }
 }
 
@@ -95,7 +151,7 @@ impl EnhancedGameServer {
         }
         Some(LobbyCommandSource {
             close,
-            _lifecycle_guard: lifecycle_guard,
+            lifecycle_guard,
         })
     }
 
@@ -123,6 +179,7 @@ impl EnhancedGameServer {
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
         let player_id = *player_id;
+        let close = source.close.clone();
         // Use the same owned-task scheduling as the other room commands.
         let completion = tokio::spawn(async move {
             if source.close.requested_reason().is_some() {
@@ -130,14 +187,15 @@ impl EnhancedGameServer {
             }
             let player_id = &player_id;
             let Some(room_id) = room_id else {
-                let _ = super::messaging::send_error_to_player(
-                    connection_manager.as_ref(),
-                    message_coordinator.as_ref(),
-                    player_id,
-                    "Not in a room".to_string(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
+                source
+                    .send_refusal(
+                        &connection_manager,
+                        message_coordinator.as_ref(),
+                        player_id,
+                        "Not in a room",
+                        ErrorCode::NotInRoom,
+                    )
+                    .await;
                 return;
             };
             let Some(room_guard) = source
@@ -163,24 +221,24 @@ impl EnhancedGameServer {
                     }
                     PlayerReadyError::RoomNotFound => "Room not found",
                     PlayerReadyError::Internal(_) => "Failed to update ready state",
-                }
-                .to_string();
+                };
                 tracing::debug!(
                     %player_id,
                     %error_code,
                     "Player ready toggle rejected: {error}"
                 );
-                let _ = super::messaging::send_error_to_player(
-                    connection_manager.as_ref(),
-                    message_coordinator.as_ref(),
-                    player_id,
-                    message,
-                    Some(error_code),
-                )
-                .await;
+                source
+                    .send_refusal(
+                        &connection_manager,
+                        message_coordinator.as_ref(),
+                        player_id,
+                        message,
+                        error_code,
+                    )
+                    .await;
             }
         });
-        if let Err(error) = completion.await {
+        if let Err(error) = observe_lobby_command(close, completion).await {
             tracing::error!(%player_id, %error, "Ready toggle transaction failed");
         }
     }
@@ -212,6 +270,7 @@ impl EnhancedGameServer {
         let connection_manager = Arc::clone(&self.connection_manager);
         let message_coordinator = Arc::clone(&self.message_coordinator);
         let player_id = *player_id;
+        let close = source.close.clone();
         // Use the same owned-task scheduling as the other room commands.
         let completion = tokio::spawn(async move {
             if source.close.requested_reason().is_some() {
@@ -219,14 +278,15 @@ impl EnhancedGameServer {
             }
             let player_id = &player_id;
             let Some((room_id, publication)) = publication else {
-                let _ = super::messaging::send_error_to_player(
-                    connection_manager.as_ref(),
-                    message_coordinator.as_ref(),
-                    player_id,
-                    "Not in a room".to_string(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
+                source
+                    .send_refusal(
+                        &connection_manager,
+                        message_coordinator.as_ref(),
+                        player_id,
+                        "Not in a room",
+                        ErrorCode::NotInRoom,
+                    )
+                    .await;
                 return;
             };
             let Some(room_guard) = source
@@ -235,37 +295,23 @@ impl EnhancedGameServer {
             else {
                 return;
             };
-            match room_coordinator
+            let (message, error_code) = match room_coordinator
                 .start_game_under_room_gate(&room_id, player_id, publication, room_guard)
                 .await
             {
-                Ok(StartGameOutcome::Started(_)) => {}
-                Ok(rejection) => {
-                    let (message, error_code) = match rejection {
-                        StartGameOutcome::NotReady => (
-                            "Cannot start the game: every player must be ready first.".to_string(),
-                            ErrorCode::GameStartNotReady,
-                        ),
-                        StartGameOutcome::Forbidden => (
-                            "Only a current member may start; when authority is set, that player must start.".to_string(),
-                            ErrorCode::GameStartForbidden,
-                        ),
-                        StartGameOutcome::AlreadyStarted => (
-                            "The game has already started.".to_string(),
-                            ErrorCode::InvalidRoomState,
-                        ),
-                        // Unreachable: the success arm is handled above.
-                        StartGameOutcome::Started(_) => return,
-                    };
-                    let _ = super::messaging::send_error_to_player(
-                        connection_manager.as_ref(),
-                        message_coordinator.as_ref(),
-                        player_id,
-                        message,
-                        Some(error_code),
-                    )
-                    .await;
-                }
+                Ok(StartGameOutcome::Started(_)) => return,
+                Ok(StartGameOutcome::NotReady) => (
+                    "Cannot start the game: every player must be ready first.",
+                    ErrorCode::GameStartNotReady,
+                ),
+                Ok(StartGameOutcome::Forbidden) => (
+                    "Only a current member may start; when authority is set, that player must start.",
+                    ErrorCode::GameStartForbidden,
+                ),
+                Ok(StartGameOutcome::AlreadyStarted) => (
+                    "The game has already started.",
+                    ErrorCode::InvalidRoomState,
+                ),
                 Err(e) => {
                     // The only shipped path into this arm is the StartGame CAS
                     // seeing a membership snapshot change (`SnapshotChanged`) —
@@ -276,18 +322,20 @@ impl EnhancedGameServer {
                     // coded typed rejection is deferred until an embedder can
                     // actually reach it (#396 session-193 sweep).
                     tracing::debug!("Player {:?} attempted to start the game: {}", player_id, e);
-                    let _ = super::messaging::send_error_to_player(
-                        connection_manager.as_ref(),
-                        message_coordinator.as_ref(),
-                        player_id,
-                        "Failed to start the game".to_string(),
-                        Some(ErrorCode::InternalError),
-                    )
-                    .await;
+                    ("Failed to start the game", ErrorCode::InternalError)
                 }
-            }
+            };
+            source
+                .send_refusal(
+                    &connection_manager,
+                    message_coordinator.as_ref(),
+                    player_id,
+                    message,
+                    error_code,
+                )
+                .await;
         });
-        if let Err(error) = completion.await {
+        if let Err(error) = observe_lobby_command(close, completion).await {
             tracing::error!(%player_id, %error, "Game start transaction failed");
         }
     }

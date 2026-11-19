@@ -1593,6 +1593,408 @@ async fn queued_lobby_commands_survive_canceled_socket_dispatch() {
     }
 }
 
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn lobby_refusal_releases_closing_socket_while_routes_are_held() {
+    check_lobby_refusal_delivery(false).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn lobby_refusal_releases_closing_socket_while_reply_queue_is_full() {
+    check_lobby_refusal_delivery(true).await;
+}
+
+/// #826: A private refusal must not hold up departure after close.
+async fn check_lobby_refusal_delivery(full_queue: bool) {
+    use crate::coordination::{CloseReason, MessageCoordinator};
+
+    for (start_game, close_source) in [(true, false), (false, false), (true, true), (false, true)] {
+        let (server, coordinator) = create_lobby_refusal_test_server().await;
+        let (source, mut replies) = register_client(&server).await;
+        server
+            .handle_join_room(
+                &source,
+                "lobby-refusal-close".into(),
+                Some("REFUSE".into()),
+                "Source".into(),
+                Some(2),
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await;
+        // A finalized lobby refuses before consulting the held routing map.
+        let finalized = !start_game || !full_queue;
+        if finalized {
+            server.handle_player_ready(&source).await;
+            server.handle_start_game(&source).await;
+        }
+        drain_pending(&mut replies);
+        if full_queue {
+            for _ in 0..replies.max_capacity() {
+                coordinator
+                    .send_to_player(&source, Arc::new(ServerMessage::Pong))
+                    .await
+                    .unwrap();
+            }
+        }
+        let backpressure = &coordinator.metrics.websocket_backpressure_events;
+        let before = backpressure.load(Ordering::Acquire);
+        let room = server.get_client_room(&source).await.unwrap();
+        let lifecycle = server.client_lifecycle(&source).unwrap();
+        let command = if start_game {
+            ClientMessage::StartGame
+        } else {
+            ClientMessage::PlayerReady
+        };
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &source,
+            command,
+            Arc::clone(&lifecycle),
+        ));
+        let gate = coordinator.lock_room_event_mutation(&room).await;
+        poll_room_operation_to_gate(dispatch.as_mut(), &gate).await;
+        let routes = if full_queue {
+            None
+        } else {
+            Some(coordinator.local_clients.write().await)
+        };
+        drop(gate);
+        // The room decision runs before the private reply and releases the gate.
+        drop(
+            timeout(
+                Duration::from_secs(1),
+                coordinator.lock_room_event_mutation(&room),
+            )
+            .await
+            .expect("refusal must release the room gate before waiting on delivery"),
+        );
+        if full_queue {
+            timeout(Duration::from_secs(1), async {
+                while backpressure.load(Ordering::Acquire) == before {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("refusal must reach the full reply queue");
+        }
+        assert!(futures_util::poll!(dispatch.as_mut()).is_pending());
+        let mut teardown = Box::pin(lifecycle.lock());
+        assert!(futures_util::poll!(teardown.as_mut()).is_pending());
+
+        if close_source {
+            assert!(server
+                .connection_manager
+                .request_close_for(&source, CloseReason::ActivityTimeout));
+            timeout(Duration::from_millis(10), dispatch)
+                .await
+                .expect("close must release dispatch before the reply can proceed");
+            drop(
+                timeout(Duration::from_millis(10), teardown)
+                    .await
+                    .expect("close must release the lifecycle before the reply can proceed"),
+            );
+            if full_queue {
+                assert_eq!(replies.len(), replies.max_capacity());
+                let closed = &coordinator.metrics.websocket_deliveries_channel_closed;
+                let before = closed.load(Ordering::Acquire);
+                replies.close();
+                timeout(Duration::from_secs(1), async {
+                    while closed.load(Ordering::Acquire) == before {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("owned reply must finish delivery accounting");
+                assert_eq!(closed.load(Ordering::Acquire), before + 1);
+            } else {
+                assert!(replies.is_empty());
+            }
+        } else {
+            drop(routes);
+            for _ in 0..replies.len() {
+                assert!(matches!(
+                    recv(&mut replies).await.as_ref(),
+                    ServerMessage::Pong
+                ));
+            }
+            timeout(Duration::from_secs(1), dispatch)
+                .await
+                .expect("open socket must finish after reply capacity returns");
+            let reply = recv(&mut replies).await;
+            let (expected_message, expected_code) = if !finalized {
+                (
+                    "Cannot start the game: every player must be ready first.",
+                    ErrorCode::GameStartNotReady,
+                )
+            } else if start_game {
+                ("The game has already started.", ErrorCode::InvalidRoomState)
+            } else {
+                (
+                    "Cannot change ready status: the game has already started.",
+                    ErrorCode::InvalidRoomState,
+                )
+            };
+            assert!(
+                matches!(reply.as_ref(),
+                ServerMessage::Error { message, error_code: Some(code) }
+                    if message == expected_message && *code == expected_code
+                ),
+                "{reply:?}"
+            );
+            assert!(replies.is_empty());
+        }
+    }
+}
+
+async fn create_lobby_refusal_test_server() -> (
+    Arc<EnhancedGameServer>,
+    Arc<crate::server::InMemoryMessageCoordinator>,
+) {
+    let coordinator = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        coordinator.clone(),
+        Arc::new(crate::server::InMemoryDistributedLock::new()),
+        Arc::new(crate::database::InMemoryDatabase::new()),
+    )
+    .await;
+    (server, coordinator)
+}
+
+/// #826: Once a lobby refusal waits on routing, close still allows room teardown.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_lobby_refusal_does_not_hold_up_reconnect() {
+    use crate::coordination::{CloseReason, MessageCoordinator};
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+    type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+    const BOUND: Duration = Duration::from_secs(5);
+
+    async fn send(socket: &mut Socket, command: ClientMessage) {
+        timeout(
+            BOUND,
+            socket.send(Message::text(serde_json::to_string(&command).unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn receive(socket: &mut Socket) -> ServerMessage {
+        let frame = timeout(BOUND, socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    async fn receive_until(socket: &mut Socket, matches: impl Fn(&ServerMessage) -> bool) {
+        timeout(BOUND, async {
+            loop {
+                let message = receive(socket).await;
+                assert!(
+                    !matches!(message, ServerMessage::Error { .. }),
+                    "{message:?}"
+                );
+                if matches(&message) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("expected lobby event");
+    }
+
+    async fn connect(url: &str) -> Socket {
+        let (mut socket, _) = timeout(BOUND, connect_async(url)).await.unwrap().unwrap();
+        send(
+            &mut socket,
+            ClientMessage::Authenticate {
+                app_id: "lobby-test".into(),
+                connect_token: None,
+                sdk_version: None,
+                platform: None,
+                game_data_format: None,
+                protocol_version: Some(3),
+                supported_transports: Some(vec![Transport::Relay]),
+                supported_topologies: Some(vec![Topology::Relay]),
+                requested_capabilities: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ServerMessage::Authenticated { .. }
+        ));
+        assert!(matches!(
+            receive(&mut socket).await,
+            ServerMessage::ProtocolInfo(_)
+        ));
+        socket
+    }
+
+    let (server, coordinator) = create_lobby_refusal_test_server().await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/v3/ws", listener.local_addr().unwrap());
+    let app = crate::websocket::create_standalone_router("*").with_state(Arc::clone(&server));
+    let (shutdown, stop) = tokio::sync::oneshot::channel();
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop.await;
+        })
+        .await
+        .unwrap();
+    });
+    let join = |name: &str| ClientMessage::JoinRoom {
+        game_name: "websocket-lobby-refusal".into(),
+        room_code: Some("REFUSE".into()),
+        player_name: name.into(),
+        max_players: Some(2),
+        supports_authority: Some(false),
+        relay_transport: None,
+        password: None,
+        join_only: None,
+    };
+    let mut socket = connect(&url).await;
+    send(&mut socket, join("Source")).await;
+    let ServerMessage::RoomJoined(joined) = receive(&mut socket).await else {
+        panic!("source must join");
+    };
+    let (source, room) = (joined.player_id, joined.room_id);
+    let token = joined.reconnection_token.expect("v3 reconnect token");
+    let mut peer_socket = connect(&url).await;
+    send(&mut peer_socket, join("Peer")).await;
+    let ServerMessage::RoomJoined(peer_joined) = receive(&mut peer_socket).await else {
+        panic!("peer must join");
+    };
+    assert_eq!(peer_joined.room_id, room);
+    let peer = peer_joined.player_id;
+    send(&mut peer_socket, ClientMessage::PlayerReady).await;
+    send(&mut socket, ClientMessage::PlayerReady).await;
+    receive_until(&mut socket, |message| {
+        matches!(
+            message,
+            ServerMessage::LobbyStateChanged {
+                all_ready: true,
+                ..
+            }
+        )
+    })
+    .await;
+    send(&mut socket, ClientMessage::StartGame).await;
+    for socket in [&mut socket, &mut peer_socket] {
+        receive_until(socket, |message| {
+            matches!(message, ServerMessage::GameStarting { .. })
+        })
+        .await;
+    }
+
+    let gate = coordinator.lock_room_event_mutation(&room).await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    send(&mut socket, ClientMessage::StartGame).await;
+    timeout(
+        BOUND,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("duplicate start reaches the room gate");
+    let routes = coordinator.local_clients.write().await;
+    drop(gate);
+    let gate = timeout(BOUND, coordinator.lock_room_event_mutation(&room))
+        .await
+        .expect("start releases the room gate before its refusal");
+    let attempts = gate.mutation_attempt_count_for_test();
+    let lifecycle = server.client_lifecycle(&source).unwrap();
+    assert!(server
+        .connection_manager
+        .request_close_for(&source, CloseReason::ActivityTimeout));
+    let close = timeout(BOUND, async {
+        loop {
+            match socket.next().await.unwrap().unwrap() {
+                Message::Close(Some(frame)) => break frame,
+                Message::Text(text) => assert!(!matches!(
+                    serde_json::from_str::<ServerMessage>(&text).unwrap(),
+                    ServerMessage::Error {
+                        error_code: Some(ErrorCode::InvalidRoomState),
+                        ..
+                    }
+                )),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("source receives semantic close");
+    assert_eq!(u16::from(close.code), 4003);
+    let teardown = timeout(
+        BOUND,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await;
+    drop(routes);
+    drop(gate);
+    drop(socket);
+    teardown.expect("teardown reaches the room while the refusal route is still held");
+    timeout(BOUND, lifecycle.wait_for_unregister())
+        .await
+        .unwrap();
+
+    let mut replacement = connect(&url).await;
+    send(
+        &mut replacement,
+        ClientMessage::Reconnect {
+            player_id: source,
+            room_id: room,
+            auth_token: token,
+        },
+    )
+    .await;
+    let ServerMessage::Reconnected(restored) = receive(&mut replacement).await else {
+        panic!("replacement must receive the reconnect baseline");
+    };
+    assert_eq!((restored.player_id, restored.room_id), (source, room));
+    assert_eq!(restored.lobby_state, LobbyState::Finalized);
+    assert!(restored
+        .current_players
+        .iter()
+        .any(|player| player.id == peer));
+    assert!(!restored
+        .missed_events
+        .iter()
+        .any(|event| matches!(event, ServerMessage::Error { .. })));
+    send(&mut replacement, ClientMessage::Ping).await;
+    timeout(BOUND, async {
+        loop {
+            match receive(&mut replacement).await {
+                ServerMessage::Pong => break,
+                ServerMessage::SessionPlan(_) => {}
+                other => panic!("unexpected message after reconnect: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("replacement can send a fresh command");
+    send(&mut peer_socket, ClientMessage::Ping).await;
+    receive_until(&mut peer_socket, |message| {
+        matches!(message, ServerMessage::Pong)
+    })
+    .await;
+    drop(replacement);
+    drop(peer_socket);
+    shutdown.send(()).unwrap();
+    timeout(BOUND, serve).await.unwrap().unwrap();
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SocketAction {
     CloseWhileWaiting,

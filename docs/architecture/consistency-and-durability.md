@@ -49,6 +49,13 @@ The close request can proceed while membership teardown waits for routing.
 The server cancels an ordinary refusal reply if the sender closes while the
 reply waits for its route.
 
+The home process orders `PlayerReady` and `StartGame` with room membership
+and socket close. It can finish an admitted command during disconnect.
+A refused command addresses its error to the original socket. Close releases
+teardown while any delivery already started finishes accounting. After
+reconnect, the client uses the current lobby snapshot and any committed room
+events in the replay window. A network partition can delay close detection.
+
 Peer connection metadata updates wait for the source lifecycle and room
 admission. If the server requests socket close during those waits or the
 read-only Direct endpoint checks, it cancels the pending update. A refusal
