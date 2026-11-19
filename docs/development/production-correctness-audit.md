@@ -19805,11 +19805,17 @@ replayed departure for it. The target can still exchange messages with the
 server. The open-source control observes a departure before the correlated
 ban result for a live target and a tombstone for a pending target.
 
+The first candidate still held the source lifecycle while a failed ban
+write waited for reply routing (Nextest `27d47953`). The refusal now lets
+teardown proceed on close and keeps completion of any started delivery.
+The control holds reply routing or fills the authority's queue. An open
+authority still receives its correlated `STORAGE_ERROR`.
+
 One authoritative server orders the write against reconnect and admission.
 A network partition or a client close frame waiting behind dispatch can
 delay detection. A ban can pass admission during that delay and the
-requester can lose its result. The reconnect
-snapshot and replay report membership, and the ban list governs later
+requester can lose its result. The reconnect snapshot and replay report
+membership, and the ban list governs later
 admission. The server needs its room state to apply the operation or restore
 the seat. Another process or an in-memory restart cannot infer that decision
 from the old token. This advances A04, A05, and A09. The campaign stays open.

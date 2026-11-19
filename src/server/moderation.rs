@@ -232,13 +232,8 @@ impl EnhancedGameServer {
                 drop(room_event_guard);
                 drop(target_lifecycle_guard);
                 drop(moderation_lifecycle_guard);
-                self.fail_operation(
-                    authority_id,
-                    operation_id,
-                    "Failed to ban the player",
-                    ErrorCode::StorageError,
-                )
-                .await;
+                self.send_ban_storage_failure(*authority_id, operation_id, &close)
+                    .await;
                 return;
             }
             tracing::info!(
@@ -318,6 +313,44 @@ impl EnhancedGameServer {
             PlayerEviction::Ban,
         )
         .await;
+    }
+
+    async fn send_ban_storage_failure(
+        &self,
+        authority_id: PlayerId,
+        operation_id: RoomOperationId,
+        close: &ConnectionCloseSignal,
+    ) {
+        if close
+            .while_open(self.connection_manager.charge_error_reply(&authority_id))
+            .await
+            != Some(true)
+        {
+            return;
+        }
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let socket = close.clone();
+        // Keep normal reply order while the source is open. If it closes,
+        // release the caller's lifecycle but finish any started delivery.
+        let reply = tokio::spawn(async move {
+            if let Err(error) = coordinator
+                .send_to_player_on_socket(
+                    &authority_id,
+                    &socket,
+                    Arc::new(ServerMessage::room_operation_failed(
+                        operation_id,
+                        "Failed to ban the player",
+                        Some(ErrorCode::StorageError),
+                    )),
+                )
+                .await
+            {
+                tracing::warn!(%authority_id, %error, "Ban refusal delivery failed");
+            }
+        });
+        if let Some(Err(error)) = close.while_open(reply).await {
+            tracing::error!(%authority_id, %error, "Ban refusal task failed");
+        }
     }
 
     /// Handle an authority-initiated `UnbanPlayer` room operation (v3 only,

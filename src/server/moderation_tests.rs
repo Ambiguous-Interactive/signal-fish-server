@@ -5966,6 +5966,160 @@ async fn closing_socket_cancels_queued_ban() {
     qualify_queued_eviction(true).await;
 }
 
+/// #826: a refused ban must release its source when close wins the reply wait.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_ban_storage_failure_reply_wait() {
+    use crate::coordination::MessageCoordinator;
+    use crate::database::InMemoryDatabase;
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+    use crate::server::InMemoryDistributedLock;
+
+    for (close_source, full_queue) in [(false, false), (true, false), (true, true)] {
+        let coordinator = Arc::new(crate::server::InMemoryMessageCoordinator::new());
+        let server =
+            super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+                ServerConfig::default(),
+                coordinator.clone(),
+                Arc::new(InMemoryDistributedLock::new()),
+                Arc::new(InMemoryDatabase::new()),
+            )
+            .await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48221".parse().unwrap()).await;
+        let (target, mut target_rx, target_close) =
+            register_client_with_close_listener(&server, "127.0.0.1:48222".parse().unwrap()).await;
+        for player in [authority, target] {
+            server.set_client_protocol(
+                &player,
+                crate::server::NegotiatedProtocol {
+                    version: 3,
+                    transports: vec![crate::protocol::Transport::Relay],
+                    topologies: vec![crate::protocol::Topology::Relay],
+                },
+            );
+        }
+        server.set_client_room_operation_ids(&authority, true);
+        join_seated_player(&server, &authority, &mut authority_rx, "BANERR", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "BANERR", "peer").await;
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut target_rx);
+        let room = server.get_client_room(&authority).await.unwrap();
+        let gate = coordinator.lock_room_event_mutation(&room).await;
+        let attempts = gate.mutation_attempt_count_for_test();
+        let lifecycle = server.client_lifecycle(&authority).unwrap();
+        let operation_id = RoomOperationId::new_v4();
+        let dispatch = server.handle_client_message_from_lifecycle(
+            &authority,
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::BanPlayer { player_id: target }),
+            },
+            Arc::clone(&lifecycle),
+        );
+        tokio::pin!(dispatch);
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("the ban validates and queues for room admission");
+
+        // Remove the stored room after validation to force the ban write to fail.
+        assert!(server.database.delete_room(&room).await.unwrap());
+        let backpressure_before = coordinator
+            .metrics
+            .websocket_backpressure_events
+            .load(Ordering::Acquire);
+        let routes = if full_queue {
+            for _ in 0..8 {
+                coordinator
+                    .send_to_player(&authority, Arc::new(ServerMessage::Pong))
+                    .await
+                    .unwrap();
+            }
+            None
+        } else {
+            Some(coordinator.local_clients.write().await)
+        };
+        drop(gate);
+        let gate = timeout(
+            Duration::from_secs(1),
+            coordinator.lock_room_event_mutation(&room),
+        )
+        .await
+        .expect("the failed write releases the room gate before sending its reply");
+        if full_queue {
+            timeout(Duration::from_secs(1), async {
+                while coordinator
+                    .metrics
+                    .websocket_backpressure_events
+                    .load(Ordering::Acquire)
+                    == backpressure_before
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("the refusal reaches the full queue");
+        }
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        let teardown = lifecycle.lock_owned();
+        tokio::pin!(teardown);
+        assert!(futures_util::poll!(&mut teardown).is_pending());
+        if close_source {
+            assert!(server
+                .connection_manager
+                .request_close_for(&authority, CloseReason::ActivityTimeout));
+            timeout(Duration::from_millis(10), &mut dispatch)
+                .await
+                .expect(
+                    "close must release the refusal wait before routing or queue capacity returns",
+                );
+            assert!(futures_util::poll!(&mut teardown).is_ready());
+            if full_queue {
+                assert_eq!(authority_rx.len(), 8);
+                let closed = &coordinator.metrics.websocket_deliveries_channel_closed;
+                let before = closed.load(Ordering::Acquire);
+                authority_rx.close();
+                timeout(Duration::from_secs(1), async {
+                    while closed.load(Ordering::Acquire) == before {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                })
+                .await
+                .expect("the owned reply must finish delivery accounting");
+                assert_eq!(closed.load(Ordering::Acquire), before + 1);
+            } else {
+                assert!(drain_receiver(&mut authority_rx).is_empty());
+            }
+        } else {
+            drop(routes);
+            timeout(Duration::from_secs(1), &mut dispatch)
+                .await
+                .unwrap();
+            let reply = authority_rx.try_recv().expect("live socket gets a refusal");
+            assert!(matches!(reply.as_ref(),
+                ServerMessage::RoomOperationResult { operation_id: actual, result }
+                if *actual == operation_id && matches!(result.as_ref(),
+                    RoomOperationResult::OperationFailed { error_code: Some(ErrorCode::StorageError), .. }
+                )
+            ));
+        }
+        drop(gate);
+        assert!(drain_receiver(&mut target_rx).is_empty());
+        assert_eq!(target_close.requested_reason(), None);
+        assert!(
+            server
+                .reconnection_manager()
+                .unwrap()
+                .has_pre_issued_token(&target)
+                .await
+        );
+    }
+}
+
 async fn qualify_queued_eviction(ban: bool) {
     use crate::protocol::{ClientMessage, RoomOperationRequest};
 
