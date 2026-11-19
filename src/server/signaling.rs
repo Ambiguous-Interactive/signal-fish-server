@@ -22,40 +22,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::coordination::{
-    ConnectionCloseSignal, MessageCoordinator, RoomEventMutationGuard,
-    RoomMessageTransactionOutcome, RoomRecipientMessages,
+    RoomEventMutationGuard, RoomMessageTransactionOutcome, RoomRecipientMessages,
 };
 use crate::protocol::{
     room_state::Room, ErrorCode, LobbyState, PlayerId, PlayerInfo, RoomId, ServerMessage,
     SessionGeneration, Transport,
 };
 
-use super::connection_manager::ConnectionManager;
+use super::messaging::send_error_to_player_on_socket;
 use super::session_policy::membership_session_decision;
 use super::{ClientLifecycle, EnhancedGameServer};
-
-async fn deliver_signal_error(
-    connections: &ConnectionManager,
-    coordinator: &dyn MessageCoordinator,
-    player_id: &PlayerId,
-    close: &ConnectionCloseSignal,
-    message: String,
-    error_code: ErrorCode,
-) -> anyhow::Result<()> {
-    if close.requested_reason().is_some() || !connections.charge_error_reply(player_id).await {
-        return Ok(());
-    }
-    coordinator
-        .send_to_player_on_socket(
-            player_id,
-            close,
-            Arc::new(ServerMessage::Error {
-                message,
-                error_code: Some(error_code),
-            }),
-        )
-        .await
-}
 
 /// Reuse a routed roster for membership lookup without allocating a second set.
 /// Custom coordinators may return unordered or duplicate player ids.
@@ -463,7 +439,7 @@ impl EnhancedGameServer {
                     )
                 }
             };
-            deliver_signal_error(
+            send_error_to_player_on_socket(
                 connection_manager.as_ref(),
                 coordinator.as_ref(),
                 &from,
@@ -1020,7 +996,7 @@ impl EnhancedGameServer {
         let message = message.into();
         let completion = tokio::spawn(async move {
             let _lifecycle_guard = lifecycle_guard;
-            deliver_signal_error(
+            send_error_to_player_on_socket(
                 connection_manager.as_ref(),
                 message_coordinator.as_ref(),
                 &player_id,

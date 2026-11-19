@@ -85,11 +85,17 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let Some(source_close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &lifecycle)
+        else {
+            return;
+        };
         let server = Arc::clone(self);
         let player_id = *player_id;
         let task = tokio::spawn(async move {
             server
-                .provide_connection_info_owned(&player_id, connection_info, lifecycle)
+                .provide_connection_info_owned(&player_id, connection_info, lifecycle, source_close)
                 .await;
         });
         if let Err(error) = task.await {
@@ -103,19 +109,17 @@ impl EnhancedGameServer {
         player_id: &PlayerId,
         connection_info: crate::protocol::ConnectionInfo,
         lifecycle: Arc<ClientLifecycle>,
+        source_close: ConnectionCloseSignal,
     ) {
-        let _lifecycle_guard = lifecycle.lock().await;
+        let Some(_lifecycle_guard) = source_close.while_open(lifecycle.lock()).await else {
+            return;
+        };
         if lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
                 .lifecycle_matches(player_id, &lifecycle)
+            || source_close.requested_reason().is_some()
         {
-            return;
-        }
-        let Some(source_close) = self.connection_manager.close_signal_for(player_id) else {
-            return;
-        };
-        if source_close.requested_reason().is_some() {
             return;
         }
 
@@ -129,27 +133,27 @@ impl EnhancedGameServer {
         // broadcast, mirroring the `Signal` payload cap.
         let info_bytes = canonical_json_len(&connection_info);
         if info_bytes > self.config.max_connection_info_bytes {
-            let _ = self
-                .send_error_to_player(
-                    player_id,
-                    format!(
-                        "Connection info is {} bytes; the maximum allowed is {} bytes",
-                        info_bytes, self.config.max_connection_info_bytes
-                    ),
-                    Some(ErrorCode::MessageTooLarge),
-                )
-                .await;
+            self.send_error_to_player_on_socket(
+                player_id,
+                &source_close,
+                format!(
+                    "Connection info is {} bytes; the maximum allowed is {} bytes",
+                    info_bytes, self.config.max_connection_info_bytes
+                ),
+                ErrorCode::MessageTooLarge,
+            )
+            .await;
             return;
         }
 
         let Some(room_id) = self.get_client_room(player_id).await else {
-            let _ = self
-                .send_error_to_player(
-                    player_id,
-                    "Not in a room".to_string(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
+            self.send_error_to_player_on_socket(
+                player_id,
+                &source_close,
+                "Not in a room".to_string(),
+                ErrorCode::NotInRoom,
+            )
+            .await;
             return;
         };
 
@@ -179,26 +183,26 @@ impl EnhancedGameServer {
             Err(error) => {
                 drop(room_event_guard);
                 tracing::warn!(%player_id, %room_id, %error, "Failed to check peer metadata route");
-                let _ = self
-                    .send_error_to_player(
-                        player_id,
-                        "Failed to check room membership".into(),
-                        Some(ErrorCode::InternalError),
-                    )
-                    .await;
+                self.send_error_to_player_on_socket(
+                    player_id,
+                    &source_close,
+                    "Failed to check room membership".into(),
+                    ErrorCode::InternalError,
+                )
+                .await;
                 return;
             }
         };
         if route.is_routed == Some(false) {
             drop(route);
             drop(room_event_guard);
-            let _ = self
-                .send_error_to_player(
-                    player_id,
-                    "Not currently routed in the room".into(),
-                    Some(ErrorCode::NotInRoom),
-                )
-                .await;
+            self.send_error_to_player_on_socket(
+                player_id,
+                &source_close,
+                "Not currently routed in the room".into(),
+                ErrorCode::NotInRoom,
+            )
+            .await;
             return;
         }
         let stored = self.active_session_plan(&room_id).filter(|plan| {
@@ -218,15 +222,14 @@ impl EnhancedGameServer {
                     &source_close,
                 )
                 .await;
-            if !result && source_close.requested_reason().is_none() {
-                let _ = self
-                    .send_error_to_player(
-                        player_id,
-                        "Failed to update Direct host endpoint; retry the connection info"
-                            .to_string(),
-                        Some(ErrorCode::InternalError),
-                    )
-                    .await;
+            if !result {
+                self.send_error_to_player_on_socket(
+                    player_id,
+                    &source_close,
+                    "Failed to update Direct host endpoint; retry the connection info".to_string(),
+                    ErrorCode::InternalError,
+                )
+                .await;
             }
             return;
         }
@@ -261,13 +264,13 @@ impl EnhancedGameServer {
             ),
         }
 
-        let _ = self
-            .send_error_to_player(
-                player_id,
-                "Failed to store legacy peer metadata".to_string(),
-                Some(ErrorCode::InternalError),
-            )
-            .await;
+        self.send_error_to_player_on_socket(
+            player_id,
+            &source_close,
+            "Failed to store legacy peer metadata".to_string(),
+            ErrorCode::InternalError,
+        )
+        .await;
     }
 
     /// Charge one game-data frame's sender-controlled payload size against

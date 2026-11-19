@@ -24,7 +24,49 @@ pub(super) async fn send_error_to_player(
         .await
 }
 
+/// Send a refusal while the caller holds the physical source's lifecycle.
+pub(super) async fn send_error_to_player_on_socket(
+    connections: &super::connection_manager::ConnectionManager,
+    coordinator: &dyn crate::coordination::MessageCoordinator,
+    player_id: &PlayerId,
+    close: &ConnectionCloseSignal,
+    message: String,
+    error_code: ErrorCode,
+) -> anyhow::Result<()> {
+    if close.requested_reason().is_some() || !connections.charge_error_reply(player_id).await {
+        return Ok(());
+    }
+    coordinator
+        .send_to_player_on_socket(
+            player_id,
+            close,
+            Arc::new(ServerMessage::Error {
+                message,
+                error_code: Some(error_code),
+            }),
+        )
+        .await
+}
+
 impl EnhancedGameServer {
+    pub(super) async fn send_error_to_player_on_socket(
+        &self,
+        player_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+        message: String,
+        error_code: ErrorCode,
+    ) {
+        let _ = send_error_to_player_on_socket(
+            self.connection_manager.as_ref(),
+            self.message_coordinator.as_ref(),
+            player_id,
+            close,
+            message,
+            error_code,
+        )
+        .await;
+    }
+
     pub(super) async fn send_error_to_player_for_source(
         &self,
         player_id: &PlayerId,

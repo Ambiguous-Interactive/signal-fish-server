@@ -15,8 +15,8 @@ mod websocket_test_helpers;
 use futures_util::SinkExt;
 use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
-    ClientMessage, ConnectionInfo, DirectEndpoint, IceServer, PlayerId, RoomId, ServerMessage,
-    Topology, Transport,
+    ClientMessage, ConnectionInfo, DirectEndpoint, ErrorCode, IceServer, PlayerId, RoomId,
+    ServerMessage, Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
@@ -741,6 +741,27 @@ async fn direct_room_selects_and_delivers_the_validated_host_endpoint() {
     assert_eq!(client_plan.peers.len(), 1);
     assert_eq!(client_plan.peers[0].player_id, host_id);
     assert!(client_plan.peers[0].initiate);
+
+    send(
+        &mut host,
+        &ClientMessage::ProvideConnectionInfo {
+            connection_info: ConnectionInfo::Custom {
+                data: serde_json::json!("a".repeat(test_server_config().max_connection_info_bytes)),
+            },
+        },
+    )
+    .await;
+    let reply = next_server_message(&mut host).await;
+    assert!(
+        matches!(
+            reply,
+            ServerMessage::Error {
+                error_code: Some(ErrorCode::MessageTooLarge),
+                ..
+            }
+        ),
+        "expected a metadata refusal before a new plan, got {reply:?}"
+    );
 
     let replacement = DirectEndpoint {
         host: "192.0.2.20".into(),

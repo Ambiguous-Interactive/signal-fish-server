@@ -2581,6 +2581,337 @@ async fn live_peer_metadata_waits_for_publication_and_routing() {
     assert_peer_metadata_admission_observes_close(true, false).await;
 }
 
+/// #826: the socket can close between inbound activity and metadata admission.
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_waiting_for_lifecycle_stops_on_sender_close() {
+    let server = create_test_server().await;
+    for close_source in [false, true] {
+        let (player, _receiver, room) = register_refusal_source(&server).await;
+        let lifecycle = server.client_lifecycle(&player).unwrap();
+        let close = server.connection_manager.close_signal_for(&player).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(player);
+        let update = ConnectionInfo::Direct {
+            host: "192.0.2.10".into(),
+            port: 7777,
+        };
+        let dispatch = server.handle_client_message_from_lifecycle(
+            &player,
+            ClientMessage::ProvideConnectionInfo {
+                connection_info: update.clone(),
+            },
+            Arc::clone(&lifecycle),
+        );
+        tokio::pin!(dispatch);
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("the command must finish its activity check");
+        let held = lifecycle.lock().await;
+        pause.release.notify_one();
+        assert!(timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .is_err());
+
+        if close_source {
+            assert!(close.request_close(crate::coordination::CloseReason::ActivityTimeout));
+            timeout(Duration::from_millis(10), &mut dispatch)
+                .await
+                .expect("queued metadata must finish before the lifecycle opens");
+            drop(held);
+        } else {
+            drop(held);
+            timeout(Duration::from_secs(1), dispatch)
+                .await
+                .expect("a live update must finish after admission opens");
+        }
+        let stored = server
+            .database
+            .get_room_by_id(&room)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.players[&player].connection_info,
+            (!close_source).then_some(update)
+        );
+        server.unregister_client(&player).await;
+    }
+}
+
+/// #826: a refusal waiting to reach its socket must release teardown on close.
+#[tokio::test(start_paused = true)]
+async fn peer_metadata_refusal_waiting_for_routing_stops_on_sender_close() {
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            max_connection_info_bytes: 128,
+            ..ServerConfig::default()
+        },
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let (closing, mut closing_rx, room) = register_refusal_source(&server).await;
+    let (live, mut live_rx) = register_client(&server).await;
+    let lifecycle = server.client_lifecycle(&closing).unwrap();
+    let close = server
+        .connection_manager
+        .close_signal_for(&closing)
+        .unwrap();
+    let refusal = || ClientMessage::ProvideConnectionInfo {
+        connection_info: ConnectionInfo::Custom {
+            data: json!("a".repeat(256)),
+        },
+    };
+    let routes = coordinator.local_clients.write().await;
+    let closing_dispatch = server.handle_client_message(&closing, refusal());
+    let live_dispatch = server.handle_client_message(&live, refusal());
+    tokio::pin!(closing_dispatch, live_dispatch);
+    assert!(timeout(Duration::from_millis(10), &mut closing_dispatch)
+        .await
+        .is_err());
+    assert!(timeout(Duration::from_millis(10), &mut live_dispatch)
+        .await
+        .is_err());
+    let teardown = lifecycle.lock_owned();
+    tokio::pin!(teardown);
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+
+    assert!(close.request_close(crate::coordination::CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), closing_dispatch)
+        .await
+        .expect("closing metadata refusal must finish before the reply route opens");
+    assert!(futures_util::poll!(&mut teardown).is_ready());
+    assert!(futures_util::poll!(&mut live_dispatch).is_pending());
+    drop(routes);
+
+    live_dispatch.await;
+    assert_eq!(
+        error_code(recv(&mut live_rx).await.as_ref()),
+        Some(ErrorCode::MessageTooLarge)
+    );
+    let closing_tail = closing_rx.try_recv();
+    assert!(matches!(
+        closing_tail,
+        Err(crate::coordination::outbound_queue::TryReceiveError::Empty)
+    ));
+    let stored = server
+        .database
+        .get_room_by_id(&room)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.players[&closing].connection_info.is_none());
+}
+
+/// #826: close can reach room teardown and preserve recovery during a blocked metadata reply.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_releases_metadata_refusal_before_reconnect() {
+    use crate::coordination::CloseReason;
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+    type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+    const BOUND: Duration = Duration::from_secs(5);
+
+    async fn send(socket: &mut Socket, message: ClientMessage) {
+        timeout(
+            BOUND,
+            socket.send(Message::text(serde_json::to_string(&message).unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn receive(socket: &mut Socket) -> ServerMessage {
+        let frame = timeout(BOUND, socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    async fn connect(url: &str) -> Socket {
+        let (mut socket, _) = timeout(BOUND, connect_async(url)).await.unwrap().unwrap();
+        send(
+            &mut socket,
+            ClientMessage::Authenticate {
+                app_id: "test-app".into(),
+                connect_token: None,
+                sdk_version: None,
+                platform: None,
+                game_data_format: None,
+                protocol_version: Some(3),
+                supported_transports: None,
+                supported_topologies: None,
+                requested_capabilities: None,
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ServerMessage::Authenticated { .. }
+        ));
+        assert!(
+            matches!(receive(&mut socket).await, ServerMessage::ProtocolInfo(info)
+            if info.protocol_version == Some(3))
+        );
+        socket
+    }
+
+    let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+    let server = super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+        ServerConfig {
+            max_connection_info_bytes: 128,
+            ..ServerConfig::default()
+        },
+        coordinator.clone(),
+        Arc::new(InMemoryDistributedLock::new()),
+        Arc::new(InMemoryDatabase::new()),
+    )
+    .await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let app = crate::websocket::create_router("*").with_state(Arc::clone(&server));
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut socket = connect(&url).await;
+    send(
+        &mut socket,
+        ClientMessage::JoinRoom {
+            game_name: "metadata-close".into(),
+            room_code: Some("META41".into()),
+            player_name: "Source".into(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: None,
+        },
+    )
+    .await;
+    let ServerMessage::RoomJoined(joined) = receive(&mut socket).await else {
+        panic!("source must join before testing metadata");
+    };
+    let lifecycle = server.client_lifecycle(&joined.player_id).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(joined.player_id);
+    send(
+        &mut socket,
+        ClientMessage::ProvideConnectionInfo {
+            connection_info: ConnectionInfo::Custom {
+                data: json!("a".repeat(256)),
+            },
+        },
+    )
+    .await;
+    timeout(BOUND, pause.reached.notified()).await.unwrap();
+    let gate = coordinator.lock_room_event_mutation(&joined.room_id).await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    let routes = coordinator.local_clients.write().await;
+    pause.release.notify_one();
+    timeout(BOUND, async {
+        loop {
+            let lock = Arc::clone(&lifecycle).lock_owned();
+            tokio::pin!(lock);
+            if futures_util::poll!(&mut lock).is_pending() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("metadata refusal must hold the lifecycle while it waits for routing");
+    assert!(server
+        .connection_manager
+        .request_close_for(&joined.player_id, CloseReason::ActivityTimeout));
+    let (arrival, close) = tokio::join!(
+        timeout(
+            BOUND,
+            gate.wait_for_mutation_attempt_after_for_test(attempts)
+        ),
+        timeout(BOUND, async {
+            while let Some(frame) = socket.next().await {
+                if let Message::Close(Some(frame)) = frame.unwrap() {
+                    return Some(u16::from(frame.code));
+                }
+            }
+            None
+        }),
+    );
+    drop(routes);
+    drop(gate);
+    assert_eq!(close.unwrap(), Some(4003));
+    arrival.expect("teardown must reach the room gate before the reply route opens");
+    timeout(BOUND, lifecycle.wait_for_unregister())
+        .await
+        .unwrap();
+
+    let mut replacement = connect(&url).await;
+    send(
+        &mut replacement,
+        ClientMessage::Reconnect {
+            player_id: joined.player_id,
+            room_id: joined.room_id,
+            auth_token: joined.reconnection_token.unwrap(),
+        },
+    )
+    .await;
+    let ServerMessage::Reconnected(restored) = receive(&mut replacement).await else {
+        panic!("replacement must receive its reconnect baseline");
+    };
+    assert_eq!(
+        (restored.player_id, restored.room_id),
+        (joined.player_id, joined.room_id)
+    );
+    let endpoint = ConnectionInfo::Direct {
+        host: "192.0.2.10".into(),
+        port: 7777,
+    };
+    send(
+        &mut replacement,
+        ClientMessage::ProvideConnectionInfo {
+            connection_info: endpoint.clone(),
+        },
+    )
+    .await;
+    send(&mut replacement, ClientMessage::Ping).await;
+    timeout(BOUND, async {
+        loop {
+            match receive(&mut replacement).await {
+                ServerMessage::Pong => break,
+                ServerMessage::Error { error_code, .. } => {
+                    panic!("unexpected error on the replacement socket: {error_code:?}");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("replacement must process the new endpoint and reply to its ping");
+    let room = server
+        .database
+        .get_room_by_id(&joined.room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        room.players[&joined.player_id].connection_info,
+        Some(endpoint)
+    );
+    serve.abort();
+    assert!(serve.await.unwrap_err().is_cancelled());
+}
+
 /// #826: close must cancel routing waits on both sides of capacity reservation.
 async fn assert_close_cancels_delivery_routing(transport_report: bool) {
     let coordinator = Arc::new(InMemoryMessageCoordinator::new());

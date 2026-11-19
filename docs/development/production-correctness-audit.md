@@ -19885,3 +19885,34 @@ the requester can miss the result. A successful reconnect snapshot
 reports the current code. An in-memory restart loses the room, and an
 independent process cannot recover the mapping from a stale code or token.
 This advances A04, A05, and A09. #826 remains open.
+
+### F411 — Peer metadata waits could outlive the source WebSocket
+
+At `5f56baf0` under #826, `ProvideConnectionInfo` could remain queued on
+the source lifecycle after a close request. A rejected update could also
+hold that lifecycle while it waited for the reply route. Both controls
+exceeded 10 ms with the corresponding gate held after close (Linux ARM64,
+Nextest `f786bd16`). The second wait kept teardown from taking the lifecycle.
+A real v3 socket received close 4003 on the same base. Teardown failed to
+reach the room gate during the five-second wait (Nextest `5525662c`).
+
+The server now binds admission and refusal delivery to the physical source
+socket. The waits end when the server detects close. A live request still
+waits for admission, and a live refusal retains its error code. Once a
+metadata write starts or the server submits a Direct plan, the owned
+transaction can finish in room order.
+
+The socket test now reaches the room gate before releasing the reply route.
+It reconnects the original player and stores a fresh endpoint (Nextest
+`6d6dd125`). A live Direct host receives the typed refusal for oversized
+metadata, then both peers receive the same new generation for a valid
+endpoint (Nextest `c1aeddef`).
+
+The room's home process orders the metadata write and any Direct plan
+with other room changes. A delayed close frame or network partition can
+let the update reach admission before the server detects loss. A surviving
+peer can see an admitted plan before departure publishes a replacement.
+Reconnect reads the current membership and requires fresh metadata for
+the replacement socket. Another process without the room and reconnect
+record declines restore. A restart of the in-memory server loses both.
+This advances A04, A05, A06, and A11. #826 remains open.

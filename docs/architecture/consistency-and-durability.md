@@ -49,11 +49,13 @@ The close request can proceed while membership teardown waits for routing.
 The server cancels an ordinary refusal reply if the sender closes while the
 reply waits for its route.
 
-Peer connection metadata updates wait for room admission. If the server
-requests socket close during admission or the read-only Direct endpoint
-checks, it cancels the pending update. Once the server starts a metadata write
-or submits a Direct plan publication, the owned operation can finish in room
-order. Teardown still waits to read authoritative membership for reconnect.
+Peer connection metadata updates wait for the source lifecycle and room
+admission. If the server requests socket close during those waits or the
+read-only Direct endpoint checks, it cancels the pending update. A refusal
+waiting for the source's reply route can also end on close. Once the server
+starts a metadata write or submits a Direct plan publication, the owned
+operation can finish in room order. Teardown still waits to read authoritative
+membership for reconnect.
 
 Admitted `UnbanPlayer` and `SetRoomAccess` operations retain owned work through
 the stored decision and correlated result. Canceling a server library caller's
