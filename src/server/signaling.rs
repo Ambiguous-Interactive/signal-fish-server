@@ -150,8 +150,20 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
-        if lifecycle.player_id() != *from
+        let Some(source_close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(from, &lifecycle)
+        else {
+            return;
+        };
+        let Some(lifecycle_guard) = source_close
+            .while_open(Arc::clone(&lifecycle).lock_owned())
+            .await
+        else {
+            return;
+        };
+        if source_close.requested_reason().is_some()
+            || lifecycle.player_id() != *from
             || !self.connection_manager.lifecycle_matches(from, &lifecycle)
         {
             return;
@@ -305,9 +317,6 @@ impl EnhancedGameServer {
         // `Signal` ahead of that recipient's plan. Holding the shared room
         // fence through dispatch makes plan-before-signal a server guarantee for
         // finalize, re-plan, join, and reconnect publications alike.
-        let Some(source_close) = self.connection_manager.close_signal_for(from) else {
-            return;
-        };
         let Some((signal_publication_guard, routed_pair)) = source_close
             .while_open(async {
                 let guard = self.message_coordinator.lock_room_signal(&from_room).await;

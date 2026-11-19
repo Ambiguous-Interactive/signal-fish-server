@@ -2116,6 +2116,87 @@ async fn webrtc_pair_in_room(
     (alice, alice_rx, bob, bob_rx)
 }
 
+/// #826: WebRTC dispatch waits for the lifecycle again after activity refresh.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn queued_webrtc_signal_stops_on_source_close_after_activity_refresh() {
+    for close_source in [false, true] {
+        let server = create_test_server_with_signals(1).await;
+        let (alice, mut alice_rx, bob, mut bob_rx) = webrtc_pair_in_room(&server).await;
+        let lifecycle = server.client_lifecycle(&alice).unwrap();
+        let pause = super::message_router::arm_socket_dispatch_pause(alice);
+        let generation = uuid::Uuid::new_v4();
+        let signal = json!({"Offer": "queued after activity"});
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &alice,
+            ClientMessage::Signal {
+                to: bob,
+                generation,
+                signal: signal.clone(),
+            },
+            Arc::clone(&lifecycle),
+        ));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(Duration::from_secs(1), pause.reached.notified())
+            .await
+            .expect("the offer passed the router's activity refresh");
+
+        let gate = lifecycle.lock().await;
+        let attempts = lifecycle.lock_attempt_count_for_test();
+        pause.release.notify_one();
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("the offer must queue for its source lifecycle");
+        assert_eq!(valid_signal_budget_used(&server, &alice).await, 0);
+
+        let bound = Duration::from_millis(10);
+        if close_source {
+            assert!(server
+                .connection_manager
+                .request_close_for(&alice, crate::coordination::CloseReason::ActivityTimeout,));
+            timeout(bound, &mut dispatch)
+                .await
+                .expect("close must finish signal dispatch with the lifecycle gate held");
+            drop(gate);
+        } else {
+            assert!(timeout(bound, &mut dispatch).await.is_err());
+            drop(gate);
+            timeout(bound, &mut dispatch)
+                .await
+                .expect("a live offer must finish after the gate opens");
+            assert!(matches!(
+                recv(&mut bob_rx).await.as_ref(),
+                ServerMessage::Signal { from, generation: actual, signal: payload }
+                if *from == alice && *actual == generation && *payload == signal
+            ));
+        }
+
+        let expected_dispatches = u64::from(!close_source);
+        assert_eq!(
+            server.metrics.signals_relayed.load(Ordering::Relaxed),
+            expected_dispatches
+        );
+        assert_eq!(
+            valid_signal_budget_used(&server, &alice).await,
+            u32::from(!close_source)
+        );
+        let source_tail = alice_rx.try_recv();
+        assert!(
+            matches!(source_tail, Err(mpsc::error::TryRecvError::Empty)),
+            "unexpected reply to the source: {source_tail:?}"
+        );
+        let target_tail = bob_rx.try_recv();
+        assert!(
+            matches!(target_tail, Err(mpsc::error::TryRecvError::Empty)),
+            "unexpected offer to the target: {target_tail:?}"
+        );
+    }
+}
+
 /// Serialized length of an opaque signal payload, exactly as the cap measures it.
 fn payload_len(signal: &serde_json::Value) -> usize {
     serde_json::to_vec(signal).expect("signal serializes").len()

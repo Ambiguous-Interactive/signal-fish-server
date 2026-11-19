@@ -105,8 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Release closing connections that are waiting to process a P2P transport report (#826).
 - Let WebRTC signaling and transport reports finish when the sender disconnects during slow peer cleanup (#826).
 - Close connections promptly when the server is busy and cannot send an optional farewell (#826).
-- Cancel pending WebRTC signaling and P2P transport reports when the sender disconnects, including replies
-  waiting for the sender's route (#826).
+- Cancel pending WebRTC signaling and P2P transport reports when the sender disconnects, including offers waiting
+  for socket access and replies waiting for the sender's route (#826).
 - Fix the protocol schema to accept a null relay client ID, as the server already does (#826).
 - Correct reconnect examples to include the restored player and the v3 reconnect token (#826).
 - Allow the existing null values for optional join fields in the protocol schema (#826).

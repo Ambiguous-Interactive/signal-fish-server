@@ -19695,3 +19695,30 @@ close detection and let storage admission win. On restart, the in-memory
 rooms and their reconnect records are lost. A client that never got a
 `RoomJoined` baseline can make a fresh request after it reconnects and must
 use the returned room identity. This advances A04 and A11.
+
+### F405 — A queued WebRTC signal could hold WebSocket receive dispatch
+
+At `740c8ff3` under #826, the WebSocket router refreshed inbound activity
+and then took the source lifecycle again to dispatch a WebRTC signal.
+The second wait ignored the physical socket's close request. A paused-clock
+Linux ARM64 test holds that gate after the activity refresh and submits an
+offer through the WebSocket router. The closing case misses the 10 ms bound
+while the gate stays held (Nextest `136029cf`). The live control waits and
+delivers one offer with the original source, session generation, and payload.
+
+The server binds the second wait to the same physical socket. If close wins
+while the offer waits, the reader can leave dispatch without spending signal
+budget or queueing a signal or refusal. The server still takes the lifecycle
+and the room's signal gate before admitting live work. This preserves
+plan-before-signal order and prevents a queued offer from acting through a
+replacement socket. A peer can still read frames already queued at close.
+The matched warm ARM64 offer probe records eight allocations and 3,328
+allocated bytes on both revisions in rooms of 2, 16, and 64 players.
+
+The home server owns membership, plan order, and pending reconnect records.
+It waits for authoritative room state before detaching the player or routing
+a live signal. A close frame can remain unread while dispatch waits, and a
+partition can delay close detection. Reconnect uses the current routing
+and session plan after restoration. A process without the pending record
+declines recovery, including after restart. This advances A04 and A11.
+The broader audit stays open.
