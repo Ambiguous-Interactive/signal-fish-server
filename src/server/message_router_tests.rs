@@ -2768,6 +2768,8 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
     let room_gate = coordinator.lock_room_event_mutation(&room).await;
     let teardown_attempts = room_gate.mutation_attempt_count_for_test();
     let routes = coordinator.local_clients.write().await;
+    let deliveries = &coordinator.metrics.websocket_delivery_attempts;
+    let prior_deliveries = deliveries.load(Ordering::Acquire);
     send(&mut socket, refused()).await;
     timeout(
         BOUND,
@@ -2797,6 +2799,17 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
     .await
     .expect("teardown must reach the room while the refusal route is held");
     drop(routes);
+    // Wait behind any queued route lookup before teardown can publish events.
+    drop(
+        timeout(BOUND, coordinator.local_clients.write())
+            .await
+            .expect("the routing map becomes available"),
+    );
+    assert_eq!(
+        deliveries.load(Ordering::Acquire),
+        prior_deliveries,
+        "a refusal still waiting for routing at close must skip delivery",
+    );
     drop(room_gate);
     drop(socket);
     timeout(BOUND, lifecycle.wait_for_unregister())
