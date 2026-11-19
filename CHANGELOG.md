@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Require custom coordination locks to leave no lease behind when a pending `try_acquire` is canceled.
 - **Breaking:** Use Jiff timestamps and signed durations in the Rust server API.
   Preserve v2 and metrics timestamp bytes and the existing v2 frame budget.
 - Reduce server work and memory use for repeated disconnects and bulk reconnect cleanup that removes no records (#636).
@@ -88,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the existing room code when the server closes the requester's WebSocket before admitting a rotation (#826).
 - Cancel a queued player kick when the server starts closing the authority's WebSocket (#826).
 - Cancel queued player bans and release failed-ban reply waits when the server closes the authority's WebSocket (#826).
 - Cancel a queued room authority transfer when the server starts closing the initiating WebSocket (#826).

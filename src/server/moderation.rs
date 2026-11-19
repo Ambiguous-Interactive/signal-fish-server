@@ -1082,7 +1082,15 @@ impl EnhancedGameServer {
         operation_id: RoomOperationId,
         lifecycle: Arc<ClientLifecycle>,
     ) {
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(authority_id, &lifecycle)
+        else {
+            return;
+        };
+        let Some(_authority_lifecycle_guard) = close.while_open(lifecycle.lock()).await else {
+            return;
+        };
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -1101,7 +1109,13 @@ impl EnhancedGameServer {
             .await;
             return;
         };
-        let room = match self.database.get_room_code_snapshot(&room_id).await {
+        let Some(room) = close
+            .while_open(self.database.get_room_code_snapshot(&room_id))
+            .await
+        else {
+            return;
+        };
+        let room = match room {
             Ok(Some(room)) => room,
             Ok(None) => {
                 self.fail_operation(
@@ -1145,18 +1159,14 @@ impl EnhancedGameServer {
         // rotations must not wait on each other's old-code locks. Released
         // on every exit from the loop.
         let old_lock_key = format!("room_join:{}:{}", room.game_name, room.code);
-        let mut old_lock_renewal = match self
-            .distributed_lock
-            .acquire(
-                &old_lock_key,
-                self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
-            )
+        let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
+        let mut old_lock_renewal = match close
+            .while_open(self.distributed_lock.acquire(&old_lock_key, ttl))
             .await
         {
-            Ok(handle) => {
-                self.keep_lock_renewed(handle, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
-            }
-            Err(error) => {
+            Some(Ok(handle)) => self.keep_lock_renewed(handle, ttl),
+            None => return,
+            Some(Err(error)) => {
                 tracing::error!(%authority_id, %room_id, %error, "Failed to acquire old room-code lock");
                 self.fail_operation(
                     authority_id,
@@ -1170,6 +1180,9 @@ impl EnhancedGameServer {
         };
 
         for _ in 0..REGENERATED_ROOM_CODE_MAX_ATTEMPTS {
+            if close.requested_reason().is_some() {
+                break;
+            }
             let candidate = self.generate_region_room_code();
             if candidate == room.code {
                 self.metrics.increment_room_code_collisions();
@@ -1181,11 +1194,14 @@ impl EnhancedGameServer {
             // not wait here while holding the old-code lock: another rotation
             // can hold this candidate as its old code while seeking ours.
             let lock_key = format!("room_join:{}:{}", room.game_name, candidate);
-            let lock_handle = match self
-                .distributed_lock
-                .try_acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
+            let Some(acquired) = close
+                .while_open(self.distributed_lock.try_acquire(&lock_key, ttl))
                 .await
-            {
+            else {
+                self.release_renewed_lock(&mut old_lock_renewal).await;
+                return;
+            };
+            let lock_handle = match acquired {
                 Ok(Some(handle)) => handle,
                 Ok(None) => continue,
                 Err(error) => {
@@ -1203,18 +1219,26 @@ impl EnhancedGameServer {
             };
             // The hold spans the storage swap; keep the lease renewed so the
             // mutual exclusion cannot silently expire mid-hold (issue #550).
-            let mut lock_renewal =
-                self.keep_lock_renewed(lock_handle, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL));
+            let mut lock_renewal = self.keep_lock_renewed(lock_handle, ttl);
             // Spectators release the old-code lock after entering the room
             // event lane. Hold that lane across the swap so a spectator that
             // resolved the old code finishes admission before rotation, and
             // one that starts after the swap sees only the new code. Take it
             // after both code locks: a candidate-code join can hold its code
             // lock while waiting for this same lane.
-            let room_event_guard = self
-                .message_coordinator
-                .lock_room_event_mutation(&room_id)
-                .await;
+            let gate = self.message_coordinator.lock_room_event_mutation(&room_id);
+            // Order the write against socket close after acquiring both code
+            // leases and the room gate. Once admitted, finish the storage
+            // operation before releasing any of those guards.
+            let Some(room_event_guard) = close
+                .while_open(gate)
+                .await
+                .and_then(|guard| close.commit_if_open(|| guard))
+            else {
+                self.release_renewed_lock(&mut lock_renewal).await;
+                self.release_renewed_lock(&mut old_lock_renewal).await;
+                return;
+            };
             let result = self
                 .database
                 .update_room_code_snapshot(&room_id, candidate)
@@ -1233,8 +1257,9 @@ impl EnhancedGameServer {
                     );
                     let _ = self
                         .message_coordinator
-                        .send_to_player(
+                        .send_to_player_on_socket(
                             authority_id,
+                            &close,
                             Arc::new(ServerMessage::RoomOperationResult {
                                 operation_id,
                                 result: Box::new(RoomOperationResult::RoomCodeRegenerated {
@@ -1266,13 +1291,16 @@ impl EnhancedGameServer {
             }
         }
 
+        self.release_renewed_lock(&mut old_lock_renewal).await;
+        if close.requested_reason().is_some() {
+            return;
+        }
         tracing::error!(
             %authority_id,
             %room_id,
             attempts = REGENERATED_ROOM_CODE_MAX_ATTEMPTS,
             "Regenerated room-code retry budget exhausted"
         );
-        self.release_renewed_lock(&mut old_lock_renewal).await;
         self.fail_operation(
             authority_id,
             operation_id,

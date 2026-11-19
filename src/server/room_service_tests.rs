@@ -11172,10 +11172,11 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
     );
 }
 
-struct LockAttemptProbe {
+pub(super) struct LockAttemptProbe {
     inner: InMemoryDistributedLock,
     key: String,
     changed: watch::Sender<usize>,
+    try_acquire_gate: Option<Arc<tokio::sync::Notify>>,
 }
 
 fn queued_room_creation_frame(room_code: Option<String>) -> crate::protocol::ClientMessage {
@@ -11497,15 +11498,23 @@ async fn real_socket_teardown_finishes_while_room_creation_cap_is_held() {
 }
 
 impl LockAttemptProbe {
-    fn new(key: &str) -> Self {
+    pub(super) fn new(key: &str) -> Self {
         Self {
             inner: InMemoryDistributedLock::new(),
             key: key.to_string(),
             changed: watch::channel(0).0,
+            try_acquire_gate: None,
         }
     }
 
-    async fn wait_for_attempts(&self, target: usize) {
+    pub(super) fn with_try_acquire_gate(key: &str, gate: Arc<tokio::sync::Notify>) -> Self {
+        Self {
+            try_acquire_gate: Some(gate),
+            ..Self::new(key)
+        }
+    }
+
+    pub(super) async fn wait_for_attempts(&self, target: usize) {
         let mut changed = self.changed.subscribe();
         timeout(Duration::from_secs(1), async {
             while *changed.borrow_and_update() < target {
@@ -11530,6 +11539,10 @@ impl DistributedLock for LockAttemptProbe {
     }
 
     async fn try_acquire(&self, key: &str, ttl: Duration) -> anyhow::Result<Option<LockHandle>> {
+        if let Some(gate) = self.try_acquire_gate.as_ref().filter(|_| key == self.key) {
+            self.changed.send_modify(|attempts| *attempts += 1);
+            gate.notified().await;
+        }
         self.inner.try_acquire(key, ttl).await
     }
 

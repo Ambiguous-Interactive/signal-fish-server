@@ -1717,9 +1717,10 @@ The moderation operations are authority-only (v3 only):
   reconnection tokens are unaffected. The requester receives `RoomCodeRegenerated` carrying the new code; the old
   code stops resolving to the room immediately, and a join that names it behaves like any unknown code:
   join-creates-room may open a fresh, unrelated room under it, while a `join_only` join is refused `ROOM_NOT_FOUND`
-  (issue #625). The result goes only to the acting authority, and
-  no message queries the current code. If the authority role moves after a rotation, share the new code with the
-  successor out of band before the transfer (issue #566).
+  (issue #625). If the server detects or requests close before it admits the rotation, the existing code stays active.
+  An admitted rotation can complete if the requester disconnects before receiving the result. Only the acting authority
+  receives the result, and a successful reconnect snapshot includes the current code. There is no separate code query.
+  Before transferring authority after a rotation, share the current code with the successor out of band (issue #566).
 - `SetRoomAccess` takes `password` (non-empty string, max 256 bytes, or `null`). A password seals the room: every
   later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing,
   a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current

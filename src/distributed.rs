@@ -19,7 +19,8 @@ pub trait DistributedLock: Send + Sync {
     /// Dropping a pending acquisition must leave no lease owned by that call.
     async fn acquire(&self, key: &str, ttl: Duration) -> Result<LockHandle>;
 
-    /// Try to acquire a lock without blocking
+    /// Try to acquire a lock without waiting for an existing lease to end.
+    /// Dropping a pending acquisition must leave no lease owned by that call.
     async fn try_acquire(&self, key: &str, ttl: Duration) -> Result<Option<LockHandle>>;
 
     /// Extend the TTL of an existing lock
@@ -979,6 +980,22 @@ mod tests {
             expires_at >= expected_not_before,
             "a successful acquisition must start its TTL after internal contention ends"
         );
+    }
+
+    #[tokio::test]
+    async fn canceled_try_acquire_leaves_no_lease() {
+        let lock = InMemoryDistributedLock::new();
+        let guard = lock.locks.write().await;
+        let key = "canceled-acquisition";
+        let ttl = Duration::from_secs(1);
+        let mut pending = Box::pin(lock.try_acquire(key, ttl));
+        assert!(futures_util::poll!(&mut pending).is_pending());
+        drop(pending);
+        drop(guard);
+
+        assert!(!lock.is_locked(key).await.unwrap());
+        let handle = lock.try_acquire(key, ttl).await.unwrap().unwrap();
+        assert!(lock.release(&handle).await.unwrap());
     }
 
     /// Same paused-clock contention window as the acquisition test above: the
