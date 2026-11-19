@@ -52,7 +52,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407 |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
@@ -19849,3 +19849,37 @@ A peer can still receive a frame stamped before the server detects the
 close. Recovery advances the sender's epoch and excludes gameplay replay.
 A process without the pending reconnect record declines restore, including
 after an in-memory restart. This advances A04 and A13. #826 stays open.
+
+### F410 — Queued room-code rotation could replace the code after WebSocket close
+
+At `b56d4e9e` under #826, a rotation waiting for the old-code join lease or
+the room mutation gate ignored the source socket's close signal. Both
+paused-clock controls exceeded 10 ms with the gate held. Releasing the gate
+let the closed socket's command replace the code. The open-socket controls
+passed (Linux ARM64, Nextest `f38bfa18`).
+
+The server now checks the source lifecycle and waits for the old-code
+lease and room mutation gate only while the source stays open. It orders
+each storage attempt against close after taking the room gate and both
+code leases. If close wins, the existing mapping stays valid and the
+server releases any leases from the attempt. If admission wins, the owned
+task completes the storage attempt before releasing the guards. A storage
+collision requires another admission decision before retry. A successful
+reply goes to the requesting socket.
+
+On Linux ARM64, 18 controls passed (Nextest `af1e79eb`). A real v3 socket
+received close 4003. Teardown reached the held room gate. The requester
+reconnected with the original code and a newcomer used it to join the
+same room. A second control closed after storage started, then verified
+the new mapping and release of both leases. Other controls covered a
+caller that stops waiting, code collisions, join order, and live WebRTC
+signaling after a committed rotation.
+
+The room's home process orders rotations with admission and reconnect.
+A join already using the old mapping must finish its admission decision
+before the swap. A delayed close frame or network partition can delay
+close detection. The server can admit the rotation during that gap and
+the requester can miss the result. A successful reconnect snapshot
+reports the current code. An in-memory restart loses the room, and an
+independent process cannot recover the mapping from a stale code or token.
+This advances A04, A05, and A09. #826 remains open.

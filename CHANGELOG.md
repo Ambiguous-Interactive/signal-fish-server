@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Keep the existing room code when the server closes the requester's WebSocket before admitting a rotation (#826).
 - Cancel a queued player kick when the server starts closing the authority's WebSocket (#826).
 - Cancel queued player bans and release failed-ban reply waits when the server closes the authority's WebSocket (#826).
 - Cancel a queued room authority transfer when the server starts closing the initiating WebSocket (#826).

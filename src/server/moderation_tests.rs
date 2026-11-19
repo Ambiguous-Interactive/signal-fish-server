@@ -4866,10 +4866,22 @@ async fn real_socket_close_cancels_queued_ban_before_reconnect() {
     .await;
 }
 
+/// #826: reconnect and a fresh join still resolve the original room code.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_cancels_queued_rotation_before_reconnect() {
+    qualify_real_socket_close_cancels_room_operation(|_| {
+        crate::protocol::RoomOperationRequest::RegenerateRoomCode
+    })
+    .await;
+}
+
 async fn qualify_real_socket_close_cancels_room_operation(
     operation: impl FnOnce(PlayerId) -> crate::protocol::RoomOperationRequest,
 ) {
-    use crate::protocol::{ClientMessage, RoomJoinedPayload, ROOM_OPERATION_IDS_CAPABILITY};
+    use crate::protocol::{
+        ClientMessage, RoomJoinedPayload, RoomOperationRequest, ROOM_OPERATION_IDS_CAPABILITY,
+    };
     use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpStream;
     use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
@@ -4966,6 +4978,11 @@ async fn qualify_real_socket_close_cancels_room_operation(
     let peer_joined = join(&mut peer, &joined.room_code, "peer").await;
     assert_eq!(peer_joined.room_id, room_id);
     let target = peer_joined.player_id;
+    let operation = operation(target);
+    let rotates_code = matches!(operation, RoomOperationRequest::RegenerateRoomCode);
+    if rotates_code {
+        server.script_room_codes_for_test(["QROTAT"]);
+    }
 
     let gate = server
         .message_coordinator
@@ -4976,7 +4993,7 @@ async fn qualify_real_socket_close_cancels_room_operation(
         &mut socket,
         ClientMessage::RoomOperation {
             operation_id: RoomOperationId::new_v4(),
-            operation: Box::new(operation(target)),
+            operation: Box::new(operation),
         },
     )
     .await;
@@ -5046,6 +5063,22 @@ async fn qualify_real_socket_close_cancels_room_operation(
         .unwrap()
         .unwrap()
         .is_banned(&target));
+    if rotates_code {
+        assert_eq!(restored.room_code, joined.room_code);
+        let mut newcomer = connect(&url).await;
+        assert_eq!(
+            join(&mut newcomer, &joined.room_code, "newcomer")
+                .await
+                .room_id,
+            room_id
+        );
+        assert!(server
+            .database
+            .get_room("moderation-game", "QROTAT")
+            .await
+            .unwrap()
+            .is_none());
+    }
     send(&mut peer, ClientMessage::Ping).await;
     timeout(BOUND, async {
         loop {
@@ -5383,6 +5416,17 @@ async fn qualify_admitted_eviction_finishes_departure(ban: bool, close_source: b
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn canceled_room_code_rotation_finishes_and_releases_join_locks() {
+    qualify_admitted_room_code_rotation(false).await;
+}
+
+/// #826: after admission, a source close cannot interrupt the storage swap.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_preserves_admitted_room_code_rotation() {
+    qualify_admitted_room_code_rotation(true).await;
+}
+
+async fn qualify_admitted_room_code_rotation(close_source: bool) {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (authority, mut authority_rx) =
         register_client(&server, "127.0.0.1:49203".parse().unwrap()).await;
@@ -5411,15 +5455,41 @@ async fn canceled_room_code_rotation_finishes_and_releases_join_locks() {
     )
     .await
     .unwrap();
-    caller.abort();
-    assert!(caller.await.unwrap_err().is_cancelled());
-    database.release_paused_update_room_code_for_test();
-    let result = recv_until(&mut authority_rx, |message| {
-        matches!(message, ServerMessage::RoomOperationResult { .. })
-    })
-    .await;
-    assert!(
-        matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code } if room_code == "RCNEW1"))
+    for code in ["RCOLD1", "RCNEW1"] {
+        assert!(server
+            .distributed_lock
+            .is_locked(&format!("room_join:moderation-game:{code}"))
+            .await
+            .unwrap());
+    }
+    if close_source {
+        assert!(server
+            .connection_manager
+            .request_close_for(&authority, CloseReason::ActivityTimeout));
+        database.release_paused_update_room_code_for_test();
+        timeout(Duration::from_secs(1), caller)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(authority_rx.is_empty());
+    } else {
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+        database.release_paused_update_room_code_for_test();
+        let result = recv_until(&mut authority_rx, |message| {
+            matches!(message, ServerMessage::RoomOperationResult { .. })
+        })
+        .await;
+        assert!(
+            matches!(result.as_ref(), ServerMessage::RoomOperationResult { operation_id: actual, result } if *actual == operation_id && matches!(result.as_ref(), RoomOperationResult::RoomCodeRegenerated { room_code } if room_code == "RCNEW1"))
+        );
+    }
+    assert_eq!(
+        server
+            .metrics
+            .room_code_regenerations
+            .load(Ordering::Relaxed),
+        1
     );
     assert!(server
         .database
@@ -6288,4 +6358,180 @@ fn assert_eviction_result(
         _ => panic!("unexpected moderation result: {result:?}"),
     };
     assert_eq!(target_from_result, target);
+}
+
+/// #826: a rotation must yield if the server closes its source before room admission.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_rotation_waiting_for_room_gate() {
+    qualify_queued_room_code_rotation(false, true).await;
+}
+
+/// #826: a rotation must yield while an old-code join holds its lease.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_rotation_waiting_for_old_code() {
+    qualify_queued_room_code_rotation(true, true).await;
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn open_socket_completes_queued_room_code_rotation() {
+    qualify_queued_room_code_rotation(false, false).await;
+    qualify_queued_room_code_rotation(true, false).await;
+}
+
+async fn qualify_queued_room_code_rotation(wait_for_old_code: bool, close_source: bool) {
+    use super::room_service_tests::{
+        create_test_server_with_message_coordinator_and_lock, LockAttemptProbe,
+    };
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    const OLD_LOCK: &str = "room_join:moderation-game:QUEOLD";
+    const NEW_LOCK: &str = "room_join:moderation-game:QUENEW";
+
+    let lock = Arc::new(LockAttemptProbe::new(OLD_LOCK));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(super::InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        Arc::new(crate::database::InMemoryDatabase::new()),
+    )
+    .await;
+    let (authority, mut authority_rx, close) =
+        register_client_with_close_listener(&server, "127.0.0.1:48225".parse().unwrap()).await;
+    server.set_client_protocol(
+        &authority,
+        NegotiatedProtocol {
+            version: 3,
+            transports: vec![crate::protocol::Transport::Relay],
+            topologies: vec![crate::protocol::Topology::Relay],
+        },
+    );
+    server.set_client_room_operation_ids(&authority, true);
+    join_seated_player(&server, &authority, &mut authority_rx, "QUEOLD", "host").await;
+    drain_receiver(&mut authority_rx);
+    let room_id = server.get_client_room(&authority).await.unwrap();
+    let lifecycle = server.client_lifecycle(&authority).unwrap();
+    server.script_room_codes_for_test(["QUENEW"]);
+
+    let held_code = if wait_for_old_code {
+        Some(
+            lock.try_acquire(OLD_LOCK, super::room_service::ROOM_JOIN_LOCK_TTL)
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+    let gate = if wait_for_old_code {
+        None
+    } else {
+        Some(
+            server
+                .message_coordinator
+                .lock_room_event_mutation(&room_id)
+                .await,
+        )
+    };
+    let attempts = gate
+        .as_ref()
+        .map(RoomEventMutationGuard::mutation_attempt_count_for_test);
+    let operation_id = RoomOperationId::new_v4();
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &authority,
+        ClientMessage::RoomOperation {
+            operation_id,
+            operation: Box::new(RoomOperationRequest::RegenerateRoomCode),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    if let (Some(gate), Some(attempts)) = (&gate, attempts) {
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("rotation waits at the room gate");
+        assert!(lock.is_locked(OLD_LOCK).await.unwrap());
+        assert!(lock.is_locked(NEW_LOCK).await.unwrap());
+    } else {
+        lock.wait_for_attempts(2).await;
+    }
+
+    let released_on_close = if close_source {
+        assert!(server
+            .connection_manager
+            .request_close_for(&authority, CloseReason::ActivityTimeout));
+        let done = timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .is_ok();
+        if done {
+            let teardown = timeout(Duration::from_millis(10), lifecycle.lock())
+                .await
+                .expect("rotation must release the source lifecycle");
+            drop(teardown);
+            assert_eq!(lock.is_locked(OLD_LOCK).await.unwrap(), wait_for_old_code);
+            assert!(!lock.is_locked(NEW_LOCK).await.unwrap());
+        }
+        done
+    } else {
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        false
+    };
+    drop(gate);
+    if let Some(held) = held_code {
+        assert!(lock.release(&held).await.unwrap());
+    }
+    if !released_on_close {
+        timeout(Duration::from_secs(2), dispatch).await.unwrap();
+    }
+
+    for (code, exists) in [("QUEOLD", close_source), ("QUENEW", !close_source)] {
+        assert_eq!(
+            server
+                .database
+                .get_room("moderation-game", code)
+                .await
+                .unwrap()
+                .map(|room| room.id),
+            exists.then_some(room_id),
+            "room code {code}, close={close_source}, old-code wait={wait_for_old_code}"
+        );
+    }
+    assert!(!lock.is_locked(OLD_LOCK).await.unwrap());
+    assert!(!lock.is_locked(NEW_LOCK).await.unwrap());
+    assert_eq!(
+        server
+            .metrics
+            .room_code_regenerations
+            .load(Ordering::Relaxed),
+        u64::from(!close_source)
+    );
+    assert!(
+        server
+            .reconnection_manager()
+            .unwrap()
+            .has_pre_issued_token(&authority)
+            .await
+    );
+    if close_source {
+        assert!(
+            released_on_close,
+            "close must release dispatch before the gate opens"
+        );
+        assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    } else {
+        let reply = authority_rx
+            .try_recv()
+            .expect("open socket receives the result");
+        assert!(matches!(reply.as_ref(),
+            ServerMessage::RoomOperationResult { operation_id: actual, result }
+                if *actual == operation_id && matches!(result.as_ref(),
+                    RoomOperationResult::RoomCodeRegenerated { room_code } if room_code == "QUENEW")
+        ));
+    }
+    assert!(authority_rx.is_empty());
 }

@@ -11172,7 +11172,7 @@ async fn server_room_cap_denial_releases_join_coordination_locks() {
     );
 }
 
-struct LockAttemptProbe {
+pub(super) struct LockAttemptProbe {
     inner: InMemoryDistributedLock,
     key: String,
     changed: watch::Sender<usize>,
@@ -11497,7 +11497,7 @@ async fn real_socket_teardown_finishes_while_room_creation_cap_is_held() {
 }
 
 impl LockAttemptProbe {
-    fn new(key: &str) -> Self {
+    pub(super) fn new(key: &str) -> Self {
         Self {
             inner: InMemoryDistributedLock::new(),
             key: key.to_string(),
@@ -11505,7 +11505,7 @@ impl LockAttemptProbe {
         }
     }
 
-    async fn wait_for_attempts(&self, target: usize) {
+    pub(super) async fn wait_for_attempts(&self, target: usize) {
         let mut changed = self.changed.subscribe();
         timeout(Duration::from_secs(1), async {
             while *changed.borrow_and_update() < target {
