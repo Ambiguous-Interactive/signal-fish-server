@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::coordination::CloseReason;
+use crate::coordination::{CloseReason, ConnectionCloseSignal};
 use crate::database::UpdateRoomCodeError;
 use crate::protocol::{
     ErrorCode, PlayerId, Room, RoomId, RoomOperationId, RoomOperationResult,
@@ -606,7 +606,17 @@ impl EnhancedGameServer {
         else {
             return;
         };
-        let authority_lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(authority_id, &lifecycle)
+        else {
+            return;
+        };
+        let Some(authority_lifecycle_guard) =
+            close.while_open(Arc::clone(&lifecycle).lock_owned()).await
+        else {
+            return;
+        };
         let server = Arc::clone(self);
         let authority_id = *authority_id;
         let transaction = tokio::spawn(async move {
@@ -617,6 +627,7 @@ impl EnhancedGameServer {
                     target_id,
                     lifecycle,
                     authority_lifecycle_guard,
+                    close,
                 )
                 .await;
         });
@@ -633,8 +644,10 @@ impl EnhancedGameServer {
         target_id: PlayerId,
         lifecycle: Arc<ClientLifecycle>,
         authority_lifecycle_guard: tokio::sync::OwnedMutexGuard<()>,
+        close: ConnectionCloseSignal,
     ) {
-        if lifecycle.player_id() != *authority_id
+        if close.requested_reason().is_some()
+            || lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
                 .lifecycle_matches(authority_id, &lifecycle)
@@ -667,11 +680,20 @@ impl EnhancedGameServer {
         // (the target leaving, a joiner arriving) can neither interleave
         // with the fresh validation nor with the role write, so the grant
         // can never land on a departed member.
-        let transfer_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
-        let routes = match self.message_coordinator.lease_room_routes(&room_id).await {
+        let Some((transfer_event_guard, routes)) = close
+            .while_open(async {
+                let guard = self
+                    .message_coordinator
+                    .lock_room_event_mutation(&room_id)
+                    .await;
+                let routes = self.message_coordinator.lease_room_routes(&room_id).await;
+                (guard, routes)
+            })
+            .await
+        else {
+            return;
+        };
+        let routes = match routes {
             Ok(routes) => routes,
             Err(error) => {
                 drop(transfer_event_guard);
@@ -686,11 +708,13 @@ impl EnhancedGameServer {
                 return;
             }
         };
-        let room = match self
-            .database
-            .get_room_member_snapshot(&room_id, &target_id)
+        let Some(room) = close
+            .while_open(self.database.get_room_member_snapshot(&room_id, &target_id))
             .await
-        {
+        else {
+            return;
+        };
+        let room = match room {
             Ok(Some(room)) => room,
             Ok(None) => {
                 drop(routes);
@@ -787,6 +811,11 @@ impl EnhancedGameServer {
                 ErrorCode::TransferTargetNotFound,
             )
             .await;
+            return;
+        }
+        // The room and route fences are held. Close wins until admission;
+        // once admitted, finish the write and publish its ordered event.
+        if close.requested_reason().is_some() {
             return;
         }
         self.transfer_authority_owned(

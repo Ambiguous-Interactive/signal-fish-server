@@ -4720,6 +4720,320 @@ async fn canceled_transfer_publishes_committed_authority_before_later_transfer()
     );
 }
 
+/// #826: room admission must observe the physical source's close.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_authority_transfer() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+    use crate::server::{InMemoryDistributedLock, InMemoryMessageCoordinator};
+
+    for (close_source, hold_route) in [(false, true), (true, false), (true, true)] {
+        let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let server =
+            super::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+                ServerConfig::default(),
+                coordinator.clone(),
+                Arc::new(InMemoryDistributedLock::new()),
+                Arc::new(crate::database::InMemoryDatabase::new()),
+            )
+            .await;
+        let (authority, mut authority_rx) =
+            register_client(&server, "127.0.0.1:48201".parse().unwrap()).await;
+        let (target, mut target_rx) =
+            register_client(&server, "127.0.0.1:48202".parse().unwrap()).await;
+        server.set_client_protocol(
+            &authority,
+            crate::server::NegotiatedProtocol {
+                version: 3,
+                transports: vec![crate::protocol::Transport::Relay],
+                topologies: vec![crate::protocol::Topology::Relay],
+            },
+        );
+        join_seated_player(&server, &authority, &mut authority_rx, "QUEUE1", "host").await;
+        join_seated_player(&server, &target, &mut target_rx, "QUEUE1", "peer").await;
+        drain_receiver(&mut authority_rx);
+        drain_receiver(&mut target_rx);
+        let room_id = server.get_client_room(&authority).await.unwrap();
+        let gate = coordinator.lock_room_event_mutation(&room_id).await;
+        let route = if hold_route {
+            Some(coordinator.room_routing_gates.write(room_id).await)
+        } else {
+            None
+        };
+        let attempts = gate.mutation_attempt_count_for_test();
+        let operation_id = RoomOperationId::new_v4();
+        server.set_client_room_operation_ids(&authority, true);
+        let lifecycle = server.client_lifecycle(&authority).unwrap();
+        let mut transfer = Box::pin(server.handle_client_message_from_lifecycle(
+            &authority,
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::TransferAuthority { player_id: target }),
+            },
+            lifecycle,
+        ));
+        assert!(futures_util::poll!(&mut transfer).is_pending());
+        timeout(
+            Duration::from_secs(1),
+            gate.wait_for_mutation_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("transfer reaches the room mutation gate");
+        let mut gate = Some(gate);
+        if hold_route {
+            drop(gate.take());
+            assert!(
+                timeout(
+                    Duration::from_millis(10),
+                    coordinator.lock_room_event_mutation(&room_id)
+                )
+                .await
+                .is_err(),
+                "the transfer must hold the room gate while waiting for routes"
+            );
+        }
+
+        let completed_while_held = if close_source {
+            assert!(server
+                .connection_manager
+                .request_close_for(&authority, CloseReason::ActivityTimeout));
+            timeout(Duration::from_millis(10), &mut transfer)
+                .await
+                .is_ok()
+        } else {
+            assert!(futures_util::poll!(&mut transfer).is_pending());
+            false
+        };
+        drop(gate);
+        drop(route);
+        if !completed_while_held {
+            timeout(Duration::from_secs(1), transfer)
+                .await
+                .expect("dispatch must finish after admission opens");
+        }
+
+        let stored = server
+            .database
+            .get_room_by_id(&room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.authority_player,
+            Some(if close_source { authority } else { target }),
+            "stored role after gate release (close={close_source}, route={hold_route})"
+        );
+        if close_source {
+            assert!(completed_while_held, "close must release the dispatch wait");
+            assert!(drain_receiver(&mut authority_rx).is_empty());
+            assert!(drain_receiver(&mut target_rx).is_empty());
+        } else {
+            let announced = target_rx.try_recv().unwrap();
+            assert!(
+                matches!(announced.as_ref(), ServerMessage::AuthorityChanged {
+                authority_player: Some(id), you_are_authority: true,
+            } if *id == target)
+            );
+            let replies = drain_receiver(&mut authority_rx);
+            assert!(matches!(replies.as_slice(), [event, reply]
+                if matches!(event.as_ref(), ServerMessage::AuthorityChanged { authority_player: Some(id), you_are_authority: false } if *id == target)
+                && matches!(reply.as_ref(), ServerMessage::RoomOperationResult { operation_id: id, result }
+                    if *id == operation_id && matches!(result.as_ref(), RoomOperationResult::AuthorityTransferred { player_id } if *player_id == target))));
+        }
+    }
+}
+
+/// #826: real v3 dispatch releases the source lifecycle before the room opens.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_cancels_queued_authority_transfer_before_reconnect() {
+    use crate::protocol::{
+        ClientMessage, RoomJoinedPayload, RoomOperationRequest, ROOM_OPERATION_IDS_CAPABILITY,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+
+    type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+    const BOUND: Duration = Duration::from_secs(5);
+
+    async fn send(socket: &mut Socket, message: ClientMessage) {
+        timeout(
+            BOUND,
+            socket.send(Message::text(serde_json::to_string(&message).unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    }
+
+    async fn receive(socket: &mut Socket) -> ServerMessage {
+        let frame = timeout(BOUND, socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(frame.to_text().unwrap()).unwrap()
+    }
+
+    async fn connect(url: &str) -> Socket {
+        let (mut socket, _) = timeout(BOUND, connect_async(url)).await.unwrap().unwrap();
+        send(
+            &mut socket,
+            ClientMessage::Authenticate {
+                app_id: "test-app".into(),
+                connect_token: None,
+                sdk_version: None,
+                platform: None,
+                game_data_format: None,
+                protocol_version: Some(3),
+                supported_transports: None,
+                supported_topologies: None,
+                requested_capabilities: Some(vec![ROOM_OPERATION_IDS_CAPABILITY.into()]),
+            },
+        )
+        .await;
+        assert!(matches!(
+            receive(&mut socket).await,
+            ServerMessage::Authenticated { .. }
+        ));
+        assert!(
+            matches!(receive(&mut socket).await, ServerMessage::ProtocolInfo(info)
+            if info.capabilities.iter().any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY))
+        );
+        socket
+    }
+
+    async fn join(socket: &mut Socket, room_code: &str, name: &str) -> RoomJoinedPayload {
+        send(
+            socket,
+            ClientMessage::JoinRoom {
+                game_name: "moderation-game".into(),
+                room_code: Some(room_code.into()),
+                player_name: name.into(),
+                max_players: Some(4),
+                supports_authority: Some(true),
+                relay_transport: None,
+                password: None,
+                join_only: None,
+            },
+        )
+        .await;
+        let ServerMessage::RoomJoined(joined) = receive(socket).await else {
+            panic!("{name} must join the room");
+        };
+        *joined
+    }
+
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let app = crate::websocket::create_router("*").with_state(Arc::clone(&server));
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut socket = connect(&url).await;
+    let joined = join(&mut socket, "QTRANS", "host").await;
+    assert!(joined.is_authority);
+    let authority = joined.player_id;
+    let room_id = joined.room_id;
+    let mut peer = connect(&url).await;
+    let peer_joined = join(&mut peer, &joined.room_code, "peer").await;
+    assert_eq!(peer_joined.room_id, room_id);
+    let target = peer_joined.player_id;
+
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    send(
+        &mut socket,
+        ClientMessage::RoomOperation {
+            operation_id: RoomOperationId::new_v4(),
+            operation: Box::new(RoomOperationRequest::TransferAuthority { player_id: target }),
+        },
+    )
+    .await;
+    timeout(
+        BOUND,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .unwrap();
+
+    let lifecycle = server.client_lifecycle(&authority).unwrap();
+    assert!(server
+        .connection_manager
+        .request_close_for(&authority, CloseReason::ActivityTimeout));
+    let close = timeout(BOUND, async {
+        loop {
+            if let Message::Close(Some(frame)) = socket.next().await.unwrap().unwrap() {
+                break frame;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(u16::from(close.code), 4003);
+    drop(socket);
+    timeout(
+        BOUND,
+        gate.wait_for_mutation_attempt_after_for_test(attempts + 1),
+    )
+    .await
+    .expect("teardown must reach the room gate while it is held");
+    drop(gate);
+    timeout(BOUND, lifecycle.wait_for_unregister())
+        .await
+        .unwrap();
+
+    let mut replacement = connect(&url).await;
+    send(
+        &mut replacement,
+        ClientMessage::Reconnect {
+            player_id: authority,
+            room_id,
+            auth_token: joined.reconnection_token.unwrap(),
+        },
+    )
+    .await;
+    let ServerMessage::Reconnected(restored) = receive(&mut replacement).await else {
+        panic!("replacement must receive a reconnect baseline");
+    };
+    assert_eq!((restored.player_id, restored.room_id), (authority, room_id));
+    assert!(
+        restored.is_authority,
+        "the canceled transfer must not spend the authority role"
+    );
+    send(&mut peer, ClientMessage::Ping).await;
+    timeout(BOUND, async {
+        loop {
+            match receive(&mut peer).await {
+                ServerMessage::Pong => break,
+                ServerMessage::AuthorityChanged {
+                    authority_player: Some(id),
+                    ..
+                } if id == target => {
+                    panic!("peer saw a transfer from the closed socket");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("peer must stay connected through the recovery");
+    drop(replacement);
+    drop(peer);
+    serve.abort();
+    assert!(serve.await.unwrap_err().is_cancelled());
+}
+
 /// #1554: retained assignments cannot substitute for either live transfer route.
 #[tokio::test]
 async fn transfer_authority_refuses_pruned_source_or_target_routes() {
@@ -4824,6 +5138,11 @@ async fn transfer_authority_fences_routes_through_the_storage_commit() {
         )
         .await
         .unwrap();
+        if !remove_target {
+            assert!(server
+                .connection_manager
+                .request_close_for(&authority, CloseReason::ActivityTimeout));
+        }
         let removed = if remove_target { target } else { authority };
         let mut removal = Box::pin(server.message_coordinator.unregister_local_client(&removed));
         assert!(futures_util::poll!(&mut removal).is_pending());

@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel a queued room authority transfer when the server starts closing the initiating WebSocket (#826).
 - Release the room code when a queued creation is canceled on WebSocket close so a fresh socket can retry (#826).
 - Release a queued room restore when its WebSocket closes so a fresh socket can retry the reconnect (#826).
 - Cancel a queued spectator join when the server closes its WebSocket before admission (#826).
