@@ -2589,10 +2589,11 @@ async fn closing_socket_cancels_router_refusal_waiting_for_lifecycle() {
     timeout(Duration::from_millis(10), dispatch)
         .await
         .expect("close must release the refusal before the lifecycle is available");
-    assert!(matches!(
-        replies.try_recv(),
-        Err(mpsc::error::TryRecvError::Empty),
-    ));
+    let reply = replies.try_recv();
+    assert!(
+        matches!(reply, Err(mpsc::error::TryRecvError::Empty)),
+        "refusal waiting for its lifecycle must leave the reply queue empty: {reply:?}"
+    );
     drop(guard);
 }
 
