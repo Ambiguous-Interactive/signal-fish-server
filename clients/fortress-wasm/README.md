@@ -61,8 +61,9 @@ identity gate. Any missing report or invariant violation fails closed as
 `BUSTED`; only the complete two-peer result prints `HEALTHY`. The hosted WASM
 gate bounds stalls as a rate — at most 20 per-mille of confirmed frames — so
 isolated contention-induced stalls on a shared runner cannot fail an otherwise
-healthy run, while any systematic stalling regression still fails. The live gate accounts for each wait recommendation. The next callback must
-consume the event and skip the requested number of advances, up to the
+healthy run, while any systematic stalling regression still fails. The live gate
+accounts for each wait recommendation. The next callback must consume the event
+and skip the requested number of advances, up to the
 confirmed-frame target. Missing, late, overlapping, and misapplied waits fail
 the gate. The loss, overflow, throughput, queue-age, lag, rollback, checksum,
 and conservation limits also apply.
