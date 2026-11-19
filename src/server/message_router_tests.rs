@@ -1828,7 +1828,7 @@ async fn correlated_spectator_operations_echo_success_and_failure_ids() {
         .expect("other socket lifecycle");
     assert!(server
         .spectator_service
-        .leave_from_lifecycle(&spectator, Some(wrong_lifecycle))
+        .leave_operation_from_lifecycle(&spectator, None, Some(wrong_lifecycle))
         .await
         .is_err());
     assert!(server.spectator_service.is_spectating(&spectator));

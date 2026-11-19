@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report a disconnect when teardown removes a spectator after close cancels their queued leave (#826).
 - Preserve a player's ability to reconnect when the server closes their WebSocket before admitting a queued room leave
   (#826).
 - Release closing WebSockets that are waiting to reply to a Ping (#826).

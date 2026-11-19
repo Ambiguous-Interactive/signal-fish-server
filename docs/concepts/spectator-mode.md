@@ -242,6 +242,11 @@ The server confirms with a `SpectatorLeft` response:
 }
 ```
 
+If the server requests a WebSocket close before it admits a queued leave,
+teardown uses the `disconnected` reason. If the leave wins admission and
+removes the spectator, the room receives `voluntary_leave`. A storage failure
+can delay removal. A closing socket can miss its confirmation.
+
 After the server removes the stored spectator entry, a recovered panic during
 local detach completion still completes the leave. The server sends the same
 confirmation and room notification, and records the notification for reconnect replay. Shutdown drain

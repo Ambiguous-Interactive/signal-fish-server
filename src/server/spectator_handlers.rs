@@ -1,5 +1,5 @@
 use super::EnhancedGameServer;
-use crate::protocol::PlayerId;
+use crate::protocol::{PlayerId, ServerMessage};
 use std::sync::Arc;
 
 use super::connection_manager::ClientLifecycle;
@@ -153,8 +153,16 @@ impl EnhancedGameServer {
     ) {
         let lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        if let Some(lifecycle) = &lifecycle {
-            let guard = lifecycle.lock().await;
+        let source_close = if let Some(lifecycle) = &lifecycle {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+            else {
+                return;
+            };
+            let Some(_guard) = close.while_open(lifecycle.lock()).await else {
+                return;
+            };
             if lifecycle.player_id() != *player_id
                 || !self
                     .connection_manager
@@ -162,26 +170,27 @@ impl EnhancedGameServer {
             {
                 return;
             }
-            drop(guard);
-        }
-        let outcome = match operation_id {
-            Some(operation_id) => {
-                self.spectator_service
-                    .leave_operation_from_lifecycle(player_id, operation_id, lifecycle.clone())
-                    .await
-            }
-            None => {
-                self.spectator_service
-                    .leave_from_lifecycle(player_id, lifecycle.clone())
-                    .await
-            }
+            Some(close)
+        } else {
+            None
         };
-        let _guard = if let Some(lifecycle) = &lifecycle {
-            let guard = lifecycle.lock().await;
+        let Err(err) = self
+            .spectator_service
+            .leave_operation_from_lifecycle(player_id, operation_id, lifecycle.clone())
+            .await
+        else {
+            tracing::info!(%player_id, "Spectator left room");
+            return;
+        };
+        let _guard = if let (Some(lifecycle), Some(close)) = (&lifecycle, &source_close) {
+            let Some(guard) = close.while_open(lifecycle.lock()).await else {
+                return;
+            };
             if lifecycle.player_id() != *player_id
                 || !self
                     .connection_manager
                     .lifecycle_matches(player_id, lifecycle)
+                || close.requested_reason().is_some()
             {
                 return;
             }
@@ -189,25 +198,26 @@ impl EnhancedGameServer {
         } else {
             None
         };
-        match outcome {
-            Ok(()) => tracing::info!(%player_id, "Spectator left room"),
-            Err(err) => match operation_id {
-                Some(operation_id) => {
-                    let _ = self
-                        .send_room_operation_failure_to_player(
-                            player_id,
-                            operation_id,
-                            err.message,
-                            err.code,
-                        )
-                        .await;
-                }
-                None => {
-                    let _ = self
-                        .send_error_to_player(player_id, err.message, err.code)
-                        .await;
-                }
+        if !self.charge_error_reply(player_id).await {
+            return;
+        }
+        let reply = Arc::new(match operation_id {
+            Some(id) => ServerMessage::room_operation_failed(id, err.message, err.code),
+            None => ServerMessage::Error {
+                message: err.message,
+                error_code: err.code,
             },
+        });
+        if let Some(close) = &source_close {
+            let _ = self
+                .message_coordinator
+                .send_to_player_on_socket(player_id, close, reply)
+                .await;
+        } else {
+            let _ = self
+                .message_coordinator
+                .send_to_player(player_id, reply)
+                .await;
         }
     }
 }

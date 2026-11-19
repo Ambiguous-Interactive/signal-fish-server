@@ -10573,6 +10573,213 @@ async fn spectator_join_cancels_backpressured_baseline_on_drain() {
     );
 }
 
+/// #826: the room gate handoff decides which departure the room observes.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_socket_close_respects_room_admission() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest, SpectatorStateChangeReason};
+
+    for (close_at_handoff, close_after_removal) in [(true, false), (false, true), (false, false)] {
+        let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
+        let fixture =
+            setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+                .await;
+        let mut peer_messages = fixture.survivor_rx;
+        let room = fixture
+            .database
+            .get_room_by_id(&fixture.room_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let server = &fixture.server;
+        let (spectator, mut spectator_messages) =
+            register_client(server, "127.0.0.1:48402".parse().unwrap()).await;
+        server.set_client_protocol(
+            &spectator,
+            NegotiatedProtocol {
+                version: 3,
+                ..Default::default()
+            },
+        );
+        server.set_client_room_operation_ids(&spectator, true);
+        server
+            .handle_join_as_spectator(
+                &spectator,
+                room.game_name,
+                room.code,
+                "Observer".into(),
+                None,
+            )
+            .await;
+        assert_next_message_matches(&mut spectator_messages, "spectator baseline", |frame| {
+            matches!(frame, ServerMessage::SpectatorJoined(_))
+        });
+        assert_next_message_matches(&mut peer_messages, "spectator join event", |frame| {
+            matches!(frame, ServerMessage::NewSpectatorJoined { .. })
+        });
+        let replay = server.reconnection_manager().unwrap();
+        replay
+            .buffer_event(&fixture.room_id, ServerMessage::Pong)
+            .await;
+
+        let close = server
+            .connection_manager
+            .close_signal_for(&spectator)
+            .unwrap();
+        if close_at_handoff {
+            *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+        }
+        let routes = if close_after_removal {
+            Some(coordinator.clients.write().await)
+        } else {
+            None
+        };
+        let operation_id = uuid::Uuid::from_u128(0x400);
+        let mut leave = Box::pin(server.handle_client_message(
+            &spectator,
+            ClientMessage::RoomOperation {
+                operation_id,
+                operation: Box::new(RoomOperationRequest::LeaveSpectator),
+            },
+        ));
+        assert!(futures_util::poll!(&mut leave).is_pending());
+        if close_after_removal {
+            // Storage removal precedes route publication. Hold the route so
+            // close can win here while the admitted leave still owns the lane.
+            timeout(Duration::from_secs(1), async {
+                while !fixture
+                    .database
+                    .get_room_spectators(&fixture.room_id)
+                    .await
+                    .unwrap()
+                    .is_empty()
+                {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("admitted leave reaches storage removal");
+            assert_no_queued_message(&mut peer_messages, "route publication is still held");
+            close.request_close(CloseReason::ActivityTimeout);
+        }
+        drop(routes);
+        timeout(Duration::from_secs(1), leave)
+            .await
+            .expect("leave finishes");
+
+        if close_at_handoff {
+            assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+            assert_eq!(
+                server.spectator_service.spectator_room(&spectator),
+                Some(fixture.room_id)
+            );
+            assert_no_queued_message(&mut spectator_messages, "no reply to the unadmitted leave");
+            assert_no_queued_message(&mut peer_messages, "no room event for the unadmitted leave");
+        } else if !close_after_removal {
+            assert_next_message_matches(
+                &mut spectator_messages,
+                "correlated spectator leave",
+                |frame| {
+                    matches!(frame, ServerMessage::RoomOperationResult { operation_id: id, result }
+                    if *id == operation_id && matches!(result.as_ref(), crate::protocol::RoomOperationResult::SpectatorLeft {
+                        reason: Some(SpectatorStateChangeReason::VoluntaryLeave), ..
+                    }))
+                },
+            );
+        }
+        server.unregister_client(&spectator).await;
+        let expected_reason = if close_at_handoff {
+            SpectatorStateChangeReason::Disconnected
+        } else {
+            SpectatorStateChangeReason::VoluntaryLeave
+        };
+        assert_next_message_matches(
+            &mut peer_messages,
+            "exact terminal spectator departure",
+            |frame| {
+                matches!(frame, ServerMessage::SpectatorDisconnected { spectator_id, reason: Some(reason), current_spectators, .. }
+                if *spectator_id == spectator && *reason == expected_reason && current_spectators.is_empty())
+            },
+        );
+        assert_no_queued_message(&mut peer_messages, "teardown publishes only one departure");
+        let replayed_reasons: Vec<_> = replay
+            .get_missed_events(&fixture.room_id, 0)
+            .await
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                ServerMessage::SpectatorDisconnected {
+                    spectator_id,
+                    reason,
+                    ..
+                } if spectator_id == spectator => Some(reason),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replayed_reasons, [Some(expected_reason)]);
+        assert_eq!(server.spectator_service.spectator_room(&spectator), None);
+        assert!(fixture
+            .database
+            .get_room_spectators(&fixture.room_id)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+}
+
+/// A spectator refusal must let its coordinator finish a started delivery.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_refusal_finishes_started_delivery_after_close() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), coordinator.clone())
+            .await;
+    let (player, _messages) = register_client(&server, "127.0.0.1:48402".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            ..Default::default()
+        },
+    );
+    server.set_client_room_operation_ids(&player, true);
+    let pause = Arc::new(UnregisterPause {
+        player,
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    *coordinator.operation_failure_pause.lock().unwrap() = Some(Arc::clone(&pause));
+    let mut leave = Box::pin(server.handle_client_message(
+        &player,
+        ClientMessage::RoomOperation {
+            operation_id: uuid::Uuid::from_u128(0x400),
+            operation: Box::new(RoomOperationRequest::LeaveSpectator),
+        },
+    ));
+    timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            () = pause.reached.notified() => {},
+            () = &mut leave => panic!("leave returned before the refusal reached the coordinator"),
+        }
+    })
+    .await
+    .expect("the refusal reaches the coordinator");
+    assert!(server
+        .connection_manager
+        .request_close_for(&player, CloseReason::ActivityTimeout));
+    assert!(
+        futures_util::poll!(&mut leave).is_pending(),
+        "close must let the coordinator finish a started refusal delivery"
+    );
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), leave)
+        .await
+        .expect("started refusal finishes");
+}
+
 /// Issue #647 identity slice: a voluntary `LeaveSpectator` races the physical
 /// disconnect teardown for the same spectator session. The lifecycle gate
 /// must serialize the two detaches so exactly one wins, the events carry the
