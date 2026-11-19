@@ -2577,13 +2577,16 @@ async fn closing_socket_cancels_queued_spectator_leave() {
                 None,
             )
             .await;
+        let baseline = observer_messages.try_recv().expect("spectator baseline");
         assert!(matches!(
-            observer_messages.try_recv().unwrap().as_ref(),
-            ServerMessage::SpectatorJoined(_)
+            baseline.as_ref(),
+            ServerMessage::SpectatorJoined(payload)
+                if payload.spectator_id == observer && payload.room_id == room_id
         ));
+        let joined = member_messages.try_recv().expect("spectator join event");
         assert!(matches!(
-            member_messages.try_recv().unwrap().as_ref(),
-            ServerMessage::NewSpectatorJoined { .. }
+            joined.as_ref(),
+            ServerMessage::NewSpectatorJoined { spectator, .. } if spectator.id == observer
         ));
         let message = if correlated {
             server.set_client_room_operation_ids(&observer, true);
@@ -2640,8 +2643,11 @@ async fn closing_socket_cancels_queued_spectator_leave() {
             .await
             .unwrap()
             .is_empty());
+        let disconnected = member_messages
+            .try_recv()
+            .expect("spectator disconnect event");
         assert!(matches!(
-            member_messages.try_recv().unwrap().as_ref(),
+            disconnected.as_ref(),
             ServerMessage::SpectatorDisconnected {
                 spectator_id, reason: Some(SpectatorStateChangeReason::Disconnected),
                 current_spectators, spectator_count: Some(0),
