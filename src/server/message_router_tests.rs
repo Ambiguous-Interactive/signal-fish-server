@@ -2550,6 +2550,52 @@ async fn stale_socket_router_refusals_do_not_reach_replacement_connections() {
     }
 }
 
+/// #826: Close interrupts a refusal waiting to acquire source ownership.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_router_refusal_waiting_for_lifecycle() {
+    use crate::coordination::CloseReason;
+
+    let server = create_test_server().await;
+    let (player, mut replies) = register_router_test_client(&server).await;
+    let lifecycle = server.client_lifecycle(&player).unwrap();
+    let pause = super::message_router::arm_socket_dispatch_pause(player);
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &player,
+        ClientMessage::Reconnect {
+            player_id: PlayerId::new_v4(),
+            room_id: RoomId::new_v4(),
+            auth_token: "unused".into(),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            _ = &mut dispatch => panic!("dispatch must wait for the test pause"),
+            _ = pause.reached.notified() => {}
+        }
+    })
+    .await
+    .expect("dispatch reaches the refusal branch");
+    let guard = lifecycle.lock().await;
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    pause.release.notify_one();
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    assert_eq!(lifecycle.lock_attempt_count_for_test(), attempts + 1);
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&player, CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close must release the refusal before the lifecycle is available");
+    assert!(matches!(
+        replies.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty),
+    ));
+    drop(guard);
+}
+
 /// #826: Close releases socket ownership even while a refusal has no queue space.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
@@ -2764,22 +2810,15 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
     );
 
     let lifecycle = server.client_lifecycle(&player).unwrap();
-    let attempts = lifecycle.lock_attempt_count_for_test();
     let room_gate = coordinator.lock_room_event_mutation(&room).await;
     let teardown_attempts = room_gate.mutation_attempt_count_for_test();
     let routes = coordinator.local_clients.write().await;
     let deliveries = &coordinator.metrics.websocket_delivery_attempts;
     let prior_deliveries = deliveries.load(Ordering::Acquire);
     send(&mut socket, refused()).await;
-    timeout(
-        BOUND,
-        lifecycle.wait_for_lock_attempt_after_for_test(attempts),
-    )
-    .await
-    .expect("refusal reaches the source lifecycle");
-    let mut source_lock = Box::pin(lifecycle.lock());
-    assert!(futures_util::poll!(&mut source_lock).is_pending());
-    drop(source_lock);
+    timeout(BOUND, coordinator.socket_reply_route_wait.notified())
+        .await
+        .expect("second refusal must wait for routing before close");
     assert!(server
         .connection_manager
         .request_close_for(&player, CloseReason::ActivityTimeout));

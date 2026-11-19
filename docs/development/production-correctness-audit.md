@@ -20027,6 +20027,11 @@ commands if the caller is canceled. A v3 replacement restores the original
 player and room, sees no stale refusal, and gets Pong. The six focused
 controls pass on Linux ARM64 in Nextest `2ae1b857`.
 
+The live test also waits for a blocked route read before requesting close.
+When routing returns, no refusal delivery starts. A separate test verifies
+that close releases a refusal waiting for its source lifecycle. Removing
+either close check fails its owning test.
+
 The home server still needs the room gate to capture a reconnect record.
 A partition can delay close detection, and a reply already queued can
 reach the old socket. The replacement sees the current home snapshot
