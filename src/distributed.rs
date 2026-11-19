@@ -15,7 +15,8 @@ use uuid::Uuid;
 /// processes. The trait is only an extension seam for a future backend.
 #[async_trait]
 pub trait DistributedLock: Send + Sync {
-    /// Acquire a lock with specified TTL
+    /// Acquire a lock with the specified TTL.
+    /// Dropping a pending acquisition must leave no lease owned by that call.
     async fn acquire(&self, key: &str, ttl: Duration) -> Result<LockHandle>;
 
     /// Try to acquire a lock without blocking

@@ -3185,6 +3185,341 @@ async fn setup_joined_pair_with_reconnection_config_and_coordinator(
     }
 }
 
+fn queued_player_join_frame(correlated: bool) -> crate::protocol::ClientMessage {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+    let game_name = "leave-convergence".to_string();
+    let room_code = Some("LVC001".to_string());
+    let player_name = "Joiner".to_string();
+    if correlated {
+        ClientMessage::RoomOperation {
+            operation_id: uuid::Uuid::from_u128(0x401),
+            operation: Box::new(RoomOperationRequest::JoinRoom {
+                game_name,
+                room_code,
+                player_name,
+                max_players: None,
+                supports_authority: None,
+                relay_transport: None,
+                password: None,
+                join_only: Some(true),
+            }),
+        }
+    } else {
+        ClientMessage::JoinRoom {
+            game_name,
+            room_code,
+            player_name,
+            max_players: None,
+            supports_authority: None,
+            relay_transport: None,
+            password: None,
+            join_only: Some(true),
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_queued_player_join() {
+    for correlated in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let server = &fixture.server;
+        let (joiner, mut joiner_rx) =
+            register_client(server, "127.0.0.1:48102".parse().unwrap()).await;
+        server.set_client_protocol(&joiner, server.client_protocol(&fixture.leaver));
+        server.set_client_room_operation_ids(&joiner, correlated);
+        let lifecycle = server.client_lifecycle(&joiner).unwrap();
+        let gate = server
+            .message_coordinator
+            .lock_room_event_mutation(&fixture.room_id)
+            .await;
+        let attempts = gate.mutation_attempt_count_for_test();
+        let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+            &joiner,
+            queued_player_join_frame(correlated),
+            lifecycle,
+        ));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        tokio::select! {
+            biased;
+            () = &mut dispatch => panic!("join returned before admission: {:?}", joiner_rx.try_recv()),
+            result = timeout(Duration::from_secs(1), gate.wait_for_mutation_attempt_after_for_test(attempts)) => {
+                result.expect("join must queue for room mutation");
+            }
+        }
+        assert!(server
+            .connection_manager
+            .request_close_for(&joiner, CloseReason::ActivityTimeout));
+        timeout(Duration::from_millis(10), dispatch)
+            .await
+            .expect("close must cancel the join while the room gate is held");
+        assert!(
+            !server
+                .distributed_lock
+                .is_locked("room_join:leave-convergence:LVC001")
+                .await
+                .unwrap(),
+            "cancellation must release the room-code lease"
+        );
+        assert_no_queued_message(&mut joiner_rx, "canceled join sends no reply");
+        timeout(Duration::from_millis(10), server.unregister_client(&joiner))
+            .await
+            .expect("unseated socket teardown must finish while the room gate is held");
+        drop(gate);
+        assert_no_queued_message(
+            &mut fixture.survivor_rx,
+            "canceled join sends no room event",
+        );
+        assert!(!fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|player| player.id == joiner));
+        assert!(
+            !server
+                .reconnection_manager()
+                .unwrap()
+                .has_pending_reconnection(&joiner)
+                .await
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn close_during_room_gate_handoff_cancels_queued_player_join() {
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(
+        DrainTrigger::PauseAuthorityTransferAnnouncement,
+    ));
+    let mut fixture =
+        setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+            .await;
+    let server = &fixture.server;
+    let (joiner, mut joiner_rx) = register_client(server, "127.0.0.1:48102".parse().unwrap()).await;
+    let close = server.connection_manager.close_signal_for(&joiner).unwrap();
+    *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+    let joined_before = server.metrics.players_joined.load(Ordering::Relaxed);
+    server
+        .handle_client_message(&joiner, queued_player_join_frame(false))
+        .await;
+    assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+    assert_eq!(
+        server.metrics.players_joined.load(Ordering::Relaxed),
+        joined_before,
+        "close at the gate handoff must prevent even a later-rolled-back seat"
+    );
+    assert_no_queued_message(&mut joiner_rx, "no baseline after close wins");
+    assert_no_queued_message(&mut fixture.survivor_rx, "no event after close wins");
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_cancels_join_waiting_for_room_code() {
+    let key = "room_join:leave-convergence:LVC001";
+    let lock = Arc::new(LockAttemptProbe::new(key));
+    let server = create_test_server_with_message_coordinator_and_lock(
+        ServerConfig::default(),
+        Arc::new(InMemoryMessageCoordinator::new()),
+        lock.clone(),
+        create_test_database().await,
+    )
+    .await;
+    let held = lock.acquire(key, Duration::from_secs(10)).await.unwrap();
+    let (joiner, mut messages) = register_client(&server, "127.0.0.1:48102".parse().unwrap()).await;
+    let mut dispatch =
+        Box::pin(server.handle_client_message(&joiner, queued_player_join_frame(false)));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    tokio::select! {
+        biased;
+        () = &mut dispatch => panic!("join returned before the code lease wait: {:?}", messages.try_recv()),
+        () = lock.wait_for_attempts(2) => {}
+    }
+    assert!(server
+        .connection_manager
+        .request_close_for(&joiner, CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close cancels a queued code lease acquisition");
+    assert_no_queued_message(
+        &mut messages,
+        "no refusal after the pending acquisition is canceled",
+    );
+    assert!(
+        lock.release(&held).await.unwrap(),
+        "the original owner still owns the lease"
+    );
+    assert!(!lock.is_locked(key).await.unwrap());
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn admitted_player_join_finishes_publication_or_rollback() {
+    use crate::protocol::RoomOperationResult;
+
+    for closing in [false, true] {
+        let mut fixture = setup_joined_pair_with_reconnection().await;
+        let server = &fixture.server;
+        let (joiner, mut joiner_rx) =
+            register_client(server, "127.0.0.1:48102".parse().unwrap()).await;
+        server.set_client_protocol(&joiner, server.client_protocol(&fixture.leaver));
+        server.set_client_room_operation_ids(&joiner, true);
+        fixture.database.pause_next_add_player_for_test();
+        let mut dispatch =
+            Box::pin(server.handle_client_message(&joiner, queued_player_join_frame(true)));
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        tokio::select! {
+            biased;
+            () = &mut dispatch => panic!("join returned before the seat write: {:?}", joiner_rx.try_recv()),
+            result = timeout(Duration::from_secs(1), fixture.database.wait_for_paused_add_player_for_test()) => {
+                result.expect("admitted join must reach the seat write");
+            }
+        }
+        if closing {
+            assert!(server
+                .connection_manager
+                .request_close_for(&joiner, CloseReason::ActivityTimeout));
+            assert!(
+                futures_util::poll!(&mut dispatch).is_pending(),
+                "admitted join retains the transaction"
+            );
+        }
+        fixture.database.release_paused_add_player_for_test();
+        timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("owned join must finish");
+        let seated = fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .unwrap();
+        if closing {
+            assert!(!seated.iter().any(|player| player.id == joiner));
+            assert_eq!(server.get_client_room(&joiner).await, None);
+            // This in-process receiver stays alive after the close request, so it
+            // sees the existing terminal refusal when the baseline cannot commit.
+            assert_next_message_matches(&mut joiner_rx, "correlated rollback refusal", |frame| {
+                matches!(frame, ServerMessage::RoomOperationResult { operation_id, result }
+                if *operation_id == uuid::Uuid::from_u128(0x401)
+                    && matches!(result.as_ref(), RoomOperationResult::OperationFailed {
+                        error_code: Some(ErrorCode::StorageError), ..
+                    }))
+            });
+            assert_no_queued_message(&mut joiner_rx, "no baseline after rollback");
+            assert_no_queued_message(
+                &mut fixture.survivor_rx,
+                "rollback must publish no opening event",
+            );
+            server.unregister_client(&joiner).await;
+            assert!(
+                !server
+                    .reconnection_manager()
+                    .unwrap()
+                    .has_pending_reconnection(&joiner)
+                    .await
+            );
+        } else {
+            assert!(seated.iter().any(|player| player.id == joiner));
+            assert_next_message_matches(&mut joiner_rx, "correlated join baseline", |frame| {
+                matches!(frame, ServerMessage::RoomOperationResult { operation_id, result }
+                    if *operation_id == uuid::Uuid::from_u128(0x401)
+                        && matches!(result.as_ref(), RoomOperationResult::RoomJoined(joined)
+                            if joined.room_id == fixture.room_id && joined.player_id == joiner))
+            });
+            assert_next_message_matches(
+                &mut fixture.survivor_rx,
+                "peer join event",
+                |frame| matches!(frame, ServerMessage::PlayerJoined { player } if player.id == joiner),
+            );
+            assert_no_queued_message(&mut fixture.survivor_rx, "one opening event");
+        }
+    }
+}
+
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_teardown_finishes_while_player_join_room_gate_is_held() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let server = &fixture.server;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app =
+        crate::websocket::create_router("http://localhost:3000").with_state(Arc::clone(server));
+    let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop.await;
+        })
+        .await
+        .unwrap();
+    });
+    let bound = Duration::from_secs(5);
+    let (mut socket, _) = timeout(bound, connect_async(format!("ws://{addr}/ws")))
+        .await
+        .unwrap()
+        .unwrap();
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room_id)
+        .await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    socket
+        .send(Message::text(
+            serde_json::to_string(&queued_player_join_frame(false)).unwrap(),
+        ))
+        .await
+        .unwrap();
+    timeout(
+        bound,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("WebSocket join must queue for room mutation");
+    let joiner = server
+        .connection_manager
+        .client_ids()
+        .into_iter()
+        .find(|id| *id != fixture.leaver && *id != fixture.survivor)
+        .expect("joiner registered before dispatch");
+    assert!(server
+        .connection_manager
+        .request_close_for(&joiner, CloseReason::ActivityTimeout));
+    let close = timeout(bound, socket.next()).await;
+    // Release the client's transport after the close so a close-handshake
+    // timeout cannot hide whether the owned handler is still stuck in JoinRoom.
+    drop(socket);
+    let remaining = server.wait_for_shutdown_connections(bound).await;
+    drop(gate);
+    shutdown.send(()).unwrap();
+    assert_eq!(server.wait_for_shutdown_connections(bound).await, 0);
+    timeout(bound, serve).await.unwrap().unwrap();
+    assert!(
+        matches!(close, Ok(Some(Ok(Message::Close(Some(frame))))) if u16::from(frame.code) == 4003)
+    );
+    assert_eq!(
+        remaining, 0,
+        "teardown must finish before the room gate opens"
+    );
+    assert_no_queued_message(&mut fixture.survivor_rx, "peers must see no ghost seat");
+    assert_eq!(
+        fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
 /// #826: close before room admission must leave the seat available to reconnect.
 #[tokio::test(start_paused = true)]
 #[cfg_attr(miri, ignore)]
