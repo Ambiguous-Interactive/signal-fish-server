@@ -10727,6 +10727,59 @@ async fn spectator_socket_close_respects_room_admission() {
     }
 }
 
+/// A spectator refusal must let its coordinator finish a started delivery.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn spectator_refusal_finishes_started_delivery_after_close() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    let coordinator = Arc::new(DrainTriggerCoordinator::new(DrainTrigger::UnknownRouting));
+    let server =
+        create_test_server_with_message_coordinator(ServerConfig::default(), coordinator.clone())
+            .await;
+    let (player, _messages) = register_client(&server, "127.0.0.1:48402".parse().unwrap()).await;
+    server.set_client_protocol(
+        &player,
+        NegotiatedProtocol {
+            version: 3,
+            ..Default::default()
+        },
+    );
+    server.set_client_room_operation_ids(&player, true);
+    let pause = Arc::new(UnregisterPause {
+        player,
+        reached: Notify::new(),
+        release: Notify::new(),
+    });
+    *coordinator.operation_failure_pause.lock().unwrap() = Some(Arc::clone(&pause));
+    let mut leave = Box::pin(server.handle_client_message(
+        &player,
+        ClientMessage::RoomOperation {
+            operation_id: uuid::Uuid::from_u128(0x400),
+            operation: Box::new(RoomOperationRequest::LeaveSpectator),
+        },
+    ));
+    timeout(Duration::from_secs(1), async {
+        tokio::select! {
+            () = pause.reached.notified() => {},
+            () = &mut leave => panic!("leave returned before the refusal reached the coordinator"),
+        }
+    })
+    .await
+    .expect("the refusal reaches the coordinator");
+    assert!(server
+        .connection_manager
+        .request_close_for(&player, CloseReason::ActivityTimeout));
+    assert!(
+        futures_util::poll!(&mut leave).is_pending(),
+        "close must let the coordinator finish a started refusal delivery"
+    );
+    pause.release.notify_one();
+    timeout(Duration::from_secs(1), leave)
+        .await
+        .expect("started refusal finishes");
+}
+
 /// Issue #647 identity slice: a voluntary `LeaveSpectator` races the physical
 /// disconnect teardown for the same spectator session. The lifecycle gate
 /// must serialize the two detaches so exactly one wins, the events carry the

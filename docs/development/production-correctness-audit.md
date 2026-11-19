@@ -19565,10 +19565,11 @@ Socket-originated leaves now observe close while waiting for the
 lifecycle and room gates. The server orders the room gate handoff
 against close before it changes the roster. The regression tests cover
 plain and correlated leaves, close during handoff, and a live reply
-with the original operation ID. Close before admission yields one
-`disconnected` event from teardown. Once admitted, the leave finishes
-and the room receives one `voluntary_leave` event even if the socket
-closes after storage removal.
+with the original operation ID. When removal succeeds outside shutdown
+drain, close before admission yields one `disconnected` event from
+teardown. A successful admitted leave yields one `voluntary_leave`
+event even if the socket closes after storage removal. Shutdown drain
+can suppress teardown notifications.
 
 The room's home process orders departures with later roster changes
 and records them for seated-player replay. Teardown still waits for
