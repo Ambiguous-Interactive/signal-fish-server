@@ -20012,7 +20012,7 @@ the home record refuses restore. This advances A04 and A08. #826 remains open.
 
 ### F415 — A router refusal could hold teardown after WebSocket close
 
-At `7ba74f55`, a private router refusal held the source lifecycle while
+At `7ba74f55bac5e4ce963fc5590f8188cdeaf1f3d4`, a router refusal held the source lifecycle while
 waiting for a reply route or queue space. Under a full queue, dispatch
 missed a 10 ms virtual deadline after the server requested close. On a
 real v3 WebSocket without the room operation capability, close 4003 reached
