@@ -228,9 +228,11 @@ The authority holds a set of moderation operations (v3 only, via the
   before the seal also restores its holder with no password: `Reconnect`
   carries no password field, and resuming a prior membership through a live
   seat credential is not a fresh admission. (A ban is the tool that refuses
-  restores.) The password is stored only as a
-  salted hash. See [Rooms and Lobbies](rooms-and-lobbies.md) for the
-  client-side flow.
+  restores.) The password is stored only as a salted hash. If the server
+  detects or requests WebSocket close before write admission, the current
+  join settings stay in effect.
+  An admitted write can finish during disconnect. See
+  [Rooms and Lobbies](rooms-and-lobbies.md) for the client-side flow.
 - **`TransferAuthority`** hands the authority role to a seated member of
   your choice. Every member receives the usual `AuthorityChanged`
   broadcast; the sender loses every authority capability (including

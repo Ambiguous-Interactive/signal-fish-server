@@ -4888,6 +4888,18 @@ async fn real_socket_close_cancels_queued_unban_before_reconnect() {
     .await;
 }
 
+/// #826: a queued settings change cannot affect fresh joins after the host closes.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_cancels_queued_set_room_access_before_reconnect() {
+    qualify_real_socket_close_cancels_room_operation(|_| {
+        crate::protocol::RoomOperationRequest::SetRoomAccess {
+            password: Some("new room password".into()),
+        }
+    })
+    .await;
+}
+
 async fn qualify_real_socket_close_cancels_room_operation(
     operation: impl FnOnce(PlayerId) -> crate::protocol::RoomOperationRequest,
 ) {
@@ -4991,6 +5003,10 @@ async fn qualify_real_socket_close_cancels_room_operation(
     assert_eq!(peer_joined.room_id, room_id);
     let target = peer_joined.player_id;
     let operation = operation(target);
+    let access_retry = match &operation {
+        RoomOperationRequest::SetRoomAccess { password } => Some(password.clone()),
+        _ => None,
+    };
     let unban_target = if let RoomOperationRequest::UnbanPlayer { player_id } = &operation {
         server
             .database
@@ -5078,6 +5094,10 @@ async fn qualify_real_socket_close_cancels_room_operation(
     assert!(!restored.missed_events.iter().any(
         |event| matches!(event, ServerMessage::PlayerLeft { player_id, .. } if *player_id == target)
     ));
+    assert!(!restored.missed_events.iter().any(|event| matches!(
+        event,
+        ServerMessage::RoomOperationResult { operation_id, .. } if *operation_id == canceled_operation_id
+    )));
     assert_eq!(server.get_client_room(&target).await, Some(room_id));
     assert!(!server
         .database
@@ -5102,7 +5122,7 @@ async fn qualify_real_socket_close_cancels_room_operation(
             .unwrap()
             .is_none());
     }
-    if let Some(player_id) = unban_target {
+    let retry = if let Some(player_id) = unban_target {
         let stored = server
             .database
             .get_room_by_id(&room_id)
@@ -5110,16 +5130,33 @@ async fn qualify_real_socket_close_cancels_room_operation(
             .unwrap()
             .unwrap();
         assert!(stored.is_banned(&player_id));
-        assert!(!restored.missed_events.iter().any(|event| matches!(
-            event,
-            ServerMessage::RoomOperationResult { operation_id, .. } if *operation_id == canceled_operation_id
-        )));
+        Some((
+            RoomOperationRequest::UnbanPlayer { player_id },
+            RoomOperationResult::PlayerUnbanned { player_id },
+        ))
+    } else if let Some(password) = access_retry {
+        let mut newcomer = connect(&url).await;
+        assert_eq!(
+            join(&mut newcomer, &joined.room_code, "newcomer")
+                .await
+                .room_id,
+            room_id
+        );
+        let requires_password = password.is_some();
+        Some((
+            RoomOperationRequest::SetRoomAccess { password },
+            RoomOperationResult::RoomAccessUpdated { requires_password },
+        ))
+    } else {
+        None
+    };
+    if let Some((operation, expected_result)) = retry {
         let operation_id = RoomOperationId::new_v4();
         send(
             &mut replacement,
             ClientMessage::RoomOperation {
                 operation_id,
-                operation: Box::new(RoomOperationRequest::UnbanPlayer { player_id }),
+                operation: Box::new(operation),
             },
         )
         .await;
@@ -5131,14 +5168,29 @@ async fn qualify_real_socket_close_cancels_room_operation(
                         result,
                     } => {
                         assert_eq!(actual, operation_id);
-                        assert!(
-                            matches!(*result, RoomOperationResult::PlayerUnbanned { player_id: actual }
-                                if actual == player_id),
-                            "unexpected retry result: {result:?}"
-                        );
+                        match (result.as_ref(), &expected_result) {
+                            (
+                                RoomOperationResult::PlayerUnbanned { player_id },
+                                RoomOperationResult::PlayerUnbanned {
+                                    player_id: expected,
+                                },
+                            ) => assert_eq!(player_id, expected),
+                            (
+                                RoomOperationResult::RoomAccessUpdated { requires_password },
+                                RoomOperationResult::RoomAccessUpdated {
+                                    requires_password: expected,
+                                },
+                            ) => assert_eq!(requires_password, expected),
+                            (actual, expected) => {
+                                panic!("unexpected retry result: {actual:?}. Expected {expected:?}")
+                            }
+                        }
                         break;
                     }
-                    ServerMessage::AuthorityChanged { .. } | ServerMessage::SessionPlan(_) => {}
+                    ServerMessage::AuthorityChanged { .. }
+                    | ServerMessage::SessionPlan(_)
+                    | ServerMessage::PlayerJoined { .. }
+                    | ServerMessage::PlayerLeft { .. } => {}
                     other => panic!("unexpected frame after reconnect: {other:?}"),
                 }
             }
@@ -5151,7 +5203,15 @@ async fn qualify_real_socket_close_cancels_room_operation(
             .await
             .unwrap()
             .unwrap();
-        assert!(!stored.is_banned(&player_id));
+        match expected_result {
+            RoomOperationResult::PlayerUnbanned { player_id } => {
+                assert!(!stored.is_banned(&player_id))
+            }
+            RoomOperationResult::RoomAccessUpdated { requires_password } => {
+                assert_eq!(stored.password.is_some(), requires_password);
+            }
+            other => panic!("unexpected retry type: {other:?}"),
+        }
     }
     send(&mut peer, ClientMessage::Ping).await;
     timeout(BOUND, async {
@@ -6745,7 +6805,7 @@ async fn closing_socket_preserves_an_admitted_unban_write() {
     let server = create_test_server_with(ServerConfig::default()).await;
     let (authority, mut receiver, close, room_id, target) = register_unban_source(&server).await;
     let lifecycle = server.client_lifecycle(&authority).unwrap();
-    let pause = super::moderation::arm_unban_write_pause(authority);
+    let pause = super::moderation::arm_room_setting_write_pause(authority);
     let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
         &authority,
         ClientMessage::RoomOperation {
@@ -6797,6 +6857,26 @@ async fn register_unban_source(
     RoomId,
     PlayerId,
 ) {
+    let (authority, receiver, close, room_id) =
+        register_room_setting_source(server, "UNBAN1").await;
+    let target = PlayerId::new_v4();
+    server
+        .database
+        .set_room_ban(&room_id, &target, true)
+        .await
+        .unwrap();
+    (authority, receiver, close, room_id, target)
+}
+
+async fn register_room_setting_source(
+    server: &Arc<EnhancedGameServer>,
+    room_code: &str,
+) -> (
+    PlayerId,
+    mpsc::Receiver<Arc<ServerMessage>>,
+    ConnectionCloseSignal,
+    RoomId,
+) {
     let (authority, mut receiver) =
         register_client(server, "127.0.0.1:48226".parse().unwrap()).await;
     let close = server
@@ -6812,16 +6892,10 @@ async fn register_unban_source(
         },
     );
     server.set_client_room_operation_ids(&authority, true);
-    join_seated_player(server, &authority, &mut receiver, "UNBAN1", "host").await;
+    join_seated_player(server, &authority, &mut receiver, room_code, "host").await;
     drain_receiver(&mut receiver);
     let room_id = server.get_client_room(&authority).await.unwrap();
-    let target = PlayerId::new_v4();
-    server
-        .database
-        .set_room_ban(&room_id, &target, true)
-        .await
-        .unwrap();
-    (authority, receiver, close, room_id, target)
+    (authority, receiver, close, room_id)
 }
 
 /// #826: a committed unban must release teardown while its reply queue is full.
@@ -6892,4 +6966,156 @@ async fn closing_socket_releases_an_unban_waiting_to_reply() {
     assert!(queued
         .iter()
         .all(|message| matches!(message.as_ref(), ServerMessage::Pong)));
+}
+
+/// #826: a close while the room gate is held must leave join settings intact.
+#[tokio::test(start_paused = true)]
+async fn closing_socket_cancels_set_room_access_waiting_for_room_admission() {
+    qualify_queued_set_room_access(true).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn open_socket_completes_set_room_access_waiting_for_room_admission() {
+    qualify_queued_set_room_access(false).await;
+}
+
+async fn qualify_queued_set_room_access(close_source: bool) {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, mut receiver, close, room_id) =
+        register_room_setting_source(&server, "ACCESS").await;
+    let lifecycle = server.client_lifecycle(&authority).unwrap();
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&room_id)
+        .await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    let operation_id = RoomOperationId::new_v4();
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &authority,
+        ClientMessage::RoomOperation {
+            operation_id,
+            operation: Box::new(RoomOperationRequest::SetRoomAccess {
+                password: Some("new room password".into()),
+            }),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(
+        Duration::from_secs(1),
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("setting reaches the room gate");
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+
+    let released_before_gate = if close_source {
+        assert!(close.request_close(CloseReason::ActivityTimeout));
+        timeout(Duration::from_millis(10), &mut dispatch)
+            .await
+            .is_ok()
+    } else {
+        false
+    };
+    if released_before_gate {
+        let teardown = timeout(Duration::from_millis(10), lifecycle.lock())
+            .await
+            .expect("close releases the source lifecycle before the room gate opens");
+        drop(teardown);
+    }
+    drop(gate);
+    if !released_before_gate {
+        timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("setting finishes after the gate opens");
+    }
+
+    let room = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (released_before_gate, room.password.is_some()),
+        (close_source, !close_source),
+        "close must release dispatch and preserve the room's join settings"
+    );
+    if !close_source {
+        let reply = receiver
+            .try_recv()
+            .expect("open socket receives its correlated result");
+        assert!(matches!(reply.as_ref(),
+            ServerMessage::RoomOperationResult { operation_id: actual, result }
+                if *actual == operation_id && matches!(result.as_ref(),
+                    RoomOperationResult::RoomAccessUpdated { requires_password: true })
+        ));
+    }
+    assert!(receiver.is_empty());
+}
+
+/// #826: storage keeps the settings write once the server admits it.
+#[tokio::test(start_paused = true)]
+async fn closing_socket_preserves_an_admitted_set_room_access_write() {
+    use crate::protocol::{ClientMessage, RoomOperationRequest};
+
+    let server = create_test_server_with(ServerConfig::default()).await;
+    let (authority, receiver, close, room_id) =
+        register_room_setting_source(&server, "ACCESS").await;
+    let lifecycle = server.client_lifecycle(&authority).unwrap();
+    let pause = super::moderation::arm_room_setting_write_pause(authority);
+    let mut dispatch = Box::pin(server.handle_client_message_from_lifecycle(
+        &authority,
+        ClientMessage::RoomOperation {
+            operation_id: RoomOperationId::new_v4(),
+            operation: Box::new(RoomOperationRequest::SetRoomAccess {
+                password: Some("new room password".into()),
+            }),
+        },
+        Arc::clone(&lifecycle),
+    ));
+    assert!(futures_util::poll!(&mut dispatch).is_pending());
+    timeout(Duration::from_secs(1), pause.reached.notified())
+        .await
+        .expect("write reaches the admission boundary");
+
+    assert!(close.request_close(CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close releases receive dispatch");
+    let mut teardown = Box::pin(lifecycle.lock());
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+    let mut later_admission = Box::pin(
+        server
+            .message_coordinator
+            .lock_room_event_mutation(&room_id),
+    );
+    assert!(futures_util::poll!(&mut later_admission).is_pending());
+    let stored = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored.password.is_none());
+
+    pause.release.notify_one();
+    let _guard = timeout(Duration::from_millis(10), teardown)
+        .await
+        .expect("teardown proceeds after the admitted write");
+    let _room_guard = timeout(Duration::from_millis(10), later_admission)
+        .await
+        .expect("later admissions proceed after the admitted write");
+    let stored = server
+        .database
+        .get_room_by_id(&room_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(stored
+        .password
+        .is_some_and(|credential| credential.matches("new room password")));
+    assert!(receiver.is_empty());
 }

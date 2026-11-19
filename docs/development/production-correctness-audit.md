@@ -50,9 +50,9 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
-| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
+| A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592; queued access changes repaired in F413 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410; queued unban repaired in F412 |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410; queued unban repaired in F412; queued access changes repaired in F413 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
@@ -19946,3 +19946,31 @@ An admitted write can change room state even if the reply never reaches
 the requester. Another process declines restore without the home room
 and reconnect record. A restart loses the in-memory ban list. This
 advances A04 and A09. #826 remains open.
+
+### F413 — A queued room setting could change after WebSocket close
+
+At `ff1cc99f`, a v3 `SetRoomAccess` held its source lifecycle while waiting
+for the room gate. After the server requested close, dispatch exceeded a
+10 ms virtual deadline. When the gate opened, the closed source still set
+a join password. The open-socket control set the password and received the
+correlated reply (Linux ARM64, Nextest `9d81a3d1`).
+
+The server now cancels the pending lifecycle, room gate, and read waits on
+close. Under the room gate, it orders write admission against the socket's
+close signal. An admitted write keeps the source and room guards until
+storage returns. Results and refusals address the original socket.
+
+The Linux ARM64 controls pass in Nextest `798e18d0`. A queued setting
+releases dispatch and the source lifecycle before the gate opens and
+preserves the room setting. An admitted write finishes before teardown.
+A real v3 socket receives close 4003. The replacement restores the same
+player and authority. A fresh player can still join without a password.
+The replacement receives no replay of the old result and can apply the
+setting with a new operation ID. The existing peer still receives Pong.
+
+The home process orders authority changes and fresh admission against the
+write. A later join waits for an admitted write, and then uses the stored
+setting. A network partition can delay close detection, so the setting can
+take effect even if the requester never observes the result. A process
+without the home room and recovery record refuses restore. Restart loses
+the in-memory room. This advances A04, A07, and A09. #826 remains open.
