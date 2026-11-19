@@ -1,5 +1,6 @@
 use super::signaling::sorted_routed_player_ids;
 use std::collections::HashMap;
+use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -129,6 +130,28 @@ impl SpectatorError {
             message: message.into(),
             code,
         }
+    }
+
+    fn connection_closed() -> Self {
+        Self::new(
+            "Connection is no longer active",
+            Some(ErrorCode::SpectatorJoinFailed),
+        )
+    }
+}
+
+/// Cancel work that has no outstanding room mutation when the source closes.
+async fn wait_for_join<T>(
+    source_close: Option<&ConnectionCloseSignal>,
+    work: impl Future<Output = T>,
+) -> Result<T, SpectatorError> {
+    if let Some(close) = source_close {
+        close
+            .while_open(work)
+            .await
+            .ok_or_else(SpectatorError::connection_closed)
+    } else {
+        Ok(work.await)
     }
 }
 
@@ -265,7 +288,7 @@ impl SpectatorService {
         room_code: String,
         spectator_name: String,
         password: Option<String>,
-        source_lifecycle: Option<Arc<ClientLifecycle>>,
+        source: Option<(Arc<ClientLifecycle>, ConnectionCloseSignal)>,
     ) -> Result<(), SpectatorError> {
         #[cfg(feature = "allocation-tracking")]
         super::allocation_benchmark::record_spectator_allocation_stage("before_spawn");
@@ -294,19 +317,20 @@ impl SpectatorService {
             // the lifecycle lock could race a concurrent admission for the
             // same connection (deleting a newer row or rewinding a newer
             // advance). Same discipline as the player join's panic repair.
-            let Some(lifecycle) = source_lifecycle
-                .or_else(|| service.connection_manager.client_lifecycle(&player_id))
-            else {
-                return Err(SpectatorError::new(
-                    "Connection is no longer active",
-                    Some(ErrorCode::SpectatorJoinFailed),
-                ));
+            let (lifecycle, source_close) = if let Some((lifecycle, close)) = source {
+                (lifecycle, Some(close))
+            } else if let Some(lifecycle) = service.connection_manager.client_lifecycle(&player_id)
+            {
+                (lifecycle, None)
+            } else {
+                return Err(SpectatorError::connection_closed());
             };
             // Held (not merely acquired) through the compensation below:
             // dropping it early would reopen the concurrent-admission race.
             #[cfg(feature = "allocation-tracking")]
             super::allocation_benchmark::record_spectator_allocation_stage("lifecycle_found");
-            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let _lifecycle_guard =
+                wait_for_join(source_close.as_ref(), Arc::clone(&lifecycle).lock_owned()).await?;
             #[cfg(feature = "allocation-tracking")]
             super::allocation_benchmark::record_spectator_allocation_stage("lifecycle_locked");
             if lifecycle.player_id() != player_id
@@ -326,6 +350,7 @@ impl SpectatorService {
                 room_code,
                 spectator_name,
                 password,
+                source_close.as_ref(),
                 pending_rollback_in_task,
             ))
             .catch_unwind()
@@ -384,6 +409,7 @@ impl SpectatorService {
         room_code: String,
         spectator_name: String,
         password: Option<String>,
+        source_close: Option<&ConnectionCloseSignal>,
         pending_rollback: Arc<std::sync::Mutex<Option<(RoomId, bool)>>>,
     ) -> Result<(), SpectatorError> {
         #[cfg(feature = "allocation-tracking")]
@@ -392,7 +418,12 @@ impl SpectatorService {
         // The lifecycle guard and identity validation live in `join_operation`
         // so they outlive a panic; this body runs with the connection already
         // serialized against concurrent joins and disconnect-time detaches.
-        if let Err(error) = self.rate_limiter.check_join_attempt(player_id).await {
+        if let Err(error) = wait_for_join(
+            source_close,
+            self.rate_limiter.check_join_attempt(player_id),
+        )
+        .await?
+        {
             return Err(SpectatorError::new(
                 error.to_string(),
                 Some(ErrorCode::RateLimitExceeded),
@@ -458,21 +489,22 @@ impl SpectatorService {
         #[cfg(feature = "allocation-tracking")]
         super::allocation_benchmark::record_spectator_allocation_stage("code_lock");
         let lock_key = format!("room_join:{game_name}:{room_code}");
-        let lock_handle = self
-            .distributed_lock
-            .acquire(&lock_key, ROOM_JOIN_LOCK_TTL)
-            .await
-            .map_err(|error| {
-                warn!(%lock_key, %error, "Failed to acquire spectator room-code lock");
-                SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
-            })?;
+        let lock_handle = wait_for_join(
+            source_close,
+            self.distributed_lock.acquire(&lock_key, ROOM_JOIN_LOCK_TTL),
+        )
+        .await?
+        .map_err(|error| {
+            warn!(%lock_key, %error, "Failed to acquire spectator room-code lock");
+            SpectatorError::new("Storage error", Some(ErrorCode::StorageError))
+        })?;
         let mut lock_renewal = keep_lease_renewed(
             Arc::clone(&self.distributed_lock),
             lock_handle,
             ROOM_JOIN_LOCK_TTL,
             Arc::clone(&self.metrics),
         );
-        let room_and_guard = async {
+        let enter_room = async {
             let room_id = match self.database.get_room_id(&game_name, &room_code).await {
                 Ok(Some(room_id)) => room_id,
                 Ok(None) => {
@@ -494,8 +526,8 @@ impl SpectatorService {
                 .lock_room_event_mutation(&room_id)
                 .await;
             Ok((room_id, guard))
-        }
-        .await;
+        };
+        let room_and_guard = wait_for_join(source_close, enter_room).await;
         lock_renewal.stop_renewal();
         match self.distributed_lock.release(lock_renewal.handle()).await {
             Ok(true) => {}
@@ -510,7 +542,12 @@ impl SpectatorService {
         }
         #[cfg(feature = "allocation-tracking")]
         super::allocation_benchmark::record_spectator_allocation_stage("room_read");
-        let (room_id, room_event_guard) = room_and_guard?;
+        let (room_id, room_event_guard) = room_and_guard??;
+        // Close may be requested in the poll that returns the gate. Check it
+        // after releasing the code lease, before admitting the owned join.
+        if source_close.is_some_and(|close| close.requested_reason().is_some()) {
+            return Err(SpectatorError::connection_closed());
+        }
         // The lookup by code only identifies the room lane. Capacity and every
         // baseline field come from a fresh read inside that lane so an admission
         // never publishes a stale pre-lock room snapshot.
@@ -701,10 +738,7 @@ impl SpectatorService {
                 else {
                     self.rollback_unpublished_spectator_join(player_id, &room.id, true)
                         .await;
-                    return Err(SpectatorError::new(
-                        "Connection is no longer active",
-                        Some(ErrorCode::SpectatorJoinFailed),
-                    ));
+                    return Err(SpectatorError::connection_closed());
                 };
                 #[cfg(feature = "allocation-tracking")]
                 super::allocation_benchmark::record_spectator_allocation_stage("registration");

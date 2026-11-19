@@ -58,8 +58,16 @@ impl EnhancedGameServer {
     ) {
         let lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        let initial_guard = if let Some(lifecycle) = &lifecycle {
-            let guard = lifecycle.lock().await;
+        let (source_close, initial_guard) = if let Some(lifecycle) = &lifecycle {
+            let Some(close) = self
+                .connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+            else {
+                return;
+            };
+            let Some(guard) = close.while_open(lifecycle.lock()).await else {
+                return;
+            };
             if lifecycle.player_id() != *player_id
                 || !self
                     .connection_manager
@@ -67,9 +75,9 @@ impl EnhancedGameServer {
             {
                 return;
             }
-            Some(guard)
+            (Some(close), Some(guard))
         } else {
-            None
+            (None, None)
         };
         // Shutdown-drain parity with the join path: only a socket upgraded
         // before the drain flipped can still deliver `JoinAsSpectator` inside
@@ -83,6 +91,7 @@ impl EnhancedGameServer {
                     "Server is draining for shutdown".to_string(),
                     Some(crate::protocol::ErrorCode::ServerDraining),
                     operation_id,
+                    source_close.as_ref(),
                 )
                 .await;
             return;
@@ -97,12 +106,14 @@ impl EnhancedGameServer {
                 room_code,
                 spectator_name,
                 password,
-                lifecycle.clone(),
+                lifecycle.clone().zip(source_close.clone()),
             )
             .await
         {
-            let _reply_guard = if let Some(lifecycle) = &lifecycle {
-                let guard = lifecycle.lock().await;
+            let _reply_guard = if let (Some(lifecycle), Some(close)) = (&lifecycle, &source_close) {
+                let Some(guard) = close.while_open(lifecycle.lock()).await else {
+                    return;
+                };
                 if lifecycle.player_id() != *player_id
                     || !self
                         .connection_manager
@@ -126,6 +137,7 @@ impl EnhancedGameServer {
                     err.message,
                     err.code,
                     operation_id,
+                    source_close.as_ref(),
                 )
                 .await;
         }

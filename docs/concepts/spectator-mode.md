@@ -173,6 +173,11 @@ available** to spectators:
 
 ## Spectator Notifications
 
+If the server requests a WebSocket close before spectator admission, it cancels
+the queued join. A new connection can send a fresh `JoinAsSpectator`. If the
+join wins admission, the server completes the join or removes its stored entry
+when it cannot deliver the initial snapshot.
+
 When a spectator joins, players and existing spectators in the room receive a
 `NewSpectatorJoined` broadcast:
 
