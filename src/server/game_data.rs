@@ -349,7 +349,11 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
+            self.connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+        });
+        if source_lifecycle.is_some() && source_close.is_none() {
             return;
         }
         let valid = if self.client_supports_v3(player_id) {
@@ -413,17 +417,17 @@ impl EnhancedGameServer {
             }
         }
 
-        /* A queued leave changes membership without replacing the lifecycle.
-         * Hold this gate from room lookup through stamp/enqueue (issue #686). */
-        let source_gate = match source_lifecycle.as_ref() {
-            Some(lifecycle) => Some(lifecycle.lock().await),
-            None => None,
+        // Hold the source gate from room lookup through stamp/enqueue:
+        // a queued leave can change membership without replacing the lifecycle.
+        let Some(source_gate) = while_relay_open(
+            source_close.as_ref(),
+            lock_relay_lifecycle(source_lifecycle.as_ref()),
+        )
+        .await
+        else {
+            return;
         };
-        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
-            self.connection_manager
-                .close_signal_for_lifecycle(player_id, lifecycle)
-        });
-        if source_lifecycle.is_some() && source_close.is_none() {
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
             return;
         }
         if let Some(room_id) = self.get_client_room(player_id).await {
@@ -550,7 +554,11 @@ impl EnhancedGameServer {
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
-        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
+        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
+            self.connection_manager
+                .close_signal_for_lifecycle(player_id, lifecycle)
+        });
+        if source_lifecycle.is_some() && source_close.is_none() {
             return;
         }
         // Per-encoding ceiling (issue #634): a configured
@@ -607,15 +615,15 @@ impl EnhancedGameServer {
         // first, and rejected frames — oversized or over-budget — record no
         // liveness: a stream of rejected frames must not keep an otherwise
         // idle client or room alive indefinitely.
-        let source_gate = match source_lifecycle.as_ref() {
-            Some(lifecycle) => Some(lifecycle.lock().await),
-            None => None,
+        let Some(source_gate) = while_relay_open(
+            source_close.as_ref(),
+            lock_relay_lifecycle(source_lifecycle.as_ref()),
+        )
+        .await
+        else {
+            return;
         };
-        let source_close = source_lifecycle.as_ref().and_then(|lifecycle| {
-            self.connection_manager
-                .close_signal_for_lifecycle(player_id, lifecycle)
-        });
-        if source_lifecycle.is_some() && source_close.is_none() {
+        if !self.relay_source_is_current(player_id, source_lifecycle.as_ref()) {
             return;
         }
         if let Some(room_id) = self.get_client_room(player_id).await {
@@ -832,10 +840,7 @@ impl EnhancedGameServer {
             drop(source_gate.take());
             let wait_and_reacquire = async {
                 wait.await;
-                match source_lifecycle {
-                    Some(lifecycle) => Some(lifecycle.lock().await),
-                    None => None,
-                }
+                lock_relay_lifecycle(source_lifecycle).await
             };
             let Some(guard) = while_relay_open(source_close, wait_and_reacquire).await else {
                 return Ok(());
@@ -845,6 +850,15 @@ impl EnhancedGameServer {
                 return Ok(());
             }
         }
+    }
+}
+
+async fn lock_relay_lifecycle(
+    lifecycle: Option<&Arc<ClientLifecycle>>,
+) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    match lifecycle {
+        Some(lifecycle) => Some(lifecycle.lock().await),
+        None => None,
     }
 }
 

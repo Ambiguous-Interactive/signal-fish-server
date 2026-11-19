@@ -2220,6 +2220,11 @@ within a sender's room incarnation and increases by one for every accepted
 message from that sender. Text and binary use the same stream. Pre-v3 recipients
 receive byte-identical frames with no `seq` key.
 
+When the server starts closing the sending WebSocket, queued JSON and binary
+frames stop waiting for that socket's lifecycle. If close wins before the
+server assigns a sequence, the frame consumes no sequence and adds no
+delivery gap. Frames already admitted follow the normal delivery rules.
+
 Recipient rules:
 
 - Within one `(sender, epoch)`, delivered sequence numbers are strictly

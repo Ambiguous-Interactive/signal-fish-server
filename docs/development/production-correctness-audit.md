@@ -19819,3 +19819,33 @@ membership, and the ban list governs later
 admission. The server needs its room state to apply the operation or restore
 the seat. Another process or an in-memory restart cannot infer that decision
 from the old token. This advances A04, A05, and A09. The campaign stays open.
+
+### F409 — A queued gameplay relay could hold WebSocket receive dispatch
+
+At `5bad1a9d` under #826, the JSON relay tried to lock the sender's lifecycle
+again after inbound activity refresh. The binary relay took the same gate
+before charging the frame. Neither wait watched the physical socket's close
+signal. With the gate still held, both closing cases missed a 10 ms
+paused-clock bound. The open-socket controls waited and delivered the next
+sequence (Linux ARM64, Nextest `51bc473e`).
+
+Both relay paths now capture the source socket's close signal before waiting
+and check that the same lifecycle still owns the player after acquiring the
+gate. Closing dispatch can return with the gate still held. The frame uses
+no sequence and reaches no recipient. Open sockets still wait for the
+lifecycle so a concurrent departure or restore can settle membership first.
+The server retains the ordered delivery of frames that already have a stamp.
+
+Fourteen focused Linux ARM64 checks pass (Nextest `630cff26` and
+`f2974d43`). They cover both encodings, room routing and send order, byte
+budgets, binary activity, departure, reconnect, and completion after
+admission. Eight socket and process checks pass (Nextest `a3e67515`).
+They cover mixed protocol versions, reconnect and epoch changes, directional
+and symmetric blackholes, and restart.
+
+The room's home process orders relay stamps, departures, and reconnect
+baselines. A partition or an unread close frame can delay close detection.
+A peer can still receive a frame stamped before the server detects the
+close. Recovery advances the sender's epoch and excludes gameplay replay.
+A process without the pending reconnect record declines restore, including
+after an in-memory restart. This advances A04 and A13. #826 stays open.

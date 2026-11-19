@@ -457,6 +457,121 @@ mod handler_honesty {
         }
     }
 
+    /// #826: The router has already refreshed activity when JSON relay
+    /// dispatch reaches this second wait on the physical socket's lifecycle.
+    #[tokio::test(start_paused = true)]
+    async fn queued_json_relay_lifecycle_wait_stops_on_close() {
+        check_queued_relay_lifecycle_wait(false, true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_binary_relay_lifecycle_wait_stops_on_close() {
+        check_queued_relay_lifecycle_wait(true, true).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_relay_lifecycle_wait_delivers_while_socket_stays_open() {
+        for binary in [false, true] {
+            check_queued_relay_lifecycle_wait(binary, false).await;
+        }
+    }
+
+    async fn check_queued_relay_lifecycle_wait(binary: bool, close_source: bool) {
+        use crate::coordination::outbound_queue::TryReceiveError;
+
+        let RelayOrderFixture {
+            server,
+            source,
+            room,
+            mut target_receiver,
+            ..
+        } = relay_order_fixture().await;
+        let lifecycle = server.client_lifecycle(&source).unwrap();
+        let close = server.connection_manager.close_signal_for(&source).unwrap();
+        let before = server
+            .connection_manager
+            .current_relay_stamp_in_room(&source, &room)
+            .unwrap();
+        let prefill = target_receiver.try_recv().unwrap();
+        expect_ordered_payload(prefill.payload, source, 0, 0, "prefill");
+
+        let pause =
+            (!binary).then(|| crate::server::message_router::arm_socket_dispatch_pause(source));
+        let mut relay = Box::pin(async {
+            if binary {
+                server
+                    .handle_game_data_binary_from_lifecycle(
+                        &source,
+                        GameDataEncoding::MessagePack,
+                        Bytes::from_static(b"queued"),
+                        Arc::clone(&lifecycle),
+                    )
+                    .await;
+            } else {
+                server
+                    .handle_client_message_from_lifecycle(
+                        &source,
+                        crate::protocol::ClientMessage::GameData {
+                            data: serde_json::json!("queued"),
+                            class: None,
+                            key: None,
+                        },
+                        Arc::clone(&lifecycle),
+                    )
+                    .await;
+            }
+        });
+        if let Some(pause) = &pause {
+            assert!(futures_util::poll!(&mut relay).is_pending());
+            timeout(Duration::from_secs(1), pause.reached.notified())
+                .await
+                .expect("JSON must pass the activity refresh");
+        }
+        let gate = lifecycle.lock().await;
+        if let Some(pause) = pause {
+            pause.release.notify_one();
+        }
+        assert!(futures_util::poll!(&mut relay).is_pending());
+        let pending = target_receiver.try_recv();
+        assert!(
+            matches!(pending, Err(TryReceiveError::Empty)),
+            "the held gate must prevent delivery: {pending:?}"
+        );
+
+        let bound = Duration::from_millis(10);
+        if close_source {
+            assert!(close.request_close(crate::coordination::CloseReason::ActivityTimeout));
+            timeout(bound, &mut relay)
+                .await
+                .expect("close must finish relay dispatch with the lifecycle gate held");
+            let after = server
+                .connection_manager
+                .current_relay_stamp_in_room(&source, &room)
+                .unwrap();
+            assert_eq!((after.epoch, after.seq), (before.epoch, before.seq));
+            drop(gate);
+        } else {
+            assert!(timeout(bound, &mut relay).await.is_err());
+            drop(gate);
+            timeout(bound, &mut relay)
+                .await
+                .expect("live relay must finish after the lifecycle gate opens");
+            let delivered = target_receiver.try_recv().unwrap();
+            expect_ordered_payload(
+                delivered.payload,
+                source,
+                before.epoch,
+                before.seq + 1,
+                "queued",
+            );
+        }
+        let tail = target_receiver.try_recv();
+        assert!(
+            matches!(tail, Err(TryReceiveError::Empty)),
+            "unexpected relay after dispatch: {tail:?}"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn source_close_before_relay_stamp_prevents_fast_path_delivery() {
         use crate::coordination::outbound_queue::TryReceiveError;
