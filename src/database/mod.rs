@@ -1213,13 +1213,13 @@ pub trait GameDatabase: Send + Sync {
         anyhow::bail!("room publication state is not supported by this database")
     }
 
-    /// Get room count for a specific game (for rate limiting)
+    /// Get the room count for a specific game. The caller can drop a pending read.
     async fn get_game_room_count(&self, game_name: &str) -> Result<usize>;
 
     /// Get the authoritative live-room count for one application across every
     /// game name. Backends that cannot provide this query must return an error;
     /// configured application quotas fail closed rather than using a cache or
-    /// silently bypassing the limit.
+    /// silently bypassing the limit. The caller can drop a pending read.
     async fn get_application_room_count(&self, _application_id: &Uuid) -> Result<usize> {
         anyhow::bail!("application room counting is not supported by this database")
     }
@@ -1227,7 +1227,8 @@ pub trait GameDatabase: Send + Sync {
     /// Get the authoritative live-room count across every game name
     /// (server-wide ceiling). Backends that cannot provide this query must
     /// return an error; configured server-wide ceilings fail closed rather
-    /// than using a cache or silently bypassing the limit.
+    /// than using a cache or silently bypassing the limit. The caller can drop
+    /// a pending read.
     async fn get_total_room_count(&self) -> Result<usize> {
         anyhow::bail!("total room counting is not supported by this database")
     }
@@ -1574,6 +1575,9 @@ pub struct InMemoryDatabase {
     get_total_room_count_reached: tokio::sync::Notify,
     #[cfg(test)]
     release_get_total_room_count: tokio::sync::Notify,
+    #[cfg(test)]
+    close_after_total_room_count:
+        std::sync::Mutex<Option<crate::coordination::ConnectionCloseSignal>>,
     #[cfg(test)]
     pause_update_room_code: std::sync::atomic::AtomicU8,
     #[cfg(test)]
@@ -1930,6 +1934,8 @@ impl InMemoryDatabase {
             #[cfg(test)]
             release_get_total_room_count: tokio::sync::Notify::new(),
             #[cfg(test)]
+            close_after_total_room_count: std::sync::Mutex::new(None),
+            #[cfg(test)]
             pause_update_room_code: std::sync::atomic::AtomicU8::new(0),
             #[cfg(test)]
             update_room_code_reached: tokio::sync::Notify::new(),
@@ -2081,7 +2087,6 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
-    #[cfg(signal_fish_repository_tests)]
     pub(crate) fn pause_next_get_application_room_count_for_test(&self) {
         self.get_application_room_count_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -2090,7 +2095,6 @@ impl InMemoryDatabase {
     }
 
     #[cfg(test)]
-    #[cfg(signal_fish_repository_tests)]
     pub(crate) async fn wait_for_paused_get_application_room_count_for_test(&self) {
         self.get_application_room_count_reached.notified().await;
     }
@@ -2122,6 +2126,14 @@ impl InMemoryDatabase {
     #[cfg(test)]
     pub(crate) fn release_paused_get_total_room_count_for_test(&self) {
         self.release_get_total_room_count.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn close_after_next_total_room_count_for_test(
+        &self,
+        close: crate::coordination::ConnectionCloseSignal,
+    ) {
+        *self.close_after_total_room_count.lock().unwrap() = Some(close);
     }
 
     /// Rotation-stall determinism gate: used only by repository-only test
@@ -3870,8 +3882,12 @@ impl GameDatabase for InMemoryDatabase {
             self.get_total_room_count_reached.notify_one();
             self.release_get_total_room_count.notified().await;
         }
-        let rooms = self.rooms.read().await;
-        Ok(rooms.len())
+        let count = self.rooms.read().await.len();
+        #[cfg(test)]
+        if let Some(close) = self.close_after_total_room_count.lock().unwrap().take() {
+            close.request_close(crate::coordination::CloseReason::ActivityTimeout);
+        }
+        Ok(count)
     }
 
     async fn health_check(&self) -> bool {
