@@ -88,6 +88,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Cancel a queued join to an existing room when the server closes the player's WebSocket before admission (#826).
 - Report a disconnect when teardown removes a spectator after close cancels their queued leave (#826).
 - Preserve a player's ability to reconnect when the server closes their WebSocket before admitting a queued room leave
   (#826).

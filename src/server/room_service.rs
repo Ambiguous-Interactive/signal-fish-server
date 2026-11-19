@@ -181,6 +181,9 @@ pub(super) enum JoinRoomError {
     /// (→ `SERVER_DRAINING`).
     #[error("Server is draining for shutdown")]
     ServerDraining,
+    /// The physical socket closed before admission. There is no wire reply.
+    #[error("Connection closed before room admission")]
+    ConnectionClosed,
     /// An automatic room-code candidate was already occupied. This never
     /// reaches the client directly; the bounded create loop consumes it.
     #[error("Generated room code collision")]
@@ -196,10 +199,10 @@ pub(super) enum JoinRoomError {
 }
 
 impl JoinRoomError {
-    /// The client-facing [`ErrorCode`] for this failure. Exhaustive by design: a
-    /// new variant cannot compile without an explicit, reviewed classification.
-    pub(super) fn error_code(&self) -> ErrorCode {
-        match self {
+    /// The client-facing [`ErrorCode`] when this failure needs a reply.
+    /// The exhaustive match requires an explicit decision for every variant.
+    fn error_code(&self) -> Option<ErrorCode> {
+        Some(match self {
             Self::RoomFull => ErrorCode::RoomFull,
             Self::SessionIncompatible => ErrorCode::RoomSessionIncompatible,
             Self::MaxRoomsPerGameExceeded(_) => ErrorCode::MaxRoomsPerGameExceeded,
@@ -210,11 +213,12 @@ impl JoinRoomError {
             Self::PasswordRequired => ErrorCode::PasswordRequired,
             Self::Banned => ErrorCode::Banned,
             Self::ServerDraining => ErrorCode::ServerDraining,
+            Self::ConnectionClosed => return None,
             Self::RoomCodeCollision | Self::RoomCodeRetryExhausted { .. } => {
                 ErrorCode::RoomCreationFailed
             }
             Self::Internal(_) => ErrorCode::RoomCreationFailed,
-        }
+        })
     }
 }
 
@@ -492,12 +496,30 @@ impl EnhancedGameServer {
         let panic_recovery = Arc::new(std::sync::Mutex::new(JoinPanicRecovery::default()));
         let panic_recovery_in_task = Arc::clone(&panic_recovery);
         let task = tokio::spawn(async move {
+            let socket_dispatched = source_lifecycle.is_some();
             let Some(lifecycle) =
                 source_lifecycle.or_else(|| server.connection_manager.client_lifecycle(&player_id))
             else {
                 return;
             };
-            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let lock_lifecycle = Arc::clone(&lifecycle).lock_owned();
+            let (source_close, _lifecycle_guard) = if socket_dispatched {
+                let Some(close) = server
+                    .connection_manager
+                    .close_signal_for_lifecycle(&player_id, &lifecycle)
+                else {
+                    return;
+                };
+                let Some(guard) = close.while_open(lock_lifecycle).await else {
+                    return;
+                };
+                if close.requested_reason().is_some() {
+                    return;
+                }
+                (Some(close), guard)
+            } else {
+                (None, lock_lifecycle.await)
+            };
             if lifecycle.player_id() != player_id
                 || !server
                     .connection_manager
@@ -516,6 +538,7 @@ impl EnhancedGameServer {
                 password,
                 join_only,
                 operation_id,
+                source_close.as_ref(),
                 terminal_response_committed_in_task,
                 lifecycle_finalized_in_task,
                 panic_recovery_in_task,
@@ -607,6 +630,7 @@ impl EnhancedGameServer {
         password: Option<String>,
         join_only: Option<bool>,
         operation_id: Option<crate::protocol::RoomOperationId>,
+        source_close: Option<&ConnectionCloseSignal>,
         terminal_response_committed: Arc<AtomicBool>,
         lifecycle_finalized: Arc<AtomicBool>,
         panic_recovery: Arc<std::sync::Mutex<JoinPanicRecovery>>,
@@ -813,6 +837,7 @@ impl EnhancedGameServer {
                         RoomAdmissionIntent::ExistingOrCreate
                     },
                     join_password,
+                    source_close,
                 )
                 .await
             }
@@ -824,6 +849,7 @@ impl EnhancedGameServer {
                     max_players,
                     supports_authority,
                     join_password,
+                    source_close,
                 )
                 .await
             }
@@ -1266,10 +1292,12 @@ impl EnhancedGameServer {
                 // exhaustive, compiler-checked `match` (see `JoinRoomError`): a
                 // business rejection (room full / per-game cap) is never
                 // conflated with an infrastructure fault.
-                let error_code = Some(error.error_code());
+                let Some(error_code) = error.error_code() else {
+                    return;
+                };
                 let reason = error.to_string();
                 let _ = self
-                    .send_join_failure_to_player(player_id, reason, error_code, operation_id)
+                    .send_join_failure_to_player(player_id, reason, Some(error_code), operation_id)
                     .await;
             }
         }
@@ -1295,6 +1323,7 @@ impl EnhancedGameServer {
         max_players: u8,
         supports_authority: bool,
         password: Option<&str>,
+        source_close: Option<&ConnectionCloseSignal>,
     ) -> Result<
         (
             Room,
@@ -1316,6 +1345,7 @@ impl EnhancedGameServer {
                     supports_authority,
                     RoomAdmissionIntent::CreateOnly,
                     password,
+                    source_close,
                 )
                 .await
             {
@@ -2255,6 +2285,7 @@ impl EnhancedGameServer {
     }
 
     /// Join a room with process-local admission coordination.
+    #[allow(clippy::too_many_arguments)]
     async fn join_room_with_coordination(
         &self,
         player_id: &PlayerId,
@@ -2265,6 +2296,7 @@ impl EnhancedGameServer {
         supports_authority: bool,
         admission_intent: RoomAdmissionIntent,
         password: Option<&str>,
+        source_close: Option<&ConnectionCloseSignal>,
     ) -> Result<
         (
             Room,
@@ -2299,19 +2331,34 @@ impl EnhancedGameServer {
         // joins acquire the application-cap lock only when claiming a legacy
         // unowned room.
         let lock_key = format!("room_join:{game_name}:{room_code}");
-        let mut lock_renewal = self.keep_lock_renewed(
-            self.distributed_lock
-                .acquire(&lock_key, self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL))
-                .await?,
-            self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL),
-        );
+        let ttl = self.coordination_lock_ttl(ROOM_JOIN_LOCK_TTL);
+        let acquire = self.distributed_lock.acquire(&lock_key, ttl);
+        let handle = if let Some(close) = source_close {
+            close
+                .while_open(acquire)
+                .await
+                .ok_or(JoinRoomError::ConnectionClosed)?
+        } else {
+            acquire.await
+        }?;
+        let mut lock_renewal = self.keep_lock_renewed(handle, ttl);
+        let lookup = self.database.get_room_id(game_name, room_code);
+        let room_id = if let Some(close) = source_close {
+            let Some(result) = close.while_open(lookup).await else {
+                self.release_renewed_lock(&mut lock_renewal).await;
+                return Err(JoinRoomError::ConnectionClosed);
+            };
+            result
+        } else {
+            lookup.await
+        };
         let mut application_cap_lock: Option<LeaseRenewalGuard> = None;
         let mut game_cap_lock: Option<LeaseRenewalGuard> = None;
         let mut server_cap_lock: Option<LeaseRenewalGuard> = None;
         let mut room_event_guard = None;
 
         // Try to join existing room or create new one
-        let result = match self.database.get_room_id(game_name, room_code).await {
+        let result = match room_id {
             Ok(Some(_)) if matches!(admission_intent, RoomAdmissionIntent::CreateOnly) => {
                 Err(JoinRoomError::RoomCodeCollision)
             }
@@ -2328,11 +2375,20 @@ impl EnhancedGameServer {
                 // transaction. Returning this owned guard to the handler keeps
                 // a second join/leave/ready transition from observing the DB
                 // member before its route and lifecycle event are published.
-                room_event_guard = Some(
-                    self.message_coordinator
-                        .lock_room_event_mutation(&room_id)
-                        .await,
-                );
+                let lock_room = self.message_coordinator.lock_room_event_mutation(&room_id);
+                let guard = if let Some(close) = source_close {
+                    let guard = close.while_open(lock_room).await;
+                    // Order admission against close at the handoff too. A
+                    // ready lock future can return after close was requested.
+                    let Some(guard) = guard.and_then(|guard| close.commit_if_open(|| guard)) else {
+                        self.release_renewed_lock(&mut lock_renewal).await;
+                        return Err(JoinRoomError::ConnectionClosed);
+                    };
+                    guard
+                } else {
+                    lock_room.await
+                };
+                room_event_guard = Some(guard);
                 // The code lookup identifies only the mutation lane. Refresh
                 // persistence after entering it so ownership, capacity, and
                 // name checks never authorize from a stale pre-lock snapshot.

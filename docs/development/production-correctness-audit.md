@@ -19577,3 +19577,32 @@ access to a busy room. An unread close frame or a network partition can
 delay detection and let the leave win. A spectator uses a fresh join
 after physical loss. A restarted or separate process cannot continue
 the old in-memory roster or replay history. This advances A04 and A10.
+
+### F401 — A queued player join could outlive its WebSocket
+
+At `0d0c46e4` under #826, a join waiting for the room-code lease or the room
+mutation gate missed a 10 ms paused-clock deadline after close. A close during
+room gate handoff still let the join record a seat before rollback. A real
+WebSocket received 4003, but its handler remained active after five seconds
+while the room gate was held. The already-admitted join control passed
+(Linux ARM64, Nextest `15848bed`).
+
+The server now cancels these waits when the source socket closes. It releases
+any code lease the join acquired and orders the existing-room gate handoff
+against close. If close wins, the join adds no seat, publishes no peer event,
+and creates no pending reconnect record. If admission wins, the owned join
+finishes the baseline and opening event or rolls back an undeliverable baseline.
+Twelve focused Linux ARM64 controls pass (Nextest `b529fc9f`), including
+plain and correlated joins, the handoff, and live 4003 teardown while the
+room gate stays held.
+
+A matched Linux ARM64 router control measured 85, 136, and 854 allocations
+with 0, 16, and 255 stored spectators on each head. Allocated bytes increased
+by 88 per join in all three cells (Nextest `d2fe9ea6`, `6fd61d22`). This
+control measures allocation and does not measure throughput.
+
+The home process orders these events with other room changes. Delayed close
+detection can let a join win admission. `join_only` refuses a missing room on
+the wrong process, and reconnect requires a pending record at the home process.
+Restart loses that in-memory state. Room-creation cap waits and refusal delivery
+remain separate paths. This advances A04 and A11.

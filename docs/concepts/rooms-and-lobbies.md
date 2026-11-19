@@ -110,6 +110,12 @@ existing players in the room receive a `PlayerJoined` broadcast:
 }
 ```
 
+If the server starts closing the WebSocket before it grants access to the
+existing room, it cancels the queued join. The server adds no player and
+peers receive no `PlayerJoined` for that attempt. On a fresh connection, the
+player can send a new join request. If the join wins admission first, the
+server finishes publication or rolls back an undeliverable baseline.
+
 ## Room Codes
 
 Room codes are auto-generated 6-character alphanumeric strings designed to
