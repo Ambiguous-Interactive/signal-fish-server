@@ -1734,7 +1734,10 @@ The moderation operations are authority-only (v3 only):
   while the ban waits for admission, it cancels the ban. An admitted ban still completes and the remaining members
   receive the departure when the server removes a seated member. The requester receives `PlayerBanned` on success
   if it stays connected.
-- `UnbanPlayer` lifts a room ban (idempotent). The requester receives `PlayerUnbanned`.
+- `UnbanPlayer` lifts a room ban (idempotent). The server cancels the unban if it detects or requests WebSocket
+  closure before admitting the write. An admitted write can complete during disconnect. The requester receives
+  `PlayerUnbanned` if the result reaches the original socket. After reconnect, the authority can send a new
+  unban if it still wants to lift the ban.
 - `TransferAuthority` names a seated `player_id` that becomes the room's authority. Every member receives the usual
   `AuthorityChanged` broadcast (personalized `you_are_authority` per recipient); the sender receives
   `AuthorityTransferred` and loses every authority capability (`StartGame`, kick, ban, access, rotation, further

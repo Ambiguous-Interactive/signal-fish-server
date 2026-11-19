@@ -57,11 +57,19 @@ starts a metadata write or submits a Direct plan publication, the owned
 operation can finish in room order. Teardown still waits to read authoritative
 membership for reconnect.
 
-Admitted `UnbanPlayer` and `SetRoomAccess` operations retain owned work through
-the stored decision and correlated result. Canceling a server library caller's
-wait does not cancel that work. The source lifecycle orders later operations
-after the result. Queue backpressure still follows the normal delivery deadline;
-a lost connection can prevent the client from observing the result.
+The room's home process orders unban admission with authority changes and
+socket close. If close wins before write admission, the server keeps the ban.
+If admission wins, the write finishes before teardown reads room state. The
+server sends the correlated result on the original socket. If close interrupts
+the reply wait, teardown can continue while the server finishes delivery
+accounting. A replacement socket receives no replay of the result. A partition
+can delay loss detection until after admission. A reconnect without the home
+room and its recovery record fails. Restart loses the in-memory ban list.
+
+Canceling a server library caller's wait leaves owned `UnbanPlayer` and
+`SetRoomAccess` work running. While the source remains open, its lifecycle
+orders later operations after the result. Queue backpressure follows the
+normal delivery deadline.
 
 Neither queue commit nor WebSocket write completion proves a disk flush,
 replica quorum, client application observation, or end-to-end gameplay-state
