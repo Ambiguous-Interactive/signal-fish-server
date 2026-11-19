@@ -118,6 +118,14 @@ message contains the current room state **and** the room-uniform
 [Event Buffer](#event-buffer) for exactly which events are replayed and
 the completeness contract):
 
+If the server starts closing the socket while a restore is waiting for room
+access, it cancels the attempt and releases its claim. A fresh socket can
+retry with the same token while the reconnection window stays open and the
+room can still accept the player. The room's home process orders restores
+with other membership changes. A partition can delay close detection. A
+different process without the pending record, including a restarted home
+process, refuses the restore.
+
 The new connection does not inherit `ProvideConnectionInfo` from the old
 socket. If this player may host a Direct session, send its current endpoint
 again after reconnect. Until then, the server will not elect it as a Direct

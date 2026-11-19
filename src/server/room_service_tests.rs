@@ -3735,6 +3735,356 @@ async fn real_socket_teardown_finishes_while_spectator_join_room_gate_is_held() 
     .await;
 }
 
+/// #826: close must release a queued restore so a replacement socket can claim it.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_close_releases_reconnect_while_room_gate_is_held() {
+    for operation_id in [None, Some(uuid::Uuid::from_u128(0x403))] {
+        assert_real_socket_close_releases_reconnect(operation_id).await;
+    }
+}
+
+async fn assert_real_socket_close_releases_reconnect(
+    operation_id: Option<crate::protocol::RoomOperationId>,
+) {
+    use crate::protocol::{
+        ClientMessage, RoomOperationRequest, RoomOperationResult, ROOM_OPERATION_IDS_CAPABILITY,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    let mut fixture = setup_joined_pair_with_reconnection().await;
+    let server = &fixture.server;
+    server.unregister_client(&fixture.leaver).await;
+    drain_queued_messages(&mut fixture.survivor_rx);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}/ws", listener.local_addr().unwrap());
+    let app = crate::websocket::create_router("*").with_state(Arc::clone(server));
+    let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+    let serve = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async {
+            let _ = stop.await;
+        })
+        .await
+        .unwrap();
+    });
+    let bound = Duration::from_secs(5);
+    let connect = || async {
+        let (mut socket, _) = timeout(bound, connect_async(&url)).await.unwrap().unwrap();
+        if operation_id.is_some() {
+            let authenticate = ClientMessage::Authenticate {
+                app_id: "reconnect-test".to_string(),
+                connect_token: None,
+                sdk_version: None,
+                platform: None,
+                game_data_format: None,
+                protocol_version: Some(3),
+                supported_transports: None,
+                supported_topologies: None,
+                requested_capabilities: Some(vec![ROOM_OPERATION_IDS_CAPABILITY.to_string()]),
+            };
+            socket
+                .send(Message::text(serde_json::to_string(&authenticate).unwrap()))
+                .await
+                .unwrap();
+            let authenticated = timeout(bound, socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let protocol_info = timeout(bound, socket.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                serde_json::from_str::<ServerMessage>(authenticated.to_text().unwrap()).unwrap(),
+                ServerMessage::Authenticated { .. }
+            ));
+            assert!(matches!(
+                serde_json::from_str::<ServerMessage>(protocol_info.to_text().unwrap()).unwrap(),
+                ServerMessage::ProtocolInfo(info)
+                    if info.capabilities.iter().any(|capability| capability == ROOM_OPERATION_IDS_CAPABILITY)
+            ));
+        }
+        socket
+    };
+    let mut socket = connect().await;
+    let gate = server
+        .message_coordinator
+        .lock_room_event_mutation(&fixture.room_id)
+        .await;
+    let attempts = gate.mutation_attempt_count_for_test();
+    let frame = serde_json::to_string(&if let Some(operation_id) = operation_id {
+        ClientMessage::RoomOperation {
+            operation_id,
+            operation: Box::new(RoomOperationRequest::Reconnect {
+                player_id: fixture.leaver,
+                room_id: fixture.room_id,
+                auth_token: fixture.reconnect_token.clone(),
+            }),
+        }
+    } else {
+        ClientMessage::Reconnect {
+            player_id: fixture.leaver,
+            room_id: fixture.room_id,
+            auth_token: fixture.reconnect_token.clone(),
+        }
+    })
+    .unwrap();
+    socket.send(Message::text(frame.clone())).await.unwrap();
+    timeout(
+        bound,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("first socket must claim the record and queue for room mutation");
+    let claimant = server
+        .connection_manager
+        .client_ids()
+        .into_iter()
+        .find(|id| *id != fixture.survivor)
+        .expect("first socket has a transient player ID");
+    assert!(server
+        .connection_manager
+        .request_close_for(&claimant, CloseReason::ActivityTimeout));
+    let close = timeout(bound, socket.next()).await;
+    assert!(
+        matches!(close, Ok(Some(Ok(Message::Close(Some(frame))))) if u16::from(frame.code) == 4003),
+        "queued reconnect socket receives its close code"
+    );
+    drop(socket);
+    assert_eq!(
+        server.wait_for_shutdown_connections(bound).await,
+        0,
+        "the first socket must tear down before the room gate opens"
+    );
+    assert!(!server.connection_manager.has_client(&claimant));
+    assert!(!server.connection_manager.has_client(&fixture.leaver));
+    assert_no_queued_message(&mut fixture.survivor_rx, "no canceled reconnect event");
+
+    let attempts = gate.mutation_attempt_count_for_test();
+    let mut retry = connect().await;
+    retry.send(Message::text(frame)).await.unwrap();
+    timeout(
+        bound,
+        gate.wait_for_mutation_attempt_after_for_test(attempts),
+    )
+    .await
+    .expect("fresh socket must claim the same token before the room gate opens");
+    drop(gate);
+
+    let received = timeout(bound, retry.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let reply: ServerMessage = serde_json::from_str(received.to_text().unwrap()).unwrap();
+    let baseline = match (operation_id, reply) {
+        (None, ServerMessage::Reconnected(payload)) => payload,
+        (
+            Some(expected),
+            ServerMessage::RoomOperationResult {
+                operation_id,
+                result,
+            },
+        ) => {
+            assert_eq!(operation_id, expected);
+            match *result {
+                RoomOperationResult::Reconnected(payload) => payload,
+                other => panic!("expected correlated reconnect baseline, got {other:?}"),
+            }
+        }
+        (_, other) => panic!("expected reconnect baseline, got {other:?}"),
+    };
+    assert_eq!(baseline.player_id, fixture.leaver);
+    assert_eq!(baseline.room_id, fixture.room_id);
+    let peer_event = timeout(bound, fixture.survivor_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(peer_event.as_ref(), ServerMessage::PlayerReconnected { player_id, .. }
+        if *player_id == fixture.leaver)
+    );
+    let authority = timeout(bound, fixture.survivor_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        matches!(authority.as_ref(), ServerMessage::AuthorityChanged {
+        authority_player: Some(player),
+        you_are_authority: false,
+    } if *player == fixture.leaver)
+    );
+    assert_no_queued_message(&mut fixture.survivor_rx, "exactly one reconnect event");
+    drop(retry);
+    shutdown.send(()).unwrap();
+    assert_eq!(server.wait_for_shutdown_connections(bound).await, 0);
+    timeout(bound, serve).await.unwrap().unwrap();
+}
+
+/// #826: close at room admission must prevent a write. Close after admission
+/// lets the owned restore roll back an in-flight write before releasing the claim.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_room_admission_orders_close_against_storage() {
+    for close_at_handoff in [true, false] {
+        let coordinator = Arc::new(DrainTriggerCoordinator::new(
+            DrainTrigger::PauseAuthorityTransferAnnouncement,
+        ));
+        let mut fixture =
+            setup_joined_pair_with_reconnection_config_and_coordinator(|_| {}, coordinator.clone())
+                .await;
+        let server = &fixture.server;
+        server.unregister_client(&fixture.leaver).await;
+        drain_queued_messages(&mut fixture.survivor_rx);
+        let (claimant, mut claimant_rx) =
+            register_client(server, "127.0.0.1:48102".parse().unwrap()).await;
+        let effective = Arc::new(tokio::sync::RwLock::new(claimant));
+        let lifecycle = server.client_lifecycle(&claimant).unwrap();
+        let close = server
+            .connection_manager
+            .close_signal_for(&claimant)
+            .unwrap();
+        fixture.database.pause_next_add_player_for_test();
+        if close_at_handoff {
+            *coordinator.close_after_next_room_gate.lock().unwrap() = Some(close.clone());
+        }
+
+        let operation_id = uuid::Uuid::from_u128(0x403);
+        let mut dispatch = Box::pin(
+            server.handle_reconnect_with_identity_operation_from_lifecycle(
+                &claimant,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+                Arc::clone(&effective),
+                Some(operation_id),
+                lifecycle,
+            ),
+        );
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        let bound = Duration::from_secs(1);
+        if close_at_handoff {
+            assert!(!timeout(bound, dispatch)
+                .await
+                .expect("close at room handoff must skip the paused storage write"));
+        } else {
+            timeout(
+                bound,
+                fixture.database.wait_for_paused_add_player_for_test(),
+            )
+            .await
+            .expect("live admission starts the storage write");
+            assert!(close.request_close(CloseReason::ActivityTimeout));
+            assert!(futures_util::poll!(&mut dispatch).is_pending());
+            fixture.database.release_paused_add_player_for_test();
+            assert!(!timeout(bound, dispatch)
+                .await
+                .expect("admitted write rolls back"));
+        }
+        assert_eq!(close.requested_reason(), Some(CloseReason::ActivityTimeout));
+        assert_eq!(*effective.read().await, claimant);
+        assert!(!fixture
+            .database
+            .get_room_players(&fixture.room_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|player| player.id == fixture.leaver));
+        assert!(!drain_queued_messages(&mut claimant_rx)
+            .iter()
+            .any(|message| {
+                matches!(message.as_ref(), ServerMessage::RoomOperationResult { result, .. }
+                if matches!(result.as_ref(), crate::protocol::RoomOperationResult::Reconnected(_)))
+            }));
+        assert_no_queued_message(
+            &mut fixture.survivor_rx,
+            "no opening after canceled restore",
+        );
+        let manager = server.reconnection_manager().unwrap();
+        let retry = manager
+            .claim_reconnection(
+                &PlayerId::new_v4(),
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+            )
+            .await
+            .expect("attempt must release its original claim");
+        assert!(manager.release_reconnection_claim(&retry).await);
+    }
+}
+
+/// #826: close cancels the pre-claim waits even if their owners are still live.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn reconnect_close_cancels_preclaim_waits() {
+    for hold_lifecycle in [true, false] {
+        let fixture = setup_joined_pair_with_reconnection_and_config(|config| {
+            config.reconnection_window = Duration::from_secs(1);
+        })
+        .await;
+        let server = &fixture.server;
+        server.unregister_client(&fixture.leaver).await;
+        let (claimant, mut claimant_rx) =
+            register_client(server, "127.0.0.1:48102".parse().unwrap()).await;
+        let lifecycle = server.client_lifecycle(&claimant).unwrap();
+        let manager = server.reconnection_manager().unwrap();
+        let mut cleanup = Box::pin(manager.cleanup_expired_membership(
+            &fixture.leaver,
+            &fixture.room_id,
+            std::future::pending(),
+        ));
+        let lifecycle_guard = if hold_lifecycle {
+            Some(lifecycle.lock().await)
+        } else {
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(
+                futures_util::poll!(&mut cleanup).is_pending(),
+                "expiry pins the record"
+            );
+            None
+        };
+        let attempts = lifecycle.lock_attempt_count_for_test();
+        let mut dispatch = Box::pin(
+            server.handle_reconnect_with_identity_operation_from_lifecycle(
+                &claimant,
+                &fixture.leaver,
+                &fixture.room_id,
+                &fixture.reconnect_token,
+                Arc::new(tokio::sync::RwLock::new(claimant)),
+                None,
+                Arc::clone(&lifecycle),
+            ),
+        );
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        let bound = Duration::from_millis(100);
+        timeout(
+            bound,
+            lifecycle.wait_for_lock_attempt_after_for_test(attempts),
+        )
+        .await
+        .expect("reconnect has reached its first gate");
+        assert!(futures_util::poll!(&mut dispatch).is_pending());
+        assert!(server
+            .connection_manager
+            .request_close_for(&claimant, CloseReason::ActivityTimeout));
+        assert!(!timeout(bound, dispatch)
+            .await
+            .expect("close must cancel the pre-claim wait"));
+        assert_no_queued_message(&mut claimant_rx, "no reply from the canceled attempt");
+        drop(lifecycle_guard);
+        drop(cleanup);
+    }
+}
+
 async fn assert_real_socket_teardown_finishes_while_join_room_gate_is_held(
     message: crate::protocol::ClientMessage,
 ) {
