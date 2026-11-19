@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::coordination::{CloseReason, ConnectionCloseSignal, RoomEventMutationGuard};
@@ -26,20 +27,28 @@ static TRANSFER_COMMIT_PAUSES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(all(test, signal_fish_repository_tests))]
-static UNBAN_WRITE_PAUSES: std::sync::LazyLock<
+static ROOM_SETTING_WRITE_PAUSES: std::sync::LazyLock<
     dashmap::DashMap<PlayerId, Arc<super::message_router::SocketDispatchPause>>,
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(all(test, signal_fish_repository_tests))]
-pub(super) fn arm_unban_write_pause(
+pub(super) fn arm_room_setting_write_pause(
     player_id: PlayerId,
 ) -> Arc<super::message_router::SocketDispatchPause> {
     let pause = Arc::new(super::message_router::SocketDispatchPause {
         reached: tokio::sync::Notify::new(),
         release: tokio::sync::Notify::new(),
     });
-    UNBAN_WRITE_PAUSES.insert(player_id, Arc::clone(&pause));
+    ROOM_SETTING_WRITE_PAUSES.insert(player_id, Arc::clone(&pause));
     pause
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
+async fn pause_room_setting_write_for_test(player_id: &PlayerId) {
+    if let Some((_, pause)) = ROOM_SETTING_WRITE_PAUSES.remove(player_id) {
+        pause.reached.notify_one();
+        pause.release.notified().await;
+    }
 }
 
 #[cfg(all(test, signal_fish_repository_tests))]
@@ -467,21 +476,10 @@ impl EnhancedGameServer {
                 ServerMessage::room_operation_failed(operation_id, message, Some(code))
             }
         };
-        let reply = self.message_coordinator.send_to_player_on_socket(
-            authority_id,
-            &close,
-            Arc::new(message),
-        );
-        tokio::pin!(reply);
-        let delivered = match close.while_open(&mut reply).await {
-            Some(result) => result,
-            None => {
-                // Teardown can proceed while the owned task finishes reply accounting.
-                drop(authority_lifecycle_guard);
-                reply.await
-            }
-        };
-        if let Err(error) = delivered {
+        if let Err(error) = self
+            .send_room_setting_reply(authority_id, &close, message, authority_lifecycle_guard)
+            .await
+        {
             tracing::warn!(%authority_id, %error, "Unban reply delivery failed");
         }
     }
@@ -509,10 +507,7 @@ impl EnhancedGameServer {
         // Order admission against close. An admitted storage write must finish.
         let guard = close.commit_if_open(|| guard)?;
         #[cfg(all(test, signal_fish_repository_tests))]
-        if let Some((_, pause)) = UNBAN_WRITE_PAUSES.remove(authority_id) {
-            pause.reached.notify_one();
-            pause.release.notified().await;
-        }
+        pause_room_setting_write_for_test(authority_id).await;
         let applied = self.database.set_room_ban(&room_id, target_id, false).await;
         drop(guard);
         if let Err(error) = applied {
@@ -563,14 +558,27 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(authority_id, &lifecycle)
+        else {
+            return;
+        };
         let server = Arc::clone(self);
         let authority_id = *authority_id;
+        let source_close = close.clone();
         let task = tokio::spawn(async move {
             server
-                .set_room_access_owned(&authority_id, operation_id, password, lifecycle)
+                .set_room_access_owned(
+                    &authority_id,
+                    operation_id,
+                    password,
+                    lifecycle,
+                    source_close,
+                )
                 .await;
         });
-        if let Err(error) = task.await {
+        if let Some(Err(error)) = close.while_open(task).await {
             tracing::error!(%authority_id, %error, "Room setting transaction failed");
         }
     }
@@ -582,8 +590,11 @@ impl EnhancedGameServer {
         operation_id: RoomOperationId,
         password: Option<String>,
         lifecycle: Arc<ClientLifecycle>,
+        close: ConnectionCloseSignal,
     ) {
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let Some(authority_lifecycle_guard) = close.while_open(lifecycle.lock()).await else {
+            return;
+        };
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -592,48 +603,77 @@ impl EnhancedGameServer {
             return;
         }
 
-        let Some(room_id) = self.get_client_room(authority_id).await else {
-            self.fail_operation(
-                authority_id,
-                operation_id,
-                "Not currently in a room",
-                ErrorCode::NotInRoom,
-            )
-            .await;
+        let Some(result) = self
+            .set_room_access_in_room(authority_id, password.as_deref(), &close)
+            .await
+        else {
             return;
         };
-        if !Room::is_valid_room_password(password.as_deref()) {
-            self.fail_operation(
-                authority_id,
+        let message = match result {
+            Ok(requires_password) => ServerMessage::RoomOperationResult {
                 operation_id,
+                result: Box::new(RoomOperationResult::RoomAccessUpdated { requires_password }),
+            },
+            Err((message, code)) => {
+                if close
+                    .while_open(self.connection_manager.charge_error_reply(authority_id))
+                    .await
+                    != Some(true)
+                {
+                    return;
+                }
+                ServerMessage::room_operation_failed(operation_id, message, Some(code))
+            }
+        };
+        if let Err(error) = self
+            .send_room_setting_reply(authority_id, &close, message, authority_lifecycle_guard)
+            .await
+        {
+            tracing::warn!(%authority_id, %error, "Room access reply delivery failed");
+        }
+    }
+
+    async fn set_room_access_in_room(
+        &self,
+        authority_id: &PlayerId,
+        password: Option<&str>,
+        close: &ConnectionCloseSignal,
+    ) -> Option<Result<bool, (Cow<'static, str>, ErrorCode)>> {
+        let Some(room_id) = close.while_open(self.get_client_room(authority_id)).await? else {
+            return Some(Err((
+                "Not currently in a room".into(),
+                ErrorCode::NotInRoom,
+            )));
+        };
+        if !Room::is_valid_room_password(password) {
+            return Some(Err((
                 format!(
                     "The room password must be non-empty and at most {} bytes",
                     crate::protocol::MAX_ROOM_PASSWORD_LENGTH
-                ),
+                )
+                .into(),
                 ErrorCode::InvalidInput,
-            )
-            .await;
-            return;
+            )));
         }
 
-        let credential = password.as_deref().map(RoomPasswordCredential::new);
-        // Serialize the policy flip with admissions already resolved onto
-        // this room lane (the same gate the join and spectator paths hold
-        // while they read the password), and hold the gate across the
-        // authority re-check so a concurrent role change cannot interleave
-        // between the check and the write.
-        let access_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
-        if let Err((message, code)) = self.check_room_authority(authority_id, &room_id).await {
-            drop(access_event_guard);
-            self.fail_operation(authority_id, operation_id, message, code)
-                .await;
-            return;
+        // Join, spectator admission, and role changes share this room gate.
+        let guard = close
+            .while_open(self.message_coordinator.lock_room_event_mutation(&room_id))
+            .await?;
+        if let Err((message, code)) = close
+            .while_open(self.check_room_authority(authority_id, &room_id))
+            .await?
+        {
+            return Some(Err((message.into(), code)));
         }
+
+        // Order admission against close. Keep the room gate until storage returns.
+        let guard = close.commit_if_open(|| guard)?;
+        #[cfg(all(test, signal_fish_repository_tests))]
+        pause_room_setting_write_for_test(authority_id).await;
+        let credential = password.map(RoomPasswordCredential::new);
         let applied = self.database.set_room_password(&room_id, credential).await;
-        drop(access_event_guard);
+        drop(guard);
         if let Err(error) = applied {
             tracing::error!(
                 %authority_id,
@@ -641,34 +681,41 @@ impl EnhancedGameServer {
                 %error,
                 "Room access update failed to persist"
             );
-            self.fail_operation(
-                authority_id,
-                operation_id,
-                "Failed to update room access",
+            return Some(Err((
+                "Failed to update room access".into(),
                 ErrorCode::StorageError,
-            )
-            .await;
-            return;
+            )));
         }
 
+        let requires_password = password.is_some();
         tracing::info!(
             authority = %authority_id,
             room_id = %room_id,
-            requires_password = password.is_some(),
+            requires_password,
             "Authority updated the room's join password"
         );
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                authority_id,
-                Arc::new(ServerMessage::RoomOperationResult {
-                    operation_id,
-                    result: Box::new(RoomOperationResult::RoomAccessUpdated {
-                        requires_password: password.is_some(),
-                    }),
-                }),
-            )
-            .await;
+        Some(Ok(requires_password))
+    }
+
+    /// Keep source order while open and finish delivery accounting after close.
+    async fn send_room_setting_reply(
+        &self,
+        player_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+        message: ServerMessage,
+        lifecycle_guard: tokio::sync::MutexGuard<'_, ()>,
+    ) -> anyhow::Result<()> {
+        let reply =
+            self.message_coordinator
+                .send_to_player_on_socket(player_id, close, Arc::new(message));
+        tokio::pin!(reply);
+        match close.while_open(&mut reply).await {
+            Some(result) => result,
+            None => {
+                drop(lifecycle_guard);
+                reply.await
+            }
+        }
     }
 
     /// Handle an authority-initiated `TransferAuthority` room operation (v3

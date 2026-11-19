@@ -245,6 +245,10 @@ spectator join must present the same password:
   birth -- there is no unlocked window between creation and `SetRoomAccess`.
 - `SetRoomAccess { password: null }` reopens the room. Current members and
   their reconnection tokens are unaffected either way.
+- If the server detects or requests WebSocket close before write admission,
+  the current join settings stay in effect. An admitted write can finish
+  during disconnect. After reconnect, the authority can send a new request
+  if it still wants the change.
 - The seal gates fresh joins only. A pending reconnection record armed
   before the seal still restores its holder into the sealed room with no
   password: `Reconnect` carries no password field, and resuming a prior

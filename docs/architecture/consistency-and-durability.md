@@ -57,14 +57,16 @@ starts a metadata write or submits a Direct plan publication, the owned
 operation can finish in room order. Teardown still waits to read authoritative
 membership for reconnect.
 
-The room's home process orders unban admission with authority changes and
-socket close. If close wins before write admission, the server keeps the ban.
-If admission wins, the write finishes before teardown reads room state. The
-server sends the correlated result on the original socket. If close interrupts
-the reply wait, teardown can continue while the server finishes delivery
-accounting. A replacement socket receives no replay of the result. A partition
-can delay loss detection until after admission. A reconnect without the home
-room and its recovery record fails. Restart loses the in-memory ban list.
+The room's home process orders `UnbanPlayer` and `SetRoomAccess` with
+authority changes, fresh joins, and socket close. If close wins before write
+admission, the server keeps the current settings. If admission wins, teardown
+and later joins wait until the write finishes. The server sends the
+correlated result on the original socket. If close interrupts the reply wait,
+teardown can continue while the server finishes delivery accounting. A
+replacement socket receives no replay of the result. A partition can delay
+loss detection until after admission. A process without the home room and
+its recovery record refuses the reconnect. Restart loses the in-memory room
+and its settings.
 
 Canceling a server library caller's wait leaves owned `UnbanPlayer` and
 `SetRoomAccess` work running. While the source remains open, its lifecycle

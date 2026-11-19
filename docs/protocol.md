@@ -1725,7 +1725,9 @@ The moderation operations are authority-only (v3 only):
   later seated or spectator join must present the same password or is refused with `PASSWORD_REQUIRED` (a missing,
   a mismatched, and a stray password into an open room are indistinguishable); `null` reopens the room. Current
   members and their reconnection tokens are unaffected. The password is stored only as a salted hash and never
-  logged or echoed. The requester receives `RoomAccessUpdated { requires_password }`.
+  logged or echoed. The server cancels the change if it detects or requests WebSocket close before admitting
+  the write. An admitted change can finish during disconnect. The result `RoomAccessUpdated { requires_password }`
+  goes to the original socket. After reconnect, the authority can send a new operation if it still wants the change.
 - `BanPlayer` names a seated `player_id` or the holder of this room's pending reconnection record.
   The server records the id on the room's in-memory ban list and evicts the target as it does for `KickPlayer`.
   The banned id cannot rejoin as a player or spectator while the room lives. A tombstoned reconnect record is
