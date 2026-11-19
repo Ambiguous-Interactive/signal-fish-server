@@ -52,7 +52,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A08 | `server/ready_state.rs`, `coordination/room_coordinator.rs` | PlayerReady, StartGame, membership at commit, readiness snapshots, publication | Initial; two ordered concurrent unready/start histories and recovery checked in session 456; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
-| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410 |
+| A09 | `server/authority.rs`, `moderation.rs` | AuthorityRequest, kick, ban, unban, transfer, code rotation, access changes | Initial; concurrent transfer/start and host election checked in session 483; queued transfer and kick on close repaired in F406 and F407; queued room-code rotation repaired in F410; queued unban repaired in F412 |
 | A10 | `server/spectator_service.rs`, `spectator_handlers.rs` | Join/leave spectator, role exclusion, rosters, stale detach, moderation | Initial; lost terminal events during detach panic recovery recorded in F31; spectator baseline versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592 |
 | A11 | `server/session_policy.rs`, `signaling.rs` | ProvideConnectionInfo, Signal, plan selection, host eligibility, generations, fallback | Initial; explicit hostless relay reset in F38; concurrent join/start mesh publications in session 471; backpressured signal/departure ordering in session 502; signals from evicted senders in F383 |
 | A12 | `server/message_router.rs`, `relay_policy.rs` | Dispatch, TransportStatus, negotiated capabilities, stale source identity | Initial; concurrent library transport-status publication in F100; reports from evicted connections in F382 |
@@ -19916,3 +19916,33 @@ Reconnect reads the current membership and requires fresh metadata for
 the replacement socket. Another process without the room and reconnect
 record declines restore. A restart of the in-memory server loses both.
 This advances A04, A05, A06, and A11. #826 remains open.
+
+### F412 — A queued unban could lift a ban after WebSocket close
+
+At `dd095332`, a v3 `UnbanPlayer` kept the source lifecycle while it
+waited for the room mutation gate. After the server requested close, the
+dispatch exceeded a 10 ms virtual deadline. When the gate opened, the
+closed source still cleared the ban. The open-socket control cleared the
+ban and received the exact correlated reply (Linux ARM64, Nextest
+`13cc1ee8`).
+
+The server now cancels read-only waits when the source closes. It orders
+write admission against the close signal while holding the room gate.
+An admitted write retains the room and source guards until storage
+returns. A reply uses the original socket. Close releases the reply wait
+and lets owned delivery finish its accounting.
+
+Linux ARM64 controls pass in Nextest `9900308f`. A queued unban
+releases dispatch within the 10 ms virtual deadline and keeps the ban.
+An admitted write finishes after close. A committed unban releases
+teardown while its reply queue is full. A live v3 socket receives close
+4003, and teardown reaches the held room gate. Its replacement restores
+the same player and authority, sees no replayed result, then lifts the
+ban with a new operation ID. A peer still receives Pong.
+
+The home process orders admission with authority changes. A network
+partition can delay the close signal long enough for admission to win.
+An admitted write can change room state even if the reply never reaches
+the requester. Another process declines restore without the home room
+and reconnect record. A restart loses the in-memory ban list. This
+advances A04 and A09. #826 remains open.

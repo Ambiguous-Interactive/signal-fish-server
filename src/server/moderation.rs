@@ -26,6 +26,23 @@ static TRANSFER_COMMIT_PAUSES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(dashmap::DashMap::new);
 
 #[cfg(all(test, signal_fish_repository_tests))]
+static UNBAN_WRITE_PAUSES: std::sync::LazyLock<
+    dashmap::DashMap<PlayerId, Arc<super::message_router::SocketDispatchPause>>,
+> = std::sync::LazyLock::new(dashmap::DashMap::new);
+
+#[cfg(all(test, signal_fish_repository_tests))]
+pub(super) fn arm_unban_write_pause(
+    player_id: PlayerId,
+) -> Arc<super::message_router::SocketDispatchPause> {
+    let pause = Arc::new(super::message_router::SocketDispatchPause {
+        reached: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+    });
+    UNBAN_WRITE_PAUSES.insert(player_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(all(test, signal_fish_repository_tests))]
 pub(super) fn arm_transfer_commit_pause(
     player_id: PlayerId,
 ) -> Arc<super::message_router::SocketDispatchPause> {
@@ -381,27 +398,43 @@ impl EnhancedGameServer {
         else {
             return;
         };
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(authority_id, &lifecycle)
+        else {
+            return;
+        };
         let server = Arc::clone(self);
         let authority_id = *authority_id;
+        let source_close = close.clone();
         let task = tokio::spawn(async move {
             server
-                .unban_player_owned(&authority_id, operation_id, target_id, lifecycle)
+                .unban_player_owned(
+                    &authority_id,
+                    operation_id,
+                    target_id,
+                    lifecycle,
+                    source_close,
+                )
                 .await;
         });
-        if let Err(error) = task.await {
-            tracing::error!(%authority_id, %error, "Room setting transaction failed");
+        if let Some(Err(error)) = close.while_open(task).await {
+            tracing::error!(%authority_id, %error, "Unban transaction failed");
         }
     }
 
-    /// Retain the source lifecycle through the stored decision and correlated reply.
+    /// Retain source order through the decision and reply while this socket is open.
     async fn unban_player_owned(
         &self,
         authority_id: &PlayerId,
         operation_id: RoomOperationId,
         target_id: PlayerId,
         lifecycle: Arc<ClientLifecycle>,
+        close: ConnectionCloseSignal,
     ) {
-        let _authority_lifecycle_guard = lifecycle.lock().await;
+        let Some(authority_lifecycle_guard) = close.while_open(lifecycle.lock()).await else {
+            return;
+        };
         if lifecycle.player_id() != *authority_id
             || !self
                 .connection_manager
@@ -410,50 +443,81 @@ impl EnhancedGameServer {
             return;
         }
 
-        let Some(room_id) = self.get_client_room(authority_id).await else {
-            self.fail_operation(
-                authority_id,
-                operation_id,
-                "Not currently in a room",
-                ErrorCode::NotInRoom,
-            )
-            .await;
+        let Some(result) = self
+            .unban_player_in_room(authority_id, &target_id, &close)
+            .await
+        else {
             return;
         };
-        // Serialize the ban lift behind the room mutation gate, holding it
-        // across the authority re-check so a concurrent role change cannot
-        // interleave between the check and the write.
-        let unban_event_guard = self
-            .message_coordinator
-            .lock_room_event_mutation(&room_id)
-            .await;
-        if let Err((message, code)) = self.check_room_authority(authority_id, &room_id).await {
-            drop(unban_event_guard);
-            self.fail_operation(authority_id, operation_id, message, code)
-                .await;
-            return;
-        }
-        let unban_applied = self
-            .database
-            .set_room_ban(&room_id, &target_id, false)
-            .await;
-        drop(unban_event_guard);
-        if let Err(error) = unban_applied {
-            tracing::error!(
-                %authority_id,
-                %target_id,
-                %room_id,
-                %error,
-                "Unban failed to persist"
-            );
-            self.fail_operation(
-                authority_id,
+        let message = match result {
+            Ok(()) => ServerMessage::RoomOperationResult {
                 operation_id,
-                "Failed to lift the ban",
-                ErrorCode::StorageError,
-            )
-            .await;
-            return;
+                result: Box::new(RoomOperationResult::PlayerUnbanned {
+                    player_id: target_id,
+                }),
+            },
+            Err((message, code)) => {
+                if close
+                    .while_open(self.connection_manager.charge_error_reply(authority_id))
+                    .await
+                    != Some(true)
+                {
+                    return;
+                }
+                ServerMessage::room_operation_failed(operation_id, message, Some(code))
+            }
+        };
+        let reply = self.message_coordinator.send_to_player_on_socket(
+            authority_id,
+            &close,
+            Arc::new(message),
+        );
+        tokio::pin!(reply);
+        let delivered = match close.while_open(&mut reply).await {
+            Some(result) => result,
+            None => {
+                // Teardown can proceed while the owned task finishes reply accounting.
+                drop(authority_lifecycle_guard);
+                reply.await
+            }
+        };
+        if let Err(error) = delivered {
+            tracing::warn!(%authority_id, %error, "Unban reply delivery failed");
+        }
+    }
+
+    async fn unban_player_in_room(
+        &self,
+        authority_id: &PlayerId,
+        target_id: &PlayerId,
+        close: &ConnectionCloseSignal,
+    ) -> Option<Result<(), (&'static str, ErrorCode)>> {
+        let Some(room_id) = close.while_open(self.get_client_room(authority_id)).await? else {
+            return Some(Err(("Not currently in a room", ErrorCode::NotInRoom)));
+        };
+        // Keep the room gate across the role check and the write.
+        let guard = close
+            .while_open(self.message_coordinator.lock_room_event_mutation(&room_id))
+            .await?;
+        if let Err(refusal) = close
+            .while_open(self.check_room_authority(authority_id, &room_id))
+            .await?
+        {
+            return Some(Err(refusal));
+        }
+
+        // Order admission against close. An admitted storage write must finish.
+        let guard = close.commit_if_open(|| guard)?;
+        #[cfg(all(test, signal_fish_repository_tests))]
+        if let Some((_, pause)) = UNBAN_WRITE_PAUSES.remove(authority_id) {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+        let applied = self.database.set_room_ban(&room_id, target_id, false).await;
+        drop(guard);
+        if let Err(error) = applied {
+            tracing::error!(%authority_id, %target_id, %room_id, %error, "Unban failed to persist");
+            return Some(Err(("Failed to lift the ban", ErrorCode::StorageError)));
         }
 
         tracing::info!(
@@ -463,18 +527,7 @@ impl EnhancedGameServer {
             "Authority lifted a room ban"
         );
         self.metrics.increment_room_unbans();
-        let _ = self
-            .message_coordinator
-            .send_to_player(
-                authority_id,
-                Arc::new(ServerMessage::RoomOperationResult {
-                    operation_id,
-                    result: Box::new(RoomOperationResult::PlayerUnbanned {
-                        player_id: target_id,
-                    }),
-                }),
-            )
-            .await;
+        Some(Ok(()))
     }
 
     /// Handle an authority-initiated `SetRoomAccess` room operation (v3
