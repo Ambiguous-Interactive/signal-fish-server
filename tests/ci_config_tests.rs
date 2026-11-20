@@ -5263,10 +5263,16 @@ fn test_check_markdown_script_enforces_pinned_runner_policy() {
         "scripts/check-markdown-link-text.sh",
         "git ls-files -z -- '*.md'",
     ] {
-        assert!(content.contains(fragment), "Markdown runner requires {fragment}");
+        assert!(
+            content.contains(fragment),
+            "Markdown runner requires {fragment}"
+        );
     }
     for tool in ["npx ", "npm ", "docker run"] {
-        assert!(!content.contains(tool), "Markdown runner must work without {tool}");
+        assert!(
+            !content.contains(tool),
+            "Markdown runner must work without {tool}"
+        );
     }
 }
 
@@ -5321,9 +5327,8 @@ fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
     let content_live = strip_comment_lines(&content);
 
     assert!(
-        content_live.contains(
-            "FAIL${NC}: markdown (pinned rumdl unavailable or version mismatch)",
-        ),
+        content_live
+            .contains("FAIL${NC}: markdown (pinned rumdl unavailable or version mismatch)",),
         "scripts/run-local-ci.sh must mark markdown as FAIL when rumdl is unavailable.\n\
          Missing fail-closed markdown status in {}",
         script_path.display()
@@ -34530,11 +34535,7 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
     ("Cargo.lock", true, "lockfile changes are internal"),
     ("deny.toml", true, "deny.toml is internal tooling config"),
     (".llm/context.md", true, "LLM context files are internal"),
-    (
-        ".rumdl.toml",
-        true,
-        "linter config files are internal",
-    ),
+    (".rumdl.toml", true, "linter config files are internal"),
     ("clippy.toml", true, "clippy config is internal"),
     ("PLAN.md", true, "planning docs are internal"),
     (".gitignore", true, "git config files are internal"),
