@@ -57,11 +57,17 @@ class WeeklyReleaseTests(unittest.TestCase):
             "assets": [{"name": name, "state": "uploaded"} for name in weekly.asset_names(tag)],
         }
         self.assertEqual(len(release["assets"]), 13)
-        self.assertTrue(weekly.release_complete([release], tag, head, True, True))
-        release["assets"].pop()
-        self.assertFalse(weekly.release_complete([release], tag, head, True, True))
-        with self.assertRaises(weekly.ReleaseError):
-            weekly.release_complete([release], tag, "d" * 40, True, True)
+        with patch.object(weekly, "container_digest", return_value=f"sha256:{'c' * 64}") as probe:
+            self.assertTrue(weekly.release_complete([release], tag, head, True, True, repo))
+            probe.return_value = None
+            self.assertFalse(weekly.release_complete([release], tag, head, True, True, repo))
+            probe.return_value = f"sha256:{'d' * 64}"
+            with self.assertRaises(weekly.ReleaseError):
+                weekly.release_complete([release], tag, head, True, True, repo)
+            release["assets"].pop()
+            self.assertFalse(weekly.release_complete([release], tag, head, True, True, repo))
+            with self.assertRaises(weekly.ReleaseError):
+                weekly.release_complete([release], tag, "d" * 40, True, True, repo)
 
     def test_merge_checks_base_and_result(self):
         pr = {

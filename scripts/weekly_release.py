@@ -77,7 +77,26 @@ def asset_names(tag):
     return names
 
 
-def release_complete(releases, tag, source, annotated, crate_exists):
+def container_digest(repo, tag, source):
+    image = f"ghcr.io/{repo.lower()}"
+    version = tag[1:]
+    result = subprocess.run(
+        ["bash", "scripts/verify-release-image.sh", image, source, version, tag, version],
+        env=os.environ | {"GITHUB_OUTPUT": ""}, capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        if "could not inspect release image tag" in result.stderr and re.search(
+            r"not found|manifest unknown|name unknown", result.stderr, re.IGNORECASE,
+        ):
+            return None
+        raise ReleaseError(f"GHCR verification failed for {tag}: {result.stderr.strip()}")
+    digest = result.stdout.strip()
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ReleaseError(f"GHCR verification returned an invalid digest for {tag}.")
+    return digest
+
+
+def release_complete(releases, tag, source, annotated, crate_exists, repo):
     matches = [release for release in releases if release["tag_name"] == tag]
     if not matches:
         return False
@@ -96,7 +115,14 @@ def release_complete(releases, tag, source, annotated, crate_exists):
     ):
         raise ReleaseError(f"GitHub Release {tag} conflicts with the reviewed source.")
     uploaded = {asset["name"] for asset in release["assets"] if asset["state"] == "uploaded"}
-    return crate_exists and asset_names(tag) <= uploaded
+    if not crate_exists or not asset_names(tag) <= uploaded:
+        return False
+    digest = container_digest(repo, tag, source)
+    if digest is None:
+        return False
+    if digests != [f"Multi-architecture manifest digest: `{digest}`"]:
+        raise ReleaseError(f"GHCR digest disagrees with the GitHub Release for {tag}.")
+    return True
 
 
 def decide(repo):
@@ -131,7 +157,9 @@ def decide(repo):
             raise ReleaseError("The crates.io probe returned an unknown state.")
     pages = api(f"repos/{repo}/releases?per_page=100", paginate=True)
     releases = [release for page in pages for release in page]
-    complete = release_complete(releases, tag, source, bool(advertised), crate_state == "exists=true")
+    complete = release_complete(
+        releases, tag, source, bool(advertised), crate_state == "exists=true", repo,
+    )
     notes = Path("CHANGELOG.md").read_text(encoding="utf-8")
     unreleased = re.search(r"^## \[Unreleased\]\n(.*?)(?=^## |\Z)", notes, re.M | re.S)
     if unreleased is None:
