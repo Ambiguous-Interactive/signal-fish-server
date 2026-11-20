@@ -20061,3 +20061,26 @@ the reconnect record. A partition can delay close detection. An error that
 already entered the queue can reach the old socket. Restart loses the
 room and token. Another process without the home record must decline restore.
 This advances A04 and A07. #826 stays open.
+
+### F417 — Peer Close could leave the outbound queue open
+
+At `234c0271cfadcf73db03cdf6d3a95c4b6b09cb88`, a live v3 peer sent Close
+while the test held the socket lifecycle lock. The reader handled the frame,
+but the queue stayed open for the entire five-second test window. Cleanup
+needed the lifecycle lock before it could signal the writer. Nextest
+`fa114ea2` fails at the queue assertion on Linux ARM64. Reproduce with
+`bash scripts/dev-loop.sh peer_close_freezes_outbound_before_room_cleanup`.
+
+The reader now signals its own socket before waiting for room cleanup. The
+writer closes the queue and the peer receives the existing 1000 reply while
+the lifecycle lock is held. A replacement receives `PlayerAlreadyConnected`
+during this interval. After cleanup, the same replacement uses the same token
+to recover the original player and room. The live control leaves the writer
+running normally after it obtains the queue handle. All 14 focused Linux ARM64
+controls pass in Nextest `50b18525`.
+
+The room's home process still orders departure and restoration. A delayed
+Close or a partition can delay detection until the transport or a timeout
+reports the loss. The home process declines an early restore while the old
+seat remains registered. A restarted or separate process without the pending
+record must decline restore. This advances A04 and A07. #826 stays open.
