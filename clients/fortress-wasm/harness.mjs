@@ -1018,7 +1018,8 @@ function validateCompletedWaits(report, name) {
       `${name}: invalid Fortress recommendation`);
     assert(recommendation.callback >= priorEnd && wait.callback === recommendation.callback + 1 &&
       wait.callback <= target, `${name}: wait was late or overlapped another wait`);
-    assert(wait.skipped_callbacks === Math.min(wait.skip_frames, target - wait.callback),
+    assert(wait.skip_frames === recommendation.skip_frames, `${name}: wait skip changed`);
+    assert(wait.skipped_callbacks === Math.min(recommendation.skip_frames, target - wait.callback),
       `${name}: wrong number of skipped advances`);
     priorEnd = wait.callback + wait.skipped_callbacks;
   }
@@ -1046,12 +1047,15 @@ function runWaitObservationSelfTests() {
     { wait_observations: { events: [], omitted: 0 } },
     { wait_observations: { events: [{ ...event, skipped_callbacks: 2 }], omitted: 0 } },
     { wait_observations: { events: [{ ...event, skipped_callbacks: 4 }], omitted: 0 } },
+    { wait_observations: { events: [{ ...event, skip_frames: 1, skipped_callbacks: 1 }], omitted: 0 } },
+    { target_reached_callback: 4,
+      wait_observations: { events: [{ ...event, skip_frames: 4, skipped_callbacks: 2 }], omitted: 0 } },
     { wait_observations: { events: [{ ...event, callback: 3, poll: 3, skipped_callbacks: 3 }], omitted: 0 } },
   ]) {
     let rejected = false;
     try { validateCompletedWaits({ ...completed, ...changed }, "invalid completed wait"); }
     catch { rejected = true; }
-    assert(rejected, "invalid completed wait passed");
+    assert(rejected, `invalid completed wait passed: ${JSON.stringify(changed)}`);
   }
 
   validateWaitGenerationObservations({ ...generated, wait_observations: { events: [], omitted: 0 } }, "generated but pending");
