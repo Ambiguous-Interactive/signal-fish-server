@@ -20292,11 +20292,19 @@ Accepted connections keep their existing shutdown sequence. The live
 HTTP/2 WebSocket exchanges Ping and Pong after fresh TCP dials are refused.
 It receives `4000 server_shutdown` after the full grace. The process exits
 and a new server authenticates a fresh WSS client on the same port. The
-final control passes on Linux ARM64 in Nextest `fa4c69c0`.
+final control passes on Linux ARM64 in Nextest `2e8a83f0`.
+
+Seven alternating runs per build on Linux ARM64 used one seated HTTP/1.1
+WSS client, real SIGTERM, one second of grace, and loopback TCP probes
+every 10 ms. The median time to the first refused probe fell from 1,009 ms
+to 10 ms. Median coded-close time was 1,004 ms in both builds. Median
+WebSocket upgrade time was 40 ms in both builds. These runs measure
+loopback timing at one connection.
 
 The home process owns room state and orders admitted operations. It refuses
 new upgrades and room restores during drain, including requests on previously
-accepted connections. A partition or proxy can delay or hide connection
-refusal, the advisory, or the close frame. A restarted or separate server
-must decline restore when it lacks the original recovery record. This
-advances A17 and A18. Issue #826 stays open.
+accepted connections. A TCP dial in flight when the listener closes can
+reset. A partition or proxy can delay or hide connection refusal, the
+advisory, or the close frame. A restarted or separate server must decline
+restore when it lacks the original recovery record. This advances A17 and
+A18. Issue #826 stays open.

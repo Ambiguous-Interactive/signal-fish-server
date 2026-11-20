@@ -526,9 +526,13 @@ async fn tls_listener_refuses_tcp_during_websocket_grace() {
         loop {
             match TcpStream::connect(("127.0.0.1", port)).await {
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                // A dial already in flight when the listener closes can
+                // reset. Require a later refusal to prove that it closed.
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
                 Err(error) => panic!("expected TCP refusal during grace, got {error}"),
-                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                Ok(_) => {}
             }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
