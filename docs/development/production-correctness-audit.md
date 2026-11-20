@@ -20144,16 +20144,27 @@ handler finishes, but the drain misses the 10 ms completion bound
 
 The first repair returned at a zero task count. Review found that a pending
 handler could start after the last tracked task left. Linux ARM64 Nextest
-`a226ab6d` reproduces the premature close. The final grace wait arms the
-existing completion notification before checking the count. At zero it
-allows up to 50 ms for pending handlers to start, then checks the count
-again. The settle windows share the original deadline.
+`a226ab6d` reproduces the premature close. A fixed scheduling
+window still left a later handler untracked. On `b5d73771`, a real HTTP
+upgrade held before handoff fails the count assertion in ARM64 Nextest
+`6f414adb`.
+
+The HTTP handler now counts the upgrade under the same gate that starts
+drain. The guard follows the Axum upgrade through the socket supervisor
+or drops when the upgrade fails. When drain wins the gate, the HTTP route
+refuses the upgrade. The grace wait arms the completion notification
+before checking the count. It can exit at zero or at the original deadline.
+The real HTTP controls verify tracking before handoff, a coded shutdown
+refusal when registration follows drain, and guard release on upgrade
+failure. The separate paused-clock control pins grace for a registered
+client that stays connected.
 
 The real TCP regression seats a v3 player, sends SIGTERM, reads `GoingAway`,
 then closes the client. It checks clean exit before the advertised deadline.
 The companion test holds a socket and requires `4000 server_shutdown`.
-Linux ARM64 Nextest `939823bf` passes 22 scoped tests, including TLS shutdown,
-same-port restart, three-player WebRTC signaling, and directional loss.
+Linux ARM64 Nextest `558d2b2f` passes 36 scoped tests. They cover HTTP/1.1,
+HTTP/2, TLS, socket task failure, process restart, WebRTC signaling, and
+directional loss.
 
 Matched Linux ARM64 runs use the default debug binary, real SIGTERM, a
 four-second grace, and two authenticated v3 clients for both active cases.
@@ -20163,14 +20174,14 @@ and measure from the signal to process exit.
 
 | Workload | Runs per build | Baseline median (range) | Fixed median (range) |
 | --- | ---: | ---: | ---: |
-| Both clients leave | 7 | 4,008 ms (4,007–4,010) | 161 ms (160–161) |
-| One client stays | 5 | 4,008 ms (4,007–4,009) | 4,008 ms (4,007–4,009) |
-| No clients at drain start | 5 | 57 ms (55–58) | 57 ms (56–58) |
+| Both clients leave | 7 | 4,008 ms (4,007–4,008) | 110 ms (109–111) |
+| One client stays | 5 | 4,007 ms (4,007–4,007) | 4,007 ms (4,006–4,010) |
+| No clients at drain start | 5 | 57 ms (55–58) | 6 ms (5–6) |
 
-The remaining client receives code 4000 at about 4,003 ms in both builds.
-With one client still connected, the exit median grows by 0.7 ms and the
-ranges overlap. These samples measure local shutdown time. They do not
-establish a tail latency or throughput guarantee.
+The remaining client receives code 4000 at 4,002 ms before and 4,003 ms
+after. Its process exit median grows by 0.5 ms and the ranges overlap. The
+24 loopback upgrades per build have a 1.59 ms median in both builds.
+These samples do not qualify upgrade latency under load or throughput.
 
 The home process owns the room and refuses new upgrades and restores during
 drain. An advisory or close frame can be delayed or lost during a partition.

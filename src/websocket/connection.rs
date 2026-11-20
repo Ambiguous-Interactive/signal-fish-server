@@ -13,7 +13,9 @@ use crate::protocol::{
 #[cfg(test)]
 use crate::protocol::{Topology, Transport};
 use crate::protocol_core::{decide_handshake_version, HandshakeVersionDecision};
-use crate::server::{ClientLifecycle, EnhancedGameServer, NegotiatedProtocol, RegisterClientError};
+use crate::server::{
+    ClientLifecycle, EnhancedGameServer, NegotiatedProtocol, RegisterClientError, SocketTaskGuard,
+};
 #[cfg(test)]
 use crate::session_capability::dedup_preserving_order;
 use crate::session_capability::negotiate_capabilities;
@@ -1279,7 +1281,7 @@ fn protocol_info_capabilities(
 // `Authenticate.protocol_version`: `2` for the `/v2/ws` path, `3` for `/v3/ws`.
 pub(super) async fn handle_socket(
     socket: WebSocket,
-    server: Arc<EnhancedGameServer>,
+    socket_task: SocketTaskGuard,
     addr: SocketAddr,
     token_binding: Option<TokenBindingHandshake>,
     default_protocol_version: u16,
@@ -1290,7 +1292,7 @@ pub(super) async fn handle_socket(
     // can still be committing when that caller is canceled.
     let task = tokio::spawn(handle_socket_owned(
         socket,
-        server,
+        socket_task,
         addr,
         token_binding,
         default_protocol_version,
@@ -1338,17 +1340,17 @@ where
 
 async fn handle_socket_owned(
     socket: WebSocket,
-    server: Arc<EnhancedGameServer>,
+    socket_task: SocketTaskGuard,
     addr: SocketAddr,
     token_binding: Option<TokenBindingHandshake>,
     default_protocol_version: u16,
     request_id: String,
 ) {
-    let _socket_task_guard = server.track_socket_task();
+    let server = socket_task.server();
     let mut supervision = SocketSupervisorState::default();
     let result = std::panic::AssertUnwindSafe(handle_socket_supervised(
         socket,
-        Arc::clone(&server),
+        Arc::clone(server),
         addr,
         token_binding,
         default_protocol_version,
@@ -4581,6 +4583,130 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn pending_http_upgrade_remains_tracked_during_drain() {
+        assert_pending_http_upgrade_releases_drain(false).await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn failed_http_upgrade_releases_drain_tracking() {
+        assert_pending_http_upgrade_releases_drain(true).await;
+    }
+
+    async fn assert_pending_http_upgrade_releases_drain(fail_upgrade: bool) {
+        let server = test_server().await;
+        let response_ready = Arc::new(tokio::sync::Notify::new());
+        let release_response = Arc::new(tokio::sync::Notify::new());
+        let app = axum::Router::new()
+            .route("/v3/ws", super::super::routes::websocket_route_v3("*"))
+            .with_state(Arc::clone(&server))
+            .layer(axum::middleware::from_fn({
+                let response_ready = Arc::clone(&response_ready);
+                let release_response = Arc::clone(&release_response);
+                move |request, next: axum::middleware::Next| {
+                    let response_ready = Arc::clone(&response_ready);
+                    let release_response = Arc::clone(&release_response);
+                    async move {
+                        let response = next.run(request).await;
+                        if response.status() == axum::http::StatusCode::SWITCHING_PROTOCOLS {
+                            response_ready.notify_one();
+                            release_response.notified().await;
+                        }
+                        response
+                    }
+                }
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upgrade listener");
+        let addr = listener.local_addr().expect("listener address");
+        let serve_task = tokio::spawn(async move {
+            if fail_upgrade {
+                // A plain Hyper connection sends the response but cannot
+                // fulfill OnUpgrade without its upgrade adapter.
+                let (stream, peer_addr) = listener.accept().await.expect("accept HTTP connection");
+                let app = app.layer(axum::Extension(axum::extract::ConnectInfo(peer_addr)));
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(
+                        hyper_util::rt::TokioIo::new(stream),
+                        hyper_util::service::TowerToHyperService::new(app),
+                    )
+                    .await
+                    .expect("serve HTTP without handing off the transport");
+            } else {
+                axum::serve(
+                    listener,
+                    app.into_make_service_with_connect_info::<SocketAddr>(),
+                )
+                .await
+                .expect("serve upgrade route");
+            }
+        });
+        let mut connect = tokio::spawn(connect_async(format!("ws://{addr}/v3/ws")));
+        let limit = Duration::from_secs(5);
+        tokio::select! {
+            ready = tokio::time::timeout(limit, response_ready.notified()) => {
+                ready.expect("handler prepared its upgrade response");
+            }
+            outcome = &mut connect => panic!("upgrade completed before reaching the hold: {outcome:?}"),
+        }
+
+        assert!(
+            server.has_active_socket_tasks(),
+            "the accepted HTTP upgrade must count before the socket handler starts"
+        );
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let drain = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move {
+                crate::server::run_drain_choreography(&server, shutdown_tx).await;
+            })
+        };
+        shutdown_rx
+            .wait_for(|started| *started)
+            .await
+            .expect("drain starts before the held upgrade is released");
+        assert!(!drain.is_finished(), "drain waits for the accepted upgrade");
+        release_response.notify_one();
+        let (mut client, _) = tokio::time::timeout(limit, connect)
+            .await
+            .expect("held upgrade completes")
+            .expect("connect task succeeds")
+            .expect("client receives the upgrade response");
+        if !fail_upgrade {
+            let message = tokio::time::timeout(limit, client.next())
+                .await
+                .expect("pending upgrade receives a shutdown close")
+                .expect("socket delivers close before EOF")
+                .expect("receive shutdown close");
+            let TungsteniteMessage::Close(Some(close)) = message else {
+                panic!("expected shutdown close, got {message:?}");
+            };
+            assert_eq!(u16::from(close.code), 4000);
+            assert_eq!(close.reason, "server_shutdown");
+        }
+        tokio::time::timeout(limit, drain)
+            .await
+            .expect("completed upgrade releases the drain")
+            .expect("drain task succeeds");
+        assert!(!server.has_active_socket_tasks());
+        let upgrades = server
+            .metrics()
+            .snapshot()
+            .await
+            .connections
+            .websocket_upgrades;
+        assert_eq!(upgrades.failed_after_accept, u64::from(fail_upgrade));
+        if fail_upgrade {
+            serve_task.await.expect("HTTP connection ends");
+        } else {
+            serve_task.abort();
+            assert!(serve_task.await.unwrap_err().is_cancelled());
+        }
+    }
+
     // Returns `Result` so EVERY setup/exchange failure propagates and fails the
     // test (the wrapper panics on `Err`). A bare `return` here would let a broken
     // server silently pass CI — the exact regression this shape prevents (and the
@@ -4907,7 +5033,7 @@ mod tests {
         let socket = server_sink.reunite(server_stream).expect("reunite socket");
         let handler = tokio::spawn(handle_socket(
             socket,
-            Arc::clone(&server),
+            server.track_socket_task(),
             "127.0.0.1:45555".parse().unwrap(),
             None,
             2,
@@ -5062,7 +5188,7 @@ mod tests {
         } = UpgradedSocketPair::connect_with_small_client_recv_buffer(Some(8192)).await;
         let mut handler = tokio::spawn(handle_socket(
             server_sink.reunite(server_stream).expect("reunite socket"),
-            Arc::clone(&server),
+            server.track_socket_task(),
             "127.0.0.1:45568".parse().unwrap(),
             None,
             3,
@@ -5160,7 +5286,7 @@ mod tests {
         } = UpgradedSocketPair::connect().await;
         let mut handler = tokio::spawn(handle_socket(
             server_sink.reunite(server_stream).expect("reunite socket"),
-            Arc::clone(&server),
+            server.track_socket_task(),
             "127.0.0.1:45569".parse().unwrap(),
             None,
             3,
@@ -5305,7 +5431,7 @@ mod tests {
         let socket = server_sink.reunite(server_stream).expect("reunite socket");
         let handler = tokio::spawn(handle_socket(
             socket,
-            Arc::clone(&server),
+            server.track_socket_task(),
             "127.0.0.1:45556".parse().unwrap(),
             None,
             3,
@@ -5331,7 +5457,7 @@ mod tests {
             } = UpgradedSocketPair::connect().await;
             let original_handler = tokio::spawn(handle_socket(
                 server_sink.reunite(server_stream).expect("original socket"),
-                Arc::clone(&server),
+                server.track_socket_task(),
                 "127.0.0.1:45559".parse().unwrap(),
                 None,
                 3,
@@ -5531,7 +5657,7 @@ mod tests {
         let socket = server_sink.reunite(server_stream).expect("reunite socket");
         let mut handler = tokio::spawn(handle_socket(
             socket,
-            Arc::clone(&server),
+            server.track_socket_task(),
             addr,
             None,
             3,
@@ -5666,7 +5792,7 @@ mod tests {
         let socket = server_sink.reunite(server_stream).expect("reunite socket");
         let handler = tokio::spawn(handle_socket(
             socket,
-            Arc::clone(&server),
+            server.track_socket_task(),
             "127.0.0.1:45557".parse().unwrap(),
             None,
             2,
@@ -5718,7 +5844,7 @@ mod tests {
             let socket = server_sink.reunite(server_stream).expect("reunite socket");
             let handler = tokio::spawn(handle_socket(
                 socket,
-                Arc::clone(&server),
+                server.track_socket_task(),
                 "127.0.0.1:45558".parse().unwrap(),
                 None,
                 2,

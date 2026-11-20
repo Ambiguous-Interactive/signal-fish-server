@@ -473,6 +473,7 @@ pub struct LiveStateSample {
 }
 
 use dashboard_cache::{DashboardMetricsCache, DashboardMetricsView};
+pub(crate) use shutdown::SocketTaskGuard;
 pub use shutdown::{run_drain_choreography, ShutdownDrain};
 use spectator_service::SpectatorService;
 
