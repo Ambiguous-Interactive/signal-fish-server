@@ -20191,7 +20191,8 @@ and must decline restore. This advances A17. #826 stays open.
 
 ### F421 — A later drain caller could extend shutdown grace
 
-On `ad06ba03`, an embedder starts drain with a 30-second grace. A later
+On `ad06ba03b450190621b68a44eb5ef71e16c859d1`, the embedder starts a
+30-second shutdown grace. A later
 caller enters the public drain routine after 20 seconds on the server's
 monotonic clock. Wall time has barely advanced. The client is still active,
 but the routine misses the original close deadline by the 5 ms test bound
