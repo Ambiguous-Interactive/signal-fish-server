@@ -392,7 +392,7 @@ async fn test_opt_in_rkyv_and_protobuf_negotiate_and_advertise() {
     running_server.shutdown().await;
 }
 
-async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver) -> Vec<u8> {
+async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver, seq: u64) -> Vec<u8> {
     tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
         loop {
             match receiver.next().await {
@@ -428,7 +428,7 @@ async fn receive_binary_game_data_wire_frame(receiver: &mut WsReceiver) -> Vec<u
         }
     })
     .await
-    .expect("timeout waiting for binary game data")
+    .unwrap_or_else(|_| panic!("timeout waiting for binary relay {seq} at the idle recipient"))
 }
 
 #[tokio::test]
@@ -741,8 +741,10 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
     for protocol_version in [None, Some(3)] {
         // Keep the server handle's metrics so the relay's delivery-conservation
         // law can be asserted once the broadcast has been observed.
-        let game_server =
-            create_test_server_with_config(test_server_config(), test_protocol_config()).await;
+        let mut config = test_server_config();
+        // No recipient traffic after the join, including automatic Pong replies.
+        config.websocket_config.server_ping_interval_secs = 0;
+        let game_server = create_test_server_with_config(config, test_protocol_config()).await;
         let metrics = game_server.metrics();
         let running_server = start_server_with_instance(game_server).await;
         let addr = running_server.addr();
@@ -787,38 +789,46 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
             .await
             .unwrap();
 
-        let payload = vec![0x01, 0x02, 0x03, 0x04];
-        sender1
-            .send(Message::Binary(payload.clone().into()))
-            .await
-            .unwrap();
+        for (seq, payload) in [(1, vec![0x01, 0x02, 0x03, 0x04]), (2, vec![0xc1; 296])] {
+            if seq == 2 {
+                // Issue #1751: send again after the join burst has drained and
+                // the recipient has spent time idle. The recipient only reads.
+                tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+            }
+            sender1
+                .send(Message::Binary(payload.clone().into()))
+                .await
+                .expect("send binary game data");
 
-        let wire = receive_binary_game_data_wire_frame(&mut receiver2).await;
-        if protocol_version == Some(3) {
-            assert_eq!(
-                decode_v3_binary_game_data(&wire).expect("strict v3 MessagePack game-data frame"),
-                V3BinaryGameDataFrame {
-                    from_player: player1_id,
-                    encoding: GameDataEncoding::MessagePack,
-                    payload,
-                    seq: 1,
-                    epoch: 1,
-                }
-            );
-        } else {
-            let frame: LegacyBinaryGameDataFrame =
-                rmp_serde::from_slice(&wire).expect("legacy MessagePack game-data frame");
-            assert_eq!(
-                frame,
-                LegacyBinaryGameDataFrame {
-                    from_player: player1_id,
-                    encoding: GameDataEncoding::MessagePack,
-                    payload,
-                }
-            );
+            let wire = receive_binary_game_data_wire_frame(&mut receiver2, seq).await;
+            if protocol_version == Some(3) {
+                assert_eq!(
+                    decode_v3_binary_game_data(&wire)
+                        .expect("strict v3 MessagePack game-data frame"),
+                    V3BinaryGameDataFrame {
+                        from_player: player1_id,
+                        encoding: GameDataEncoding::MessagePack,
+                        payload,
+                        seq,
+                        epoch: 1,
+                    }
+                );
+            } else {
+                let frame: LegacyBinaryGameDataFrame =
+                    rmp_serde::from_slice(&wire).expect("legacy MessagePack game-data frame");
+                assert_eq!(
+                    frame,
+                    LegacyBinaryGameDataFrame {
+                        from_player: player1_id,
+                        encoding: GameDataEncoding::MessagePack,
+                        payload,
+                    }
+                );
+            }
         }
 
         websocket_test_helpers::assert_message_conservation(&metrics).await;
+        drop((sender1, receiver1, sender2, receiver2));
         running_server.shutdown().await;
     }
 }
