@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Finish shutdown early once all WebSockets and pending upgrades have ended (#826).
 - Start WebSocket shutdown when a peer disconnects or a socket task fails, even while room cleanup waits (#826).
 - Release closing WebSockets waiting on an unsupported room operation error (#826).
 - Let closing WebSockets stop waiting for replies to refused ready and start commands (#826).

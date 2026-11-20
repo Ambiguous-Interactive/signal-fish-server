@@ -408,6 +408,51 @@ async fn multiprocess_sigterm_gracefully_drains_with_goingaway_and_4000() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn multiprocess_sigterm_exits_after_last_websocket_leaves_during_grace() {
+    const GRACE_SECS: u64 = 60;
+    let mut server = spawn_server(json!({
+        "server": { "drain_grace_secs": GRACE_SECS }
+    }))
+    .await;
+    let mut peer = connect_client(server.port).await;
+    authenticate_v3(&mut peer).await;
+    join_room(&mut peer, "mp-drain-early-exit", None, "DrainPeer", 2).await;
+
+    // Bound the whole exchange from before SIGTERM. A delayed advisory or
+    // client close must not let the full 60-second grace pass the test.
+    let exit_deadline = deadline_after(SOCKET_CLOSE_TIMEOUT);
+    server.send_sigterm();
+    let status = tokio::time::timeout_at(exit_deadline, async {
+        next_matching_server_message_within(
+            &mut peer,
+            SOCKET_CLOSE_TIMEOUT,
+            "shutdown GoingAway",
+            |message| match message {
+                ServerMessage::GoingAway {
+                    retry_after_secs, ..
+                } => {
+                    assert_eq!(retry_after_secs, Some(GRACE_SECS));
+                    Some(())
+                }
+                _ => None,
+            },
+        )
+        .await;
+        peer.close(None).await.expect("client close must succeed");
+        drop(peer);
+        server.wait_for_exit().await
+    })
+    .await
+    .expect("server must exit before the advertised grace expires");
+    assert!(
+        tokio::time::Instant::now() < exit_deadline,
+        "server exit must be observed before the overall deadline"
+    );
+    assert!(status.success(), "server must exit cleanly, got {status}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn multiprocess_server_restart_invalidates_reconnect_tokens() {
     let mut server = spawn_server(config_overlay("mesh")).await;

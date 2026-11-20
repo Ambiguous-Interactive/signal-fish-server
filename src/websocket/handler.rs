@@ -207,14 +207,17 @@ async fn websocket_handler_with_default(
         );
     }
 
-    if server.is_draining() {
-        return finish_upgrade_response(
+    let reject_draining = || {
+        finish_upgrade_response(
             &server,
             addr,
             &request_id,
             UpgradeOutcome::RejectedDraining,
             (StatusCode::SERVICE_UNAVAILABLE, "server is draining").into_response(),
-        );
+        )
+    };
+    if server.is_draining() {
+        return reject_draining();
     }
 
     let token_binding_cfg = server.token_binding_config().clone();
@@ -273,7 +276,11 @@ async fn websocket_handler_with_default(
         ws
     };
 
-    let socket_server = Arc::clone(&server);
+    // Axum can defer the upgrade task after the response leaves this
+    // handler. Capture the guard now so shutdown accounts for that wait.
+    let Some(socket_task) = server.try_track_socket_upgrade() else {
+        return reject_draining();
+    };
     let failure_server = Arc::clone(&server);
     let failure_request_id = request_id.clone();
     let socket_request_id = request_id.clone();
@@ -297,7 +304,7 @@ async fn websocket_handler_with_default(
         .on_upgrade(move |socket| {
             handle_socket(
                 socket,
-                socket_server,
+                socket_task,
                 addr,
                 binding_session,
                 default_protocol_version,

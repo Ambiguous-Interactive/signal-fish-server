@@ -75,7 +75,8 @@ For the supported single-active deployment:
 2. Before planned maintenance, remove the process from new connection routing.
 3. Send `SIGTERM` (or Ctrl-C) and allow at least `server.drain_grace_secs`.
 4. The server rejects new upgrades, sends v3 `GoingAway`, and closes remaining
-   sockets with `4000 server_shutdown`.
+   sockets with `4000 server_shutdown` at the end of the grace period. If every
+   WebSocket handler finishes during grace, the server can exit earlier.
 5. Clients create or join a fresh room after drain; they must not reconnect to
    the exiting process, and the drain deliberately does not arm reconnect state.
 
