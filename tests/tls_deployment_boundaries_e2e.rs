@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use hyper_util::rt::TokioIo;
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::{pem::PemObject, CertificateDer, ServerName};
 use serde_json::{json, Value};
@@ -75,6 +76,16 @@ impl SpawnedServer {
 
     fn stderr(&self) -> String {
         std::fs::read_to_string(&self.stderr_path).unwrap_or_default()
+    }
+
+    fn send_sigterm(&self) {
+        // Tokio exposes only SIGKILL. Use the system command to send SIGTERM.
+        let pid = self.child.id().expect("server child pid");
+        let delivered = std::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .status()
+            .expect("run kill -TERM");
+        assert!(delivered.success(), "deliver SIGTERM to the server");
     }
 
     /// Poll until the process exits or `bound` elapses.
@@ -255,17 +266,29 @@ async fn spawn_ready_tls_server(make_config: impl Fn() -> Value) -> SpawnedServe
     );
 }
 
-async fn connect_wss(port: u16) -> TestSocket {
+async fn connect_tls(port: u16, config: Arc<ClientConfig>) -> TlsStream<TcpStream> {
     let tcp = TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connect TLS socket");
-    let tls = TlsConnector::from(client_config())
+    TlsConnector::from(config)
         .connect(
             ServerName::try_from("localhost").expect("valid test server name"),
             tcp,
         )
         .await
-        .expect("complete TLS handshake");
+        .expect("complete TLS handshake")
+}
+
+async fn connect_h2_tls(port: u16) -> TlsStream<TcpStream> {
+    let mut config = (*client_config()).clone();
+    config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls = connect_tls(port, Arc::new(config)).await;
+    assert_eq!(tls.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+    tls
+}
+
+async fn connect_wss(port: u16) -> TestSocket {
+    let tls = connect_tls(port, client_config()).await;
     let request = format!("wss://localhost:{port}/v2/ws")
         .into_client_request()
         .expect("build WebSocket request");
@@ -276,7 +299,10 @@ async fn connect_wss(port: u16) -> TestSocket {
 }
 
 /// Next server protocol message, skipping non-text control frames.
-async fn next_server_message(socket: &mut TestSocket) -> ServerMessage {
+async fn next_server_message<S>(socket: &mut WebSocketStream<S>) -> ServerMessage
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let frame = tokio::time::timeout(FRAME_DEADLINE, socket.next())
             .await
@@ -293,7 +319,10 @@ async fn next_server_message(socket: &mut TestSocket) -> ServerMessage {
 /// Drain frames until the server's close frame arrives; return the observed
 /// `(code, reason)`. A bare termination is exactly the anti-pattern this
 /// suite exists to forbid.
-async fn read_close_frame(socket: &mut TestSocket, context: &str) -> (u16, String) {
+async fn read_close_frame<S>(socket: &mut WebSocketStream<S>, context: &str) -> (u16, String)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let frame = tokio::time::timeout(FRAME_DEADLINE, socket.next())
             .await
@@ -315,7 +344,10 @@ async fn read_close_frame(socket: &mut TestSocket, context: &str) -> (u16, Strin
 /// Drain frames until the v3 `GoingAway` advisory arrives. Unrelated
 /// application traffic (pings, relay stats) may interleave; a close before
 /// the advisory is a contract violation.
-async fn read_going_away(socket: &mut TestSocket) -> (u64, Option<u64>) {
+async fn read_going_away<S>(socket: &mut WebSocketStream<S>) -> (u64, Option<u64>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let frame = tokio::time::timeout(FRAME_DEADLINE, socket.next())
             .await
@@ -335,7 +367,10 @@ async fn read_going_away(socket: &mut TestSocket) -> (u64, Option<u64>) {
     }
 }
 
-async fn authenticate_v3(socket: &mut TestSocket) {
+async fn authenticate_v3<S>(socket: &mut WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let auth = ClientMessage::Authenticate {
         app_id: "tls-drain-test".to_string(),
         connect_token: None,
@@ -362,7 +397,10 @@ async fn authenticate_v3(socket: &mut TestSocket) {
     );
 }
 
-async fn join_room(socket: &mut TestSocket) {
+async fn join_room<S>(socket: &mut WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let join = ClientMessage::JoinRoom {
         game_name: "tls-drain-game".to_string(),
         room_code: Some("TLSDRN".to_string()),
@@ -408,17 +446,7 @@ async fn shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded() {
     join_room(&mut socket).await;
 
     let sigterm_unix_ms = unix_epoch_ms_now();
-    // tokio's process API offers only SIGKILL, and `unsafe` is forbidden in
-    // this crate, so deliver SIGTERM through the system `kill` binary.
-    let pid = server.child.id().expect("server child pid");
-    let delivered = std::process::Command::new("kill")
-        .args(["-TERM", &pid.to_string()])
-        .status()
-        .expect("run kill -TERM");
-    assert!(
-        delivered.success(),
-        "SIGTERM must be delivered to the server process"
-    );
+    server.send_sigterm();
 
     // 1. The best-effort v3 advisory arrives first, anchored at the drain.
     let (deadline_ms, retry_after_secs) = read_going_away(&mut socket).await;
@@ -450,6 +478,101 @@ async fn shutdown_drain_over_tls_advises_then_closes_4000_and_exits_bounded() {
         status.success(),
         "a completed drain must exit cleanly (status {status})"
     );
+}
+
+#[tokio::test]
+async fn tls_listener_refuses_tcp_during_websocket_grace() {
+    const GRACE: Duration = Duration::from_secs(6);
+    let config = || {
+        let mut config = tls_server_config(&fixture("server-cert.pem"), &fixture("server-key.pem"));
+        config["server"]["drain_grace_secs"] = json!(GRACE.as_secs());
+        config
+    };
+    let mut server = spawn_ready_tls_server(config).await;
+    let port = server.port;
+    let (mut h2, driver) = tokio::time::timeout(CONNECT_DEADLINE, async {
+        test_helpers::open_h2(connect_h2_tls(port).await).await
+    })
+    .await
+    .expect("connect TLS HTTP/2");
+    let request = hyper::Request::builder()
+        .method(hyper::Method::CONNECT)
+        .uri(format!("https://localhost:{port}/v3/ws"))
+        .header("sec-websocket-version", "13")
+        .extension(hyper::ext::Protocol::from_static("websocket"))
+        .body(axum::body::Body::empty())
+        .expect("extended CONNECT request");
+    let response = tokio::time::timeout(FRAME_DEADLINE, h2.send_request(request))
+        .await
+        .expect("extended CONNECT response deadline")
+        .expect("extended CONNECT response");
+    assert_eq!(response.status(), hyper::StatusCode::OK);
+    let upgraded = hyper::upgrade::on(response).await.expect("h2 upgrade");
+    let mut socket = WebSocketStream::from_raw_socket(
+        TokioIo::new(upgraded),
+        tokio_tungstenite::tungstenite::protocol::Role::Client,
+        None,
+    )
+    .await;
+    authenticate_v3(&mut socket).await;
+    join_room(&mut socket).await;
+
+    let shutdown_started = tokio::time::Instant::now();
+    server.send_sigterm();
+    let (_, retry_after_secs) = read_going_away(&mut socket).await;
+    assert_eq!(retry_after_secs, Some(GRACE.as_secs()));
+
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => break,
+                Err(error) => panic!("expected TCP refusal during grace, got {error}"),
+                Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+            }
+        }
+    })
+    .await
+    .expect("fresh TCP connections still succeed during WebSocket grace");
+
+    let ping = b"during grace".as_slice();
+    socket
+        .send(Message::Ping(ping.to_vec().into()))
+        .await
+        .expect("send Ping during grace");
+    let pong = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Pong(payload))) => break payload,
+                Some(Ok(Message::Close(close))) => panic!("socket closed during grace: {close:?}"),
+                Some(Ok(_)) => continue,
+                other => panic!("socket lost during grace: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("receive Pong during grace");
+    assert_eq!(pong.as_ref(), ping);
+    assert_eq!(
+        read_close_frame(&mut socket, "TLS listener drain").await,
+        (4000, "server_shutdown".to_string())
+    );
+    assert!(shutdown_started.elapsed() >= GRACE, "full WebSocket grace");
+    socket.flush().await.expect("flush coded close response");
+    drop(socket);
+    assert!(server.wait_for_exit(EXIT_BOUND).await.success());
+    drop(driver);
+
+    let mut replacement = spawn_ready_tls_server(|| {
+        let mut config = config();
+        config["port"] = json!(port);
+        config
+    })
+    .await;
+    let mut socket = connect_wss(replacement.port).await;
+    authenticate_v3(&mut socket).await;
+    socket.close(None).await.expect("close replacement client");
+    replacement.send_sigterm();
+    assert!(replacement.wait_for_exit(EXIT_BOUND).await.success());
 }
 
 /// A bind conflict aborts with a non-zero exit and no "Server started"
@@ -550,19 +673,13 @@ async fn authenticate_binary_aliases(tls: bool) {
         server
     };
     for path in ["/v2/ws", "/v3/ws"] {
-        let tcp = TcpStream::connect(("127.0.0.1", server.port))
-            .await
-            .expect("connect h2 socket");
         if tls {
-            let mut config = (*client_config()).clone();
-            config.alpn_protocols = vec![b"h2".to_vec()];
-            let stream = TlsConnector::from(Arc::new(config))
-                .connect(ServerName::try_from("localhost").unwrap(), tcp)
-                .await
-                .expect("negotiate h2 TLS");
-            assert_eq!(stream.get_ref().1.alpn_protocol(), Some(b"h2".as_slice()));
+            let stream = connect_h2_tls(server.port).await;
             test_helpers::authenticate_over_h2(stream, server.port, path, "https").await;
         } else {
+            let tcp = TcpStream::connect(("127.0.0.1", server.port))
+                .await
+                .expect("connect h2 socket");
             test_helpers::authenticate_over_h2(tcp, server.port, path, "http").await;
         }
     }

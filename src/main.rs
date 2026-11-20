@@ -13,6 +13,9 @@ use tokio::sync::watch;
 
 use std::fmt::Write as _;
 
+#[cfg(feature = "tls")]
+mod tls_listener;
+
 /// Signal Fish -- lightweight WebSocket signaling server for P2P game networking
 #[derive(Parser, Debug)]
 #[command(name = "signal-fish-server")]
@@ -505,31 +508,22 @@ async fn main() -> anyhow::Result<()> {
                 .map_err(|err| anyhow::anyhow!("failed to initialize TLS configuration: {err}"))?;
 
         let tls_handle = axum_server::Handle::new();
-        let tls_shutdown_handle = tls_handle.clone();
-        let tls_drain_done_rx = drain_done_rx.clone();
-        tokio::spawn(async move {
-            // Arm the bounded graceful shutdown only when the choreography
-            // has COMPLETED (sender drop on a panicked drain releases this
-            // too): arming at the process-watch flip would force-close every
-            // connection before the choreography's grace wait and coded
-            // `4000` close step even run.
-            wait_for_shutdown(tls_drain_done_rx).await;
-            // Bounded, not unbounded: `None` waits for *every* connection to
-            // end, and a stalled client (e.g. one parked mid-handshake with
-            // partial bytes buffered) never ends, so the serve future — and
-            // the process — would hang forever after a completed drain.
-            tls_shutdown_handle.graceful_shutdown(Some(post_drain_settle_budget));
-        });
-
-        let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?
-            .into_std()?;
-        let mut server = axum_server::from_tcp_rustls(listener, tls_config)?
+        let listener = websocket::bind_tcp_listener(addr, cfg.websocket.socket_send_buffer_bytes)?;
+        let listener = tls_listener::DrainableTlsListener::new(
+            listener,
+            shutdown_rx.clone(),
+            drain_done_rx,
+            tls_handle.clone(),
+            post_drain_settle_budget,
+        )?;
+        let mut server = axum_server::Server::from_listener(listener)
             // Disable Nagle on the raw TCP stream before the TLS handshake (#197).
-            .map(|rustls| {
+            .acceptor(
                 signal_fish_server::security::VerifiedClientCertificateAcceptor::new(
-                    rustls.acceptor(websocket::ConfiguredAcceptor),
-                )
-            })
+                    axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
+                        .acceptor(websocket::ConfiguredAcceptor),
+                ),
+            )
             .handle(tls_handle);
         // Arm the pre-upgrade header-read deadline on the TLS path too:
         // axum-server also leaves hyper's Timer unset, so its header-read

@@ -60,7 +60,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36; interrupted heartbeat retry in F224 |
-| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12; idle grace after socket teardown repaired in F420; shared monotonic grace repaired in F421; embedded HTTP shutdown wait bounded in F422; plain TCP listener release repaired in F423 |
+| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12; idle grace after socket teardown repaired in F420; shared monotonic grace repaired in F421; embedded HTTP shutdown wait bounded in F422; listener release repaired for plain TCP in F423 and TLS in F424 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197; premature native rebuild success in F198 |
@@ -20278,3 +20278,25 @@ the TCP refusal, delay an advisory, or lose a close frame. A new connection on
 a restarted or separate home can authenticate, but that home must decline
 restore when it lacks the recovery record. This advances A17 and A18.
 Issue #826 stays open.
+
+### F424 — The TLS listener accepted fresh TCP connections during WebSocket grace
+
+On `01ac719786adf84d7e823ce5422bd35e57e4fb9a`, a seated v3 client receives
+`GoingAway` over HTTP/2 WSS after SIGTERM. Fresh loopback TCP connections
+still succeed for the next three seconds of its six-second grace. Linux
+ARM64 Nextest `80ac8ac3` fails at the TCP refusal assertion. The TLS accept
+loop stops only after the WebSocket drain finishes.
+
+The TLS accept loop now drops its listening socket at the drain signal.
+Accepted connections keep their existing shutdown sequence. The live
+HTTP/2 WebSocket exchanges Ping and Pong after fresh TCP dials are refused.
+It receives `4000 server_shutdown` after the full grace. The process exits
+and a new server authenticates a fresh WSS client on the same port. The
+final control passes on Linux ARM64 in Nextest `fa4c69c0`.
+
+The home process owns room state and orders admitted operations. It refuses
+new upgrades and room restores during drain, including requests on previously
+accepted connections. A partition or proxy can delay or hide connection
+refusal, the advisory, or the close frame. A restarted or separate server
+must decline restore when it lacks the original recovery record. This
+advances A17 and A18. Issue #826 stays open.

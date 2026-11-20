@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refuse new TCP connections on the TLS port during WebSocket shutdown grace (#826).
 - Refuse new plain TCP connections before accepted HTTP connections start draining (#826).
 - Finish embedded server shutdown when an HTTP peer stops responding (#826).
 - Honor the first shutdown grace deadline across callers and keep the wait finite (#826).
