@@ -225,7 +225,7 @@ exclude = [
 lychee --config .lychee.toml './**/*.md'
 
 # Auto-fix markdown issues
-markdownlint-cli2 --fix '**/*.md' '#target/**'
+bash scripts/check-markdown.sh fix
 ```
 
 ---

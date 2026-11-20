@@ -1,0 +1,86 @@
+[global]
+# Keep the existing Markdownlint rule set on upgrades.
+enable = [
+  "MD001", "MD003", "MD004", "MD005", "MD007", "MD009", "MD010", "MD011",
+  "MD012", "MD013", "MD014", "MD018", "MD019", "MD020", "MD021", "MD022",
+  "MD023", "MD024", "MD025", "MD026", "MD027", "MD028", "MD029", "MD030",
+  "MD031", "MD032", "MD033", "MD034", "MD035", "MD036", "MD037", "MD038",
+  "MD039", "MD040", "MD042", "MD043", "MD044", "MD045", "MD046", "MD047",
+  "MD048", "MD049", "MD050", "MD051", "MD052", "MD053", "MD054", "MD055",
+  "MD056", "MD058", "MD059",
+]
+
+[MD003]
+style = "atx"
+
+[MD004]
+style = "dash"
+
+[MD007]
+indent = 2
+start-indent = 2
+start-indented = false
+style = "fixed"
+
+[MD010]
+code-blocks = true
+spaces-per-tab = 2
+
+[MD012]
+maximum = 1
+
+[MD013]
+heading-line-length = 120
+code-block-line-length = 120
+code-blocks = true
+headings = true
+line-length = 120
+strict = false
+tables = false
+
+[MD022]
+lines-above = 1
+lines-below = 1
+
+[MD024]
+siblings-only = true
+
+[MD026]
+punctuation = ".,;:!"
+
+[MD029]
+style = "ordered"
+
+[MD030]
+ol-multi = 1
+ol-single = 1
+ul-multi = 1
+ul-single = 1
+
+[MD031]
+list-items = true
+
+[MD033]
+allowed-elements = ["details", "summary", "br", "sub", "sup", "img", "a", "p"]
+
+[MD035]
+style = "---"
+
+[MD044]
+html-comments = false
+ignore-frontmatter-fields = ["name"]
+code-blocks = false
+html-elements = false
+names = ["JavaScript", "GitHub", "WebSocket", "Rust", "Docker", "CI/CD"]
+
+[MD046]
+style = "fenced"
+
+[MD048]
+style = "backtick"
+
+[MD049]
+style = "underscore"
+
+[MD050]
+style = "asterisk"

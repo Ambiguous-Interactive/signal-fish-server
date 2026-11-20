@@ -232,6 +232,17 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     && cargo mutants --version \
     && cargo fuzz --help >/dev/null
 
+# Install rumdl separately so a pin change reuses the other tool layers.
+COPY .rumdl-version /tmp/signal-fish-rumdl-version
+RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
+    case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+    amd64) rumdl_target="x86_64-unknown-linux-musl" ;; \
+    arm64) rumdl_target="aarch64-unknown-linux-musl" ;; \
+    *) echo "Unsupported rumdl architecture" >&2; exit 1 ;; \
+    esac \
+    && BINSTALL_STRATEGIES=crate-meta-data cargo binstall --no-confirm --locked --target "$rumdl_target" "rumdl@$(cat /tmp/signal-fish-rumdl-version)" \
+    && rumdl --version
+
 # Cache mounts above are external to the image. Remove any registry state
 # inherited from the base image so the final development image stays lean.
 RUN rm -rf /usr/local/cargo/registry/cache \

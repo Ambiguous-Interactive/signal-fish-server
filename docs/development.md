@@ -362,7 +362,7 @@ Common markdown linting rules enforced by CI:
 - **MD013**: Lines should not exceed 120 characters (except tables)
 - **MD044**: Proper capitalization of technical terms (JavaScript, GitHub, WebSocket, etc.)
 
-See `.markdownlint.json` for the complete rule configuration.
+See `.rumdl.toml` for the complete rule configuration.
 
 ### Spell Checking
 

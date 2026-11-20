@@ -97,7 +97,8 @@ The following paths are classified as internal (no CHANGELOG entry required):
   under `src/` or `clients/native/src/`; these files contain test code only.
 - **Standalone files:** `Cargo.lock`, root tooling `package.json`/`package-lock.json`,
   `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
-- **Lint/tool configs:** `.markdownlint*`, `.lychee.toml`, `.lycheecache`, `.typos.toml`, `.yamllint.yml`
+- **Lint/tool configs:** `.rumdl.toml`, `.rumdl-version`, legacy `.markdownlint*`,
+  `.lychee.toml`, `.lycheecache`, `.typos.toml`, `.yamllint.yml`
 - **VCS/Docker ignores:** `.gitignore`, `.dockerignore`
 - **Build tool configs:** `clippy.toml`, `deny.toml`, `tarpaulin.toml`, `rust-toolchain.toml`, `mkdocs.yml`, `requirements-docs.txt`
 

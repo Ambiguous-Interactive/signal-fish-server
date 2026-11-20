@@ -227,13 +227,13 @@ assert_eq!(toolchain_version, msrv);
 // ✅ GOOD: Test configuration requirements
 #[test]
 fn test_markdownlint_config_exists() {
-    assert!(Path::new(".markdownlint.json").exists());
+    assert!(Path::new(".rumdl.toml").exists());
 }
 
 // ❌ BAD: Test implementation details (too brittle)
 #[test]
 fn test_markdownlint_config_exact_content() {
-    let content = read_file(".markdownlint.json");
+    let content = read_file(".rumdl.toml");
     assert_eq!(content, r#"{"MD040": true}"#); // Breaks on any whitespace change
 }
 ```

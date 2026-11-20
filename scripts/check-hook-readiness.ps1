@@ -117,25 +117,20 @@ if ($WorkflowTools) {
         }
     }
 
-    if (Test-Path -LiteralPath ".markdownlint-version") {
-        $requiredMarkdownlint = (Get-Content -LiteralPath ".markdownlint-version" -Raw).Trim()
-        $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2"
-        if ($IsWindows) {
-            $localMarkdownlint = Join-Path $repoRoot "node_modules/.bin/markdownlint-cli2.cmd"
-        }
-
-        if (Test-Path -LiteralPath $localMarkdownlint) {
-            $version = (& $localMarkdownlint --version 2>$null) -join "`n"
-            if ($version -match [regex]::Escape($requiredMarkdownlint)) {
-                Ok "Pinned markdownlint-cli2 $requiredMarkdownlint is installed locally."
+    if (Test-Path -LiteralPath ".rumdl-version") {
+        $requiredRumdl = (Get-Content -LiteralPath ".rumdl-version" -Raw).Trim()
+        if (Command-Exists "rumdl") {
+            $version = (& rumdl --version 2>$null) -join "`n"
+            if ($version -eq "rumdl $requiredRumdl") {
+                Ok "Pinned rumdl $requiredRumdl is available."
             } else {
-                Warn "Local markdownlint-cli2 version does not match .markdownlint-version ($requiredMarkdownlint)."
+                Warn "Local rumdl version does not match .rumdl-version ($requiredRumdl)."
             }
         } else {
-            Warn "Pinned markdownlint-cli2 is not installed locally. Run npm ci before local CI checks."
+            Warn "Install rumdl $requiredRumdl before running local CI checks."
         }
     } else {
-        Warn ".markdownlint-version is missing."
+        Warn ".rumdl-version is missing."
     }
 }
 

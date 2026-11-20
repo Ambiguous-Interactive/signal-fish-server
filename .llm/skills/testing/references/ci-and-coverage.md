@@ -225,12 +225,11 @@ fn test_lychee_config_exists() {
 
 #[test]
 fn test_markdownlint_config_exists() {
-    let config = repo_root().join(".markdownlint.json");
+    let config = repo_root().join(".rumdl.toml");
 
     assert!(
         config.exists(),
-        ".markdownlint.json is required for markdown linting.\n\
-         Create with: echo '{{\"MD040\": true, \"MD013\": false}}' > .markdownlint.json"
+        ".rumdl.toml is required for Markdown linting."
     );
 }
 

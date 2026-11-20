@@ -140,7 +140,16 @@ IS_NODE_PROJECT=false
 
 [ -f "Cargo.toml" ] && IS_RUST_PROJECT=true
 [ -f "requirements.txt" ] || [ -f "requirements-docs.txt" ] || [ -f "Pipfile" ] || [ -f "pyproject.toml" ] && IS_PYTHON_PROJECT=true
-[ -f "package.json" ] && IS_NODE_PROJECT=true
+if [ -f package.json ]; then
+    IS_NODE_PROJECT=true
+else
+    while IFS= read -r -d '' manifest; do
+        if [ -f "$manifest" ]; then
+            IS_NODE_PROJECT=true
+            break
+        fi
+    done < <(git ls-files -z -- '*/package.json')
+fi
 
 info "Project type detection:"
 info "  Rust: $IS_RUST_PROJECT"

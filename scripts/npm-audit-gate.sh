@@ -4,7 +4,7 @@
 #
 # Fails on any npm audit advisory that is not explicitly accepted for the
 # audited npm graph. This mirrors deny.toml's documented advisory ignore for
-# the npm graphs in this repository (root tooling, browser reference client).
+# the npm graphs in this repository (browser reference client, encoding study).
 #
 # Why not plain `npm audit`? npm has no advisory-ignore mechanism, so a single
 # unfixable advisory (no patched release exists upstream) would keep the gate
@@ -22,7 +22,7 @@
 # must never be swallowed behind a retry loop's exit status).
 #
 # Usage:
-#   bash scripts/npm-audit-gate.sh root       # audit the repository root graph
+#   bash scripts/npm-audit-gate.sh encoding   # audit the encoding study graph
 #   bash scripts/npm-audit-gate.sh browser    # audit the browser client graph
 #
 # Exit codes:
@@ -36,28 +36,14 @@ set -euo pipefail
 # justification and a revisit date, in the same spirit as deny.toml's
 # [advisories] ignore. An entry must still be reported by `npm audit` for its
 # graph; when an advisory disappears, remove the entry.
-ROOT_ALLOWED_ADVISORIES=(
-    # GHSA-238p-pmpm-9mq7 (katex 0.11.0-0.18.1, prototype pollution can bypass
-    # trust restrictions): the chain markdownlint-cli2 -> markdownlint ->
-    # micromark-extension-math 3.1.0 (latest) pins katex ^0.16.0, and every
-    # patched katex (0.18.2+) is outside that range, so the fix is unreachable
-    # without an upstream release. Dev tooling only: markdownlint lints
-    # maintainer-controlled repository markdown and never renders katex output
-    # to a consumer. Revisit by 2026-12-01.
-    "GHSA-238p-pmpm-9mq7"
-)
 BROWSER_ALLOWED_ADVISORIES=()
 
 GRAPH="${1:-}"
 if [ "$#" -gt 1 ]; then
-    echo "Usage: $0 [root|browser|encoding]" >&2
+    echo "Usage: $0 [browser|encoding]" >&2
     exit 2
 fi
 case "$GRAPH" in
-    root)
-        ALLOWED_ADVISORIES=("${ROOT_ALLOWED_ADVISORIES[@]+"${ROOT_ALLOWED_ADVISORIES[@]}"}")
-        GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-        ;;
     browser)
         ALLOWED_ADVISORIES=("${BROWSER_ALLOWED_ADVISORIES[@]+"${BROWSER_ALLOWED_ADVISORIES[@]}"}")
         GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/clients/browser"
@@ -67,7 +53,7 @@ case "$GRAPH" in
         GRAPH_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/benches/encoding/typescript"
         ;;
     *)
-        echo "Usage: $0 [root|browser|encoding]" >&2
+        echo "Usage: $0 [browser|encoding]" >&2
         exit 2
         ;;
 esac

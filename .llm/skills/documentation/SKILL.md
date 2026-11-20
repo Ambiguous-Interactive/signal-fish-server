@@ -179,8 +179,8 @@ Tables must have consistent column alignment:
 ./scripts/check-doc-consistency.sh
 ```
 
-Install the pinned markdownlint version for local checks:
-`npm install -g markdownlint-cli2@$(cat .markdownlint-version)`
+Install the pinned rumdl version for local checks:
+`cargo binstall --locked --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"`
 
 Git hooks are last-resort staged-file guards and do not run markdownlint.
 Run markdown checks through agent workflow, local CI, or GitHub CI.

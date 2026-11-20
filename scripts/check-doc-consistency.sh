@@ -923,13 +923,13 @@ is_internal_path() {
         third_party/rtc-sctp/src/*_tests.rs|third_party/rtc-sctp/src/*_test.rs|third_party/rtc-sctp/src/*/tests.rs|third_party/rtc/src/*_tests.rs|third_party/rtc/src/*_test.rs|third_party/rtc/src/*/tests.rs|third_party/webrtc/src/*_tests.rs|third_party/webrtc/src/*_test.rs|third_party/webrtc/src/*/tests.rs)
             return 0
             ;;
-        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md)
+        docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md|docs/adr/msrv-consistency-enforcement.md)
             return 0
             ;;
         Cargo.lock|package.json|package-lock.json|PLAN.md|AGENTS.md|CLAUDE.md|pre-push.txt|pre-commit.txt|logs_*.zip)
             return 0
             ;;
-        .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml)
+        .markdownlint*|.rumdl.toml|.rumdl-version|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml)
             return 0
             ;;
         .gitignore|.dockerignore)
