@@ -264,8 +264,9 @@ constant in `tests/ci_config_tests.rs`.
 ## VS Code Integration
 
 Recommended extensions for `.vscode/extensions.json`: `rvben.rumdl`,
-`streetsidesoftware.code-spell-checker`. Configure `.vscode/settings.json` to set
-`"MD040": true` and disable `"MD013": false`, and add technical terms to `cSpell.words`.
+`streetsidesoftware.code-spell-checker`. The rumdl extension reads the repository
+`.rumdl.toml`, which enables both MD040 and MD013. Add editor spelling terms to
+`cSpell.words` in `.vscode/settings.json`.
 
 ---
 

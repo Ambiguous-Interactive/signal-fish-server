@@ -38,6 +38,7 @@ esac
 files=()
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' file; do
+        [[ -f "$file" ]] || continue
         case "$file" in
             target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*|docs/generated/*|site/*) ;;
             *) files+=("./$file") ;;
