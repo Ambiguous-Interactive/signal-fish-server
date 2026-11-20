@@ -3152,6 +3152,9 @@ async fn handle_socket_supervised(
             }
         }
 
+        // Stop the live writer as soon as the reader exits. Room cleanup can
+        // wait for an admitted operation that still owns the socket lifecycle.
+        close_signal.request_close(CloseReason::Unregistered);
         let close_read_deadline = checked_deadline(
             close_signal.requested_at().unwrap_or_else(Instant::now),
             CLOSE_WRITE_TIMEOUT.saturating_mul(REGISTERED_SHUTDOWN_CLOSE_WRITE_STEPS),
