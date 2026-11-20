@@ -3205,10 +3205,13 @@ async fn handle_socket_supervised(
                     .get_mut(index)
                     .and_then(Option::take),
             );
-            // Enabled watchers belong to this connection. Losing one must
-            // close the socket rather than silently disable its service.
-            close_signal.request_close(CloseReason::Unregistered);
         }
+    }
+    // A failed socket half cannot signal its own close. An exited watcher
+    // also ends the connection. Wake the surviving tasks before ordered room
+    // cleanup can wait on the lifecycle gate.
+    if task_result.is_err() || matches!(completed_socket_task, CompletedSocketTask::Background(_)) {
+        close_signal.request_close(CloseReason::Unregistered);
     }
     let current_player_id = *effective_player_id.read().await;
     match task_result {
@@ -5388,7 +5391,21 @@ mod tests {
                 .player_id
         };
         #[cfg(signal_fish_repository_tests)]
-        let held_reader = if matches!(kind, SocketFailureKind::SupervisorPanic) {
+        let lifecycle_guard = if matches!(
+            kind,
+            SocketFailureKind::ReaderAbort | SocketFailureKind::WriterAbort
+        ) {
+            Some(physical_lifecycle.lock().await)
+        } else {
+            None
+        };
+        #[cfg(signal_fish_repository_tests)]
+        let cleanup_attempts = physical_lifecycle.lock_attempt_count_for_test();
+        #[cfg(signal_fish_repository_tests)]
+        let held_reader = if matches!(
+            kind,
+            SocketFailureKind::SupervisorPanic | SocketFailureKind::WriterAbort
+        ) {
             let pause = arm_receive_ownership_pause(player_id);
             client
                 .send(TungsteniteMessage::Text(
@@ -5404,8 +5421,49 @@ mod tests {
             None
         };
         injection.release.notify_one();
+        // Regression #826: a failed socket half cannot request its own close.
+        // Hold the lifecycle until the surviving half has stopped live work.
         #[cfg(signal_fish_repository_tests)]
-        if let Some(pause) = held_reader {
+        if let Some(guard) = lifecycle_guard {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                physical_lifecycle.wait_for_lock_attempt_after_for_test(cleanup_attempts),
+            )
+            .await
+            .expect("supervisor starts ordered cleanup");
+            if let Some(pause) = &held_reader {
+                pause.release.notify_one();
+                tokio::time::timeout(Duration::from_secs(5), pause.finished.notified())
+                    .await
+                    .expect("writer abort must release the selected Ping before cleanup");
+            } else {
+                let close = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let frame = client
+                            .next()
+                            .await
+                            .expect("close stream")
+                            .expect("close frame");
+                        if let TungsteniteMessage::Close(close) = frame {
+                            break close.expect("coded close");
+                        }
+                    }
+                })
+                .await
+                .expect("reader abort must send Close before cleanup");
+                assert_eq!(
+                    u16::from(close.code),
+                    CloseReason::Unregistered.websocket_close_code()
+                );
+            }
+            assert!(server.client_lifecycle(&player_id).is_some());
+            assert!(server.has_active_socket_tasks());
+            drop(guard);
+        }
+        #[cfg(signal_fish_repository_tests)]
+        if let Some(pause) =
+            held_reader.filter(|_| matches!(kind, SocketFailureKind::SupervisorPanic))
+        {
             tokio::time::timeout(Duration::from_secs(5), async {
                 while server.client_lifecycle(&player_id).is_some() {
                     tokio::task::yield_now().await;

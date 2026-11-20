@@ -20109,3 +20109,28 @@ close can still commit without its reply reaching the old socket. The home
 process orders that operation with departure and restore. A process without
 the home room and reconnect record must decline restore. Restart loses
 both records. This advances A04. #826 remains open.
+
+### F419 — A failed WebSocket task could hold the surviving half open
+
+At `d09177793d320534022d632744e38ad3d676c0a4`, two real v3 TCP tests abort
+the reader or writer task while holding the physical socket lifecycle lock.
+The supervisor reaches the lock while the old seat remains registered. After
+reader abort, the writer sends no Close within five seconds. After writer
+abort, a selected Ping stays blocked for five seconds. Both controls fail
+at those assertions in Linux ARM64 Nextest `ca2ddaeb`.
+
+The supervisor now requests physical socket close when either task returns a
+join error. The writer sends Close 1000 after reader abort and the reader
+releases the selected Ping after writer abort while the lifecycle is still
+held. Registration and task tracking remain until ordered cleanup can run.
+The existing close signal retains an earlier close reason and gives shutdown
+priority. The 14 all-feature socket controls pass on Linux ARM64 in Nextest
+`fdece30c`.
+
+The room's home process still orders admitted operations, departure and
+restore. A reply queued before close can reach the original socket. When the
+failed half owns the sink, the peer can see transport loss without a Close
+frame. A network partition can delay detection until transport or a timeout
+reports it. Early restore must wait for the home process to release the old
+seat and capture the recovery record. A restarted or separate process without
+the record must decline restoration. This advances A04. #826 stays open.
