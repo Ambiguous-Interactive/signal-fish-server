@@ -86,34 +86,59 @@ pub async fn serve_until(
     cors_origins: &str,
     shutdown: impl Future<Output = std::io::Result<()>> + Send + 'static,
 ) -> anyhow::Result<()> {
+    let timeouts = websocket::HttpServeTimeouts::production(Duration::from_secs(
+        game_server
+            .config()
+            .websocket_config
+            .http_header_read_timeout_secs,
+    ));
     let router = websocket::create_standalone_router(cors_origins).with_state(game_server.clone());
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut cleanup_shutdown_rx = shutdown_rx.clone();
     let cleanup_server = game_server.clone();
-    let cleanup = tokio::spawn(async move {
+    let mut cleanup = tokio::task::JoinSet::new();
+    cleanup.spawn(async move {
         cleanup_server
             .cleanup_task_until(async move {
-                let _ = shutdown_rx.wait_for(|stopping| *stopping).await;
+                let _ = cleanup_shutdown_rx.wait_for(|stopping| *stopping).await;
             })
             .await;
     });
-    let drain_server = game_server.clone();
-    let drain_shutdown_tx = shutdown_tx.clone();
-    let (signal_result_tx, signal_result_rx) = tokio::sync::oneshot::channel();
-    let result = axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        let signal_result = shutdown.await;
-        run_drain_choreography(&drain_server, drain_shutdown_tx).await;
-        let _ = signal_result_tx.send(signal_result);
-    })
-    .await;
-    if !game_server.is_draining() {
-        run_drain_choreography(&game_server, shutdown_tx).await;
+    let result = async {
+        let serve = websocket::serve_with_http_header_deadline(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+            timeouts,
+            shutdown_rx,
+        );
+        let drain = async {
+            let signal_result = shutdown.await;
+            run_drain_choreography(&game_server, shutdown_tx).await;
+            signal_result
+        };
+        tokio::pin!(serve, drain);
+        tokio::select! {
+            result = &mut serve => {
+                // The listener can finish while upgraded WebSockets are still draining.
+                result?;
+                drain.await
+            }
+            signal_result = &mut drain => {
+                // Arm this bound after the WebSocket grace and close writes.
+                let settle = websocket::registered_connection_shutdown_settle_timeout();
+                let served = tokio::time::timeout(settle, serve).await;
+                signal_result?;
+                served.map_err(|_| std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "HTTP connections did not close after the shutdown drain",
+                ))?
+            }
+        }
     }
-    cleanup.await?;
+    .await;
+    if let Some(joined) = cleanup.join_next().await {
+        joined?;
+    }
     result?;
-    signal_result_rx.await??;
     Ok(())
 }
