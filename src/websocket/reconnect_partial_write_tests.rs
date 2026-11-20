@@ -21,6 +21,8 @@ mod reconnect_partial_write {
     struct WriteCut {
         remaining: AtomicUsize,
         armed: AtomicBool,
+        fail_writes: AtomicBool,
+        failed: Notify,
         offered: AtomicUsize,
         parked: Notify,
         captured: std::sync::Mutex<Vec<u8>>,
@@ -47,6 +49,10 @@ mod reconnect_partial_write {
             cx: &mut Context<'_>,
             bytes: &[u8],
         ) -> Poll<std::io::Result<usize>> {
+            if self.cut.fail_writes.load(Ordering::Acquire) {
+                self.cut.failed.notify_one();
+                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()));
+            }
             if !self.cut.armed.load(Ordering::Acquire) {
                 return Pin::new(&mut self.socket).poll_write(cx, bytes);
             }
@@ -148,6 +154,142 @@ mod reconnect_partial_write {
             .await
             .expect("upgrade socket")
             .0
+    }
+
+    #[tokio::test]
+    #[cfg_attr(miri, ignore)]
+    async fn terminal_writer_error_releases_reader_before_room_cleanup() {
+        async fn expect_pong(socket: &mut WebSocketStream<TcpStream>) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match receive(socket).await {
+                        ServerMessage::Pong => break,
+                        ServerMessage::AuthorityChanged { .. }
+                        | ServerMessage::LobbyStateChanged { .. }
+                        | ServerMessage::SessionPlan(_) => {}
+                        other => panic!("unexpected message before Pong: {other:?}"),
+                    }
+                }
+            })
+            .await
+            .expect("application Pong round trip");
+        }
+
+        let server = test_server().await;
+        let normal = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = normal.local_addr().unwrap();
+        let router = super::super::super::routes::create_standalone_router("http://localhost:3000")
+            .with_state(Arc::clone(&server));
+        let normal_task = tokio::spawn(
+            axum::serve(
+                normal,
+                router.clone().into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .into_future(),
+        );
+        let cut = Arc::new(WriteCut::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cut_address = listener.local_addr().unwrap();
+        let cut_task = tokio::spawn(
+            axum::serve(
+                CutListener { listener, cut: Arc::clone(&cut) },
+                router
+                    .layer(axum::Extension(axum::extract::ConnectInfo(cut_address)))
+                    .into_make_service(),
+            )
+            .into_future(),
+        );
+        let mut original = connect(cut_address).await;
+        send(
+            &mut original,
+            &ClientMessage::JoinRoom {
+                game_name: "writer-error".into(),
+                room_code: None,
+                player_name: "original".into(),
+                max_players: Some(2),
+                supports_authority: Some(true),
+                relay_transport: None,
+                password: None,
+                join_only: None,
+            },
+        )
+        .await;
+        let ServerMessage::RoomJoined(joined) = receive(&mut original).await else {
+            panic!("original must join the room");
+        };
+        let player_id = joined.player_id;
+
+        let writer = arm_writer_selection_pause(player_id);
+        send(&mut original, &ClientMessage::Ping).await;
+        tokio::time::timeout(Duration::from_secs(5), writer.pause.reached.notified())
+            .await
+            .expect("writer reaches queue selection");
+        let queue = writer.pause.queue.lock().unwrap().clone().unwrap();
+        drop(writer);
+        expect_pong(&mut original).await;
+
+        let lifecycle = server.client_lifecycle(&player_id).unwrap();
+        let guard = lifecycle.lock().await;
+        let reader = arm_receive_ownership_pause(player_id);
+        send(&mut original, &ClientMessage::Ping).await;
+        tokio::time::timeout(Duration::from_secs(5), reader.reached.notified())
+            .await
+            .expect("reader selects an application Ping");
+
+        cut.fail_writes.store(true, Ordering::Release);
+        queue.try_enqueue_control(Arc::new(ServerMessage::Pong)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), cut.failed.notified())
+            .await
+            .expect("server transport rejects the live writer's frame");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !queue.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("failed writer closes its queue");
+        reader.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), reader.finished.notified())
+            .await
+            .expect("terminal write failure must release the reader before the lifecycle opens");
+        assert_eq!(server.get_client_room(&player_id).await, Some(joined.room_id));
+
+        let mut replacement = connect(address).await;
+        let reconnect = ClientMessage::Reconnect {
+            player_id,
+            room_id: joined.room_id,
+            auth_token: joined.reconnection_token.expect("v3 reconnect token"),
+        };
+        send(&mut replacement, &reconnect).await;
+        assert!(matches!(
+            receive(&mut replacement).await,
+            ServerMessage::ReconnectionFailed { error_code: ErrorCode::PlayerAlreadyConnected, .. }
+        ));
+
+        drop(guard);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while server.client_lifecycle(&player_id).is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("authoritative cleanup removes the original registration");
+        send(&mut replacement, &reconnect).await;
+        let ServerMessage::Reconnected(restored) = receive(&mut replacement).await else {
+            panic!("replacement must restore the original seat");
+        };
+        assert_eq!(restored.player_id, player_id);
+        assert_eq!(restored.room_id, joined.room_id);
+        assert!(restored.missed_events.is_empty());
+        send(&mut replacement, &ClientMessage::Ping).await;
+        expect_pong(&mut replacement).await;
+
+        drop(original);
+        drop(replacement);
+        assert_eq!(server.wait_for_shutdown_connections(Duration::from_secs(5)).await, 0);
+        normal_task.abort();
+        cut_task.abort();
+        let _ = tokio::join!(normal_task, cut_task);
     }
 
     fn authentication_request(signing: &SigningKey, app_id: &str) -> ClientMessage {

@@ -20084,3 +20084,28 @@ Close or a partition can delay detection until the transport or a timeout
 reports the loss. The home process declines an early restore while the old
 seat remains registered. A restarted or separate process without the pending
 record must decline restore. This advances A04 and A07. #826 stays open.
+
+### F418 — A terminal WebSocket write error could leave the reader waiting
+
+At `15bd8574049cdc233913b3c302c0555fa6acf13a`, the server accepted a real
+v3 WebSocket and joined it to a room. The test held the socket lifecycle
+and made the next transport write return `BrokenPipe`. The writer closed
+the outbound queue. The reader still waited for the lifecycle on a selected
+application Ping for the full five-second test window. Linux ARM64 Nextest
+`43d022b5` fails at the reader completion assertion. Reproduce with
+`bash scripts/dev-loop.sh terminal_writer_error_releases_reader_before_room_cleanup`.
+
+The writer now signals close before final writes or room cleanup when its
+live loop ends. The reader releases the selected Ping while the lifecycle
+is still held. The replacement gets `PlayerAlreadyConnected` until the
+home process completes cleanup. The same replacement restores the same
+player and room with the same token, sees no replayed events, and receives
+Pong on a fresh Ping. All nine focused Linux ARM64 controls pass in Nextest
+`9e5ef2b1`.
+
+This check starts at the terminal write error. A partition that only stalls
+writes can delay detection until a timeout. An operation admitted before
+close can still commit without its reply reaching the old socket. The home
+process orders that operation with departure and restore. A process without
+the home room and reconnect record must decline restore. Restart loses
+both records. This advances A04. #826 remains open.
