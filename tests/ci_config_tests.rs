@@ -7184,7 +7184,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "git add -- \"${release_files[@]}\"",
         "bash scripts/resolve-prepared-release.sh",
         "VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}",
-        "if: ${{ !cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success' }}",
+        "!cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success'",
         "bash scripts/push-release-branch.sh \"$BRANCH\" \"$expected_head_sha\"",
         "bash scripts/ensure-release-pr.sh",
         "\"$body_file\" \"$expected_head_sha\"",
@@ -7440,12 +7440,15 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         checkout < credential_check
             && credential_check < client_token
             && credential_check < app_id_token
-            && client_token < read_toolchain
-            && app_id_token < read_toolchain
+            && credential_check < read_toolchain
             && read_toolchain < install_toolchain
-            && install_toolchain < prepare_files,
+            && install_toolchain < prepare_files
+            && prepare_files < client_token
+            && prepare_files < app_id_token
+            && client_token < resolve_position
+            && app_id_token < resolve_position,
         "Checkout must succeed before credential selection so recovery has a Git repository, \
-         and the pinned Rust toolchain must be installed before preparation invokes Cargo."
+         the pinned Rust toolchain must precede Cargo, and App tokens must be minted after preparation."
     );
 
     let recovery_position = prepare
@@ -20858,6 +20861,30 @@ fn test_release_preflight_behavior_matrix() {
             "All required CI checks passed",
         ),
         (
+            "weekly_push_matching_tree",
+            "normal",
+            "success",
+            "success",
+            "release_pr",
+            "unused",
+            "unused",
+            "single_parent",
+            true,
+            "All required CI checks passed",
+        ),
+        (
+            "weekly_push_wrong_tree",
+            "normal",
+            "success",
+            "success",
+            "release_pr",
+            "unused",
+            "unused",
+            "single_parent",
+            false,
+            "requires the squash tree to match",
+        ),
+        (
             // The post-#557 reality: neither required workflow triggers on
             // push anymore, so both must be proven through the merged
             // release pull request.
@@ -21262,6 +21289,14 @@ case "$endpoint" in
       esac
     fi
     ;;
+  */git/commits/*)
+    require_arg ".tree.sha" "$@"
+    if [[ "$endpoint" == */"$MOCK_PR_HEAD_SHA" && "$MOCK_WRONG_TREE" == true ]]; then
+      printf 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n'
+    else
+      printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n'
+    fi
+    ;;
   */commits/*)
     require_arg --jq "$@"
     case "$MOCK_COMMIT_MODE" in
@@ -21332,6 +21367,11 @@ esac
             .env("MOCK_DOC_PR_RUN_MODE", doc_pr_mode)
             .env("MOCK_COMMIT_MODE", commit_mode)
             .env("MOCK_PR_HEAD_SHA", PR_HEAD_SHA)
+            .env("MOCK_WRONG_TREE", name.ends_with("wrong_tree").to_string())
+            .env(
+                "RELEASE_EXPECTED_SOURCE",
+                if name.starts_with("weekly_") { SHA } else { "" },
+            )
             .env("MOCK_DEFAULT_BRANCH", "main")
             .env("MOCK_SHA", SHA)
             .env("RELEASE_REPOSITORY", "example/signal-fish-server")
@@ -21354,7 +21394,7 @@ esac
             read_file(&calls)
         );
         for call in read_file(&calls).lines() {
-            if call.contains("/commits/") {
+            if call.contains("/commits/") && !call.contains("/git/commits/") {
                 assert!(
                     call.contains(".parents | length"),
                     "{name}: release preflight must use a commits lookup only for the \
@@ -36934,5 +36974,19 @@ Old body.
         "hook metadata controls failed:\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn test_weekly_release_runs_on_sunday_at_nine_utc() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/prepare-release.yml"));
+    let triggers = extract_yaml_mapping_block(&workflow, "on", 0).expect("workflow triggers");
+    assert!(
+        triggers.contains("schedule:"),
+        "release preparation needs a schedule"
+    );
+    assert!(
+        triggers.contains("0 9 * * 0"),
+        "weekly release must use fixed UTC"
     );
 }

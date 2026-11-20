@@ -28,6 +28,14 @@ if [ -n "$refresh_base" ]; then
     branch="release/v${version}-refresh-${refresh_base}"
 fi
 
+if [ "${RELEASE_WEEKLY_CANDIDATE:-false}" = "true" ]; then
+    if [ -n "$refresh_base" ]; then
+        echo "ERROR: Weekly preparation expects a new version." >&2
+        exit 1
+    fi
+    branch="release/v${version}-weekly-${base_sha}"
+fi
+
 remote_git() {
     git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${auth_header}" "$@"
 }

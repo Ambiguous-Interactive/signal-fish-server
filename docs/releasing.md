@@ -4,6 +4,28 @@ Signal Fish Server releases use one version identity across source, crates.io,
 GitHub Releases, and GHCR. A release is complete only when all four artifacts
 resolve to the same tagged commit.
 
+## Weekly release
+
+**Prepare Release** runs on Sunday at 09:00 UTC. It skips a completed release
+when the source is unchanged or the changelog has no unreleased notes. If the
+current release is incomplete, it retries the reviewed source before preparing
+a new version.
+
+The auto-commit App opens the weekly release PR and squash-merges it after CI
+and Documentation Validation pass on the exact head. If checks fail or the
+default branch moves, the workflow stops. The next run uses the current
+default branch. The workflow defers to an open manual release PR for the same
+version. When the weekly merge succeeds, the run summary links to **Release -
+Publish Crate** for the exact merged source.
+
+To rehearse the weekly path, dispatch **Prepare Release** on the default branch
+with `weekly=true` and `dry_run=true`. To retry the weekly path before Sunday,
+dispatch it with `weekly=true` and `dry_run=false`. GitHub can delay a scheduled
+run. If branch policy blocks the App from merging, the PR stays open and the
+run reports the failure. If the default branch advances during the merge and
+the final tree differs from the tested PR tree, publication stops. Use the
+unpublished-release refresh process below to validate a new candidate.
+
 ## Prepare the Release Commit
 
 Run the **Prepare Release** workflow from the default branch:

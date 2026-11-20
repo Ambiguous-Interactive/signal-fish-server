@@ -100,3 +100,7 @@ if [ "$create_status" -ne 0 ]; then
 fi
 
 echo "Release ${tag} is represented by ${branch}."
+
+if [ -n "${RELEASE_PR_OUTPUT:-}" ]; then
+    printf 'pr_number=%s\npr_head=%s\n' "${pr_state%%$'\t'*}" "$actual_head_sha" >> "$RELEASE_PR_OUTPUT"
+fi
