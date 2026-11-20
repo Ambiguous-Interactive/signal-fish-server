@@ -7184,7 +7184,7 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         "git add -- \"${release_files[@]}\"",
         "bash scripts/resolve-prepared-release.sh",
         "VERIFIED_BRANCH_SHA: ${{ steps.release.outputs.branch_sha }}",
-        "if: ${{ !cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success' }}",
+        "!cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success'",
         "bash scripts/push-release-branch.sh \"$BRANCH\" \"$expected_head_sha\"",
         "bash scripts/ensure-release-pr.sh",
         "\"$body_file\" \"$expected_head_sha\"",
@@ -7440,12 +7440,15 @@ fn test_prepare_release_workflow_creates_a_ci_triggering_semver_release_pr() {
         checkout < credential_check
             && credential_check < client_token
             && credential_check < app_id_token
-            && client_token < read_toolchain
-            && app_id_token < read_toolchain
+            && credential_check < read_toolchain
             && read_toolchain < install_toolchain
-            && install_toolchain < prepare_files,
+            && install_toolchain < prepare_files
+            && prepare_files < client_token
+            && prepare_files < app_id_token
+            && client_token < resolve_position
+            && app_id_token < resolve_position,
         "Checkout must succeed before credential selection so recovery has a Git repository, \
-         and the pinned Rust toolchain must be installed before preparation invokes Cargo."
+         the pinned Rust toolchain must precede Cargo, and App tokens must be minted after preparation."
     );
 
     let recovery_position = prepare
@@ -36935,4 +36938,12 @@ Old body.
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn test_weekly_release_runs_on_sunday_at_nine_utc() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/prepare-release.yml"));
+    let triggers = extract_yaml_mapping_block(&workflow, "on", 0).expect("workflow triggers");
+    assert!(triggers.contains("schedule:"), "release preparation needs a schedule");
+    assert!(triggers.contains("0 9 * * 0"), "weekly release must use fixed UTC");
 }

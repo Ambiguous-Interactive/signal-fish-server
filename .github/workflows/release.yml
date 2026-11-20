@@ -45,6 +45,11 @@ name: Release - Publish Crate
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_source_revision:
+        description: "Exact reviewed SHA required by weekly publication"
+        type: string
+        required: false
   push:
     tags:
       - "v*"
@@ -85,6 +90,7 @@ jobs:
           RELEASE_EVENT_NAME: ${{ github.event_name }}
           RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RELEASE_EVENT_REF: ${{ github.ref }}
+          RELEASE_EXPECTED_SOURCE: ${{ inputs.expected_source_revision }}
         run: bash scripts/resolve-release-source.sh
 
   preflight:
@@ -112,6 +118,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_COMMIT_SHA: ${{ needs.resolve-release.outputs.source_revision }}
+          RELEASE_EXPECTED_SOURCE: ${{ inputs.expected_source_revision }}
           RELEASE_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: bash preflight-tools/scripts/check-release-preflight.sh
 

@@ -694,6 +694,26 @@ fn release_source_resolver_covers_retry_and_rejection_states() {
 }
 
 #[test]
+fn weekly_dispatch_rejects_a_different_resolved_source() {
+    let fixture = ReleaseFixture::new("1.2.3");
+    let output = Command::new("bash")
+        .arg(&fixture.resolver)
+        .current_dir(&fixture.root)
+        .env_remove("GIT_INDEX_FILE")
+        .env("RELEASE_EVENT_NAME", "workflow_dispatch")
+        .env("RELEASE_DEFAULT_BRANCH", "main")
+        .env("RELEASE_EVENT_REF", "refs/heads/main")
+        .env("RELEASE_OUTPUT_FILE", &fixture.output)
+        .env("RELEASE_EXPECTED_SOURCE", "a".repeat(40))
+        .env("READ_TOML_SCRIPT", &fixture.reader)
+        .output()
+        .expect("run weekly release resolver");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("does not match expected SHA"));
+    assert!(!fixture.output.exists());
+}
+
+#[test]
 fn release_source_resolver_preserves_dispatch_revision_tooling_across_detach() {
     let fixture = ReleaseFixture::new("1.2.3");
     let release = fixture.head();

@@ -7,8 +7,15 @@
 name: Prepare Release
 
 on:
+  schedule:
+    # Sunday at 02:00 PDT, fixed UTC through standard time.
+    - cron: "0 9 * * 0"
   workflow_dispatch:
     inputs:
+      weekly:
+        description: "Run the weekly release decision and delivery path"
+        type: boolean
+        default: false
       bump:
         description: "Version bump (refresh updates the current unpublished release)"
         type: choice
@@ -37,7 +44,17 @@ jobs:
     name: Prepare release pull request
     if: github.repository == 'Ambiguous-Interactive/signal-fish-server'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      WEEKLY: ${{ github.event_name == 'schedule' || inputs.weekly || false }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      source: ${{ steps.merge.outputs.source || steps.retry.outputs.source }}
     steps:
       - name: Require default branch dispatch
         env:
@@ -57,7 +74,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Decide whether the weekly release needs work
+        id: weekly
+        if: env.WEEKLY == 'true'
+        run: python3 scripts/weekly_release.py decide
+
+      - name: Select the incomplete release for retry
+        id: retry
+        if: steps.weekly.outputs.action == 'retry'
+        env:
+          SOURCE: ${{ steps.weekly.outputs.source }}
+        run: |
+          if [ "${{ inputs.dry_run }}" != "true" ]; then
+            echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Recover the existing weekly preparation date
+        id: date
+        if: steps.weekly.outputs.action == 'prepare'
+        run: python3 scripts/weekly_release.py previous-date
+
       - name: Check auto-commit GitHub App credentials
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
         id: app-credentials
         env:
           AUTO_COMMIT_APP_CLIENT_ID: ${{ vars.AUTO_COMMIT_APP_CLIENT_ID }}
@@ -91,6 +129,48 @@ jobs:
           echo "The App must have repository Contents and Pull requests read/write permissions." >&2
           exit 1
 
+      - name: Read Rust toolchain
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
+        id: toolchain
+        shell: bash
+        run: |
+          channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
+          if [ -z "$channel" ]; then
+            echo "ERROR: Could not extract channel from rust-toolchain.toml." >&2
+            exit 1
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+
+      - name: Prepare release files
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
+        env:
+          BUMP: ${{ env.WEEKLY == 'true' && 'auto' || inputs.bump }}
+          PREPARED_DATE: ${{ steps.date.outputs.date }}
+        run: |
+          if [ -n "$PREPARED_DATE" ]; then
+            bash scripts/prepare-release.sh --bump "$BUMP" --date "$PREPARED_DATE"
+          else
+            bash scripts/prepare-release.sh --bump "$BUMP"
+          fi
+
+      - name: Validate prepared diff scope
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
+        env:
+          BUMP: ${{ env.WEEKLY == 'true' && 'auto' || inputs.bump }}
+        run: bash scripts/validate-release-file-scope.sh --bump "$BUMP"
+
+      - name: Validate prepared release state
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
+        run: |
+          cargo test --locked --test release_prepare_tests
+          cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test workspace_lockfile_consistency
+
       - name: Generate auto-commit GitHub App token from client ID
         id: app-token-client
         if: steps.app-credentials.outputs.mode == 'client-id'
@@ -111,46 +191,25 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Read Rust toolchain
-        id: toolchain
-        shell: bash
-        run: |
-          channel=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain || true)
-          if [ -z "$channel" ]; then
-            echo "ERROR: Could not extract channel from rust-toolchain.toml." >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-
-      - name: Prepare release files
-        env:
-          BUMP: ${{ inputs.bump }}
-        run: bash scripts/prepare-release.sh --bump "$BUMP"
-
-      - name: Validate prepared diff scope
-        env:
-          BUMP: ${{ inputs.bump }}
-        run: bash scripts/validate-release-file-scope.sh --bump "$BUMP"
-
-      - name: Validate prepared release state
-        run: |
-          cargo test --locked --test release_prepare_tests
-          cargo test --locked --manifest-path tools/repo-checks/Cargo.toml --test workspace_lockfile_consistency
-
       - name: Resolve prepared release identity
+        if: env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare'
         id: release
         env:
           GH_TOKEN: ${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token || github.token }}
+          RELEASE_WEEKLY_CANDIDATE: ${{ env.WEEKLY }}
         run: bash scripts/resolve-prepared-release.sh
+
+      - name: Check for another release candidate
+        id: candidate
+        if: steps.weekly.outputs.action == 'prepare'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: python3 scripts/weekly_release.py prepare-pr "$VERSION" "$BRANCH"
 
       - name: Create recovery patch
         id: recovery
-        if: ${{ !cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.dry_run && steps.checkout.outcome == 'success' && (env.WEEKLY != 'true' || steps.weekly.outputs.action == 'prepare') }}
         continue-on-error: true
         env:
           VERSION: ${{ steps.release.outputs.version || 'unknown' }}
@@ -161,7 +220,7 @@ jobs:
           git diff --stat > "artifacts/release-prepare/release-${VERSION}.stat.txt"
 
       - name: Print dry-run diff
-        if: ${{ inputs.dry_run }}
+        if: ${{ inputs.dry_run && steps.release.outcome == 'success' && steps.candidate.outputs.defer != 'true' }}
         env:
           VERSION: ${{ steps.release.outputs.version }}
           BRANCH: ${{ steps.release.outputs.branch }}
@@ -171,10 +230,11 @@ jobs:
           git --no-pager diff --
 
       - name: Push release branch and open pull request
-        if: ${{ !inputs.dry_run }}
+        id: delivery
+        if: ${{ !inputs.dry_run && steps.release.outcome == 'success' && steps.candidate.outputs.defer != 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token }}
-          BUMP: ${{ inputs.bump }}
+          BUMP: ${{ env.WEEKLY == 'true' && 'auto' || inputs.bump }}
           VERSION: ${{ steps.release.outputs.version }}
           TAG: ${{ steps.release.outputs.tag }}
           BRANCH: ${{ steps.release.outputs.branch }}
@@ -218,14 +278,45 @@ jobs:
             echo
             echo "## After merge"
             echo
-            echo "Run **Release - Publish Crate** from \`${DEFAULT_BRANCH}\`."
-            echo "The workflow derives version \`${VERSION}\` from the reviewed Cargo.toml; do not re-enter it."
+            if [ "$WEEKLY" = "true" ]; then
+              echo "The weekly workflow waits for CI, merges this PR, and starts publication."
+            else
+              echo "Run **Release - Publish Crate** from \`${DEFAULT_BRANCH}\`."
+              echo "The workflow derives version \`${VERSION}\` from the reviewed Cargo.toml."
+            fi
             echo "That workflow creates or verifies annotated tag \`${TAG}\`, then publishes crates.io and GHCR."
             echo "It creates the GitHub Release and attaches the SBOM and platform archives."
           } > "$body_file"
 
-          bash scripts/ensure-release-pr.sh \
+          RELEASE_PR_OUTPUT="$GITHUB_OUTPUT" bash scripts/ensure-release-pr.sh \
             "$DEFAULT_BRANCH" "$BRANCH" "$VERSION" "$TAG" "$body_file" "$expected_head_sha"
+
+      - name: Retire superseded weekly PRs
+        if: env.WEEKLY == 'true' && steps.delivery.outcome == 'success' && steps.candidate.outputs.stale != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token }}
+          STALE: ${{ steps.candidate.outputs.stale }}
+          VERSION: ${{ steps.release.outputs.version }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: python3 scripts/weekly_release.py retire "$VERSION" "$BRANCH" "$STALE"
+
+      - name: Wait for the release PR checks
+        if: env.WEEKLY == 'true' && steps.delivery.outcome == 'success'
+        env:
+          PR_NUMBER: ${{ steps.delivery.outputs.pr_number }}
+          PR_HEAD: ${{ steps.delivery.outputs.pr_head }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: python3 scripts/weekly_release.py wait "$BRANCH" "$GITHUB_SHA" "$PR_HEAD" "$PR_NUMBER"
+
+      - name: Squash-merge the verified weekly PR
+        id: merge
+        if: env.WEEKLY == 'true' && steps.delivery.outcome == 'success'
+        env:
+          RELEASE_APP_TOKEN: ${{ steps.app-token-client.outputs.token || steps.app-token-id.outputs.token }}
+          PR_NUMBER: ${{ steps.delivery.outputs.pr_number }}
+          PR_HEAD: ${{ steps.delivery.outputs.pr_head }}
+          BRANCH: ${{ steps.release.outputs.branch }}
+        run: python3 scripts/weekly_release.py merge "$BRANCH" "$GITHUB_SHA" "$PR_HEAD" "$PR_NUMBER"
 
       - name: Upload release preparation recovery patch
         if: ${{ failure() && !cancelled() && !inputs.dry_run && steps.recovery.outcome == 'success' }}
@@ -234,3 +325,24 @@ jobs:
           name: release-prepare-recovery-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/release-prepare/
           if-no-files-found: error
+
+  publish-weekly:
+    name: Dispatch weekly publication
+    needs: prepare
+    if: needs.prepare.outputs.source != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Dispatch the exact reviewed release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE: ${{ needs.prepare.outputs.source }}
+        run: python3 scripts/weekly_release.py dispatch "$SOURCE"

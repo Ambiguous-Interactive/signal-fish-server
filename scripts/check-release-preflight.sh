@@ -91,6 +91,17 @@ resolve_release_pr() {
         echo "ERROR: ${RELEASE_PR_RESOLUTION}" >&2
         return 1
     fi
+    if [ -n "${RELEASE_EXPECTED_SOURCE:-}" ]; then
+        local reviewed_tree merged_tree
+        if ! reviewed_tree=$(gh api "repos/${REPO}/git/commits/${head_sha}" --jq '.tree.sha') \
+            || ! merged_tree=$(gh api "repos/${REPO}/git/commits/${COMMIT_SHA}" --jq '.tree.sha') \
+            || [[ ! "$reviewed_tree" =~ ^[0-9a-f]{40}$ ]] \
+            || [ "$reviewed_tree" != "$merged_tree" ]; then
+            RELEASE_PR_RESOLUTION="Automated publication requires the squash tree to match PR #${number}."
+            echo "ERROR: $RELEASE_PR_RESOLUTION" >&2
+            return 1
+        fi
+    fi
     RELEASE_PR_NUMBER=$number
     RELEASE_PR_HEAD_SHA=$head_sha
 }

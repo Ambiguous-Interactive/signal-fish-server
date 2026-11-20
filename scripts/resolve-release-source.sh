@@ -127,6 +127,11 @@ if ! grep -Fx "$source_revision" <<< "$first_parent_history" >/dev/null; then
     exit 1
 fi
 
+if [ -n "${RELEASE_EXPECTED_SOURCE:-}" ] && [ "$RELEASE_EXPECTED_SOURCE" != "$source_revision" ]; then
+    echo "ERROR: Resolved release source ${source_revision} does not match expected SHA ${RELEASE_EXPECTED_SOURCE}." >&2
+    exit 1
+fi
+
 git checkout --detach "$source_revision"
 cargo_version=$(read_cargo_version)
 if [ "$version" != "$cargo_version" ] || [ "$tag" != "v${cargo_version}" ]; then
