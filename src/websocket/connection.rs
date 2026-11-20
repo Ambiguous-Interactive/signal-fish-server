@@ -2185,19 +2185,12 @@ async fn handle_socket_supervised(
         // while a socket write error abandons whatever is still buffered with
         // the dead connection — count that instead of losing it silently from
         // an observability standpoint.
-        // The write loop can end on its own (queue senders dropped by
-        // unregistration) in the same instant a close reason was requested;
-        // the select above may then have taken the loop-ended arm before it
-        // observed the close request.
-        // Resolve the close reason and ALWAYS finalize through the one path,
-        // so every server-side teardown gets its bounded flush, honest drop
-        // accounting, and a SEMANTIC close frame — never a bare, code-less
-        // close. The reason is: the select's own outcome if a close was
-        // requested; else a reason requested in the same instant the write
-        // loop ended on its own (the first-wins race the peek closes); else
-        // `None` for a plain rx-closed shutdown (all delivery handles dropped
-        // by unregistration), which `finalize_closed_connection` maps to the
-        // normal `Unregistered` closure (WebSocket code 1000).
+        // A terminal write error can end the loop while the reader is still
+        // dispatching. Signal this socket before the bounded final writes or
+        // ordered cleanup can wait. A reason already requested keeps priority.
+        if close_request.is_none() {
+            send_task_close_signal.request_close(CloseReason::Unregistered);
+        }
         let reason = resolve_final_close_reason(close_request.flatten(), &send_task_close);
         let current_player_id = *effective_player_id_for_send.read().await;
         finalize_closed_connection(

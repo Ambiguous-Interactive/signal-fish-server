@@ -89,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Start WebSocket shutdown when a peer disconnects, even while room cleanup waits (#826).
+- Start WebSocket shutdown when a peer disconnects or a terminal write fails, even while room cleanup waits (#826).
 - Release closing WebSockets waiting on an unsupported room operation error (#826).
 - Let closing WebSockets stop waiting for replies to refused ready and start commands (#826).
 - Keep the current join settings when the authority's WebSocket closes before a room access change is admitted (#826).
