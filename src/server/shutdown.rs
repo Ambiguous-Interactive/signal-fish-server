@@ -11,7 +11,7 @@ use super::EnhancedGameServer;
 /// Both clocks are sampled once when the instance commits to drain.
 pub(super) struct ShutdownDrainTiming {
     deadline_ms: u64,
-    close_at: Option<Instant>,
+    close_at: Instant,
 }
 
 /// Tracks an accepted upgrade until it fails or its socket supervisor returns.
@@ -43,7 +43,7 @@ impl Drop for SocketTaskGuard {
 pub struct ShutdownDrain {
     /// Unix epoch millisecond deadline advertised to v3 clients.
     pub deadline_ms: u64,
-    /// How long this drain waits before forcing close code 4000.
+    /// The configured grace period before close code 4000.
     pub grace: Duration,
     /// Optional retry hint included in the v3 `GoingAway` advisory.
     pub retry_after_secs: Option<u64>,
@@ -120,19 +120,22 @@ impl EnhancedGameServer {
         self.start_or_observe_shutdown_drain().0
     }
 
-    fn start_or_observe_shutdown_drain(&self) -> (ShutdownDrain, Option<Instant>) {
+    fn start_or_observe_shutdown_drain(&self) -> (ShutdownDrain, Instant) {
         let _commit_guard = self
             .shutdown_drain_commit_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grace = self.config.drain_grace;
         let started_by_this_call = self.shutdown_drain_timing.get().is_none();
-        let timing = self
-            .shutdown_drain_timing
-            .get_or_init(|| ShutdownDrainTiming {
-                close_at: crate::deadline::after(Instant::now(), grace),
+        let timing = self.shutdown_drain_timing.get_or_init(|| {
+            // The advisory represents time in u64 milliseconds. Limit
+            // the local wait to that range and the platform clock range.
+            let timer_grace = grace.min(Duration::from_millis(u64::MAX));
+            ShutdownDrainTiming {
+                close_at: crate::deadline::saturating_after(Instant::now(), timer_grace),
                 deadline_ms: unix_deadline_ms_after(grace),
-            });
+            }
+        });
         if started_by_this_call {
             let _ = self.shutdown_drain_tx.send(true);
         }
@@ -288,7 +291,7 @@ pub async fn run_drain_choreography(
     let _ = shutdown_tx.send(true);
 
     server
-        .wait_for_shutdown_connections_until(close_at, || {})
+        .wait_for_shutdown_connections_until(Some(close_at), || {})
         .await;
 
     let close_requests = server.close_connections_for_shutdown();
@@ -342,6 +345,26 @@ mod tests {
     use crate::database::DatabaseConfig;
     use crate::protocol::{Topology, Transport};
     use tokio::sync::mpsc::error::TryRecvError;
+
+    async fn test_server_with_grace(grace: Duration) -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig {
+                drain_grace: grace,
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct server")
+    }
 
     #[test]
     fn unix_deadline_ms_after_never_returns_drain_sentinel() {
@@ -568,23 +591,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn observed_shutdown_drain_uses_the_first_monotonic_deadline() {
         let grace = Duration::from_secs(30);
-        let server = EnhancedGameServer::new(
-            ServerConfig {
-                drain_grace: grace,
-                ..ServerConfig::default()
-            },
-            ProtocolConfig::default(),
-            RelayTypeConfig::default(),
-            SessionConfig::default(),
-            TurnConfig::default(),
-            DatabaseConfig::InMemory,
-            MetricsConfig::default(),
-            CoordinationConfig::default(),
-            TransportSecurityConfig::default(),
-            Vec::new(),
-        )
-        .await
-        .expect("construct server");
+        let server = test_server_with_grace(grace).await;
         let (sender, _receiver) = tokio::sync::mpsc::channel(4);
         let (close, mut listener) = ConnectionCloseSignal::channel();
         server
@@ -614,6 +621,21 @@ mod tests {
         assert_eq!(close_reason, Some(CloseReason::Shutdown));
         drop(guard);
         choreography.await.expect("choreography finishes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_shutdown_grace_has_a_finite_shared_deadline() {
+        let server = test_server_with_grace(Duration::MAX).await;
+        let started = Instant::now();
+        let (first, close_at) = server.start_or_observe_shutdown_drain();
+        let expected = crate::deadline::saturating_after(started, Duration::from_millis(u64::MAX));
+        assert_eq!(close_at, expected, "oversized grace gets a finite deadline");
+        assert_eq!(first.deadline_ms, u64::MAX);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (observed, observed_close_at) = server.start_or_observe_shutdown_drain();
+        assert_eq!(observed_close_at, close_at);
+        assert_eq!(observed.deadline_ms, first.deadline_ms);
     }
 
     #[tokio::test(start_paused = true)]

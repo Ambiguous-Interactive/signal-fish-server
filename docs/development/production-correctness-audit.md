@@ -20212,6 +20212,12 @@ delivers one `GoingAway` with the original timestamp and then `4000
 server_shutdown`. The starter, real SIGTERM, last-socket exit, same-port
 restart, and three-player signaling controls pass in `b53198ef`.
 
+Review found that the first repair could leave the local deadline unset for
+an oversized grace. The Linux ARM64 test
+`oversized_shutdown_grace_has_a_finite_shared_deadline` reproduces the case
+with `Duration::MAX`. The timer now uses a finite deadline within the
+millisecond and platform clock ranges. Early exit at zero sockets still works.
+
 The home process owns the shutdown timer and room state. Its drain refuses
 new upgrades and reconnects. A partition can delay or lose the advisory or
 close even if the server requests it on time. A restarted or separate home
