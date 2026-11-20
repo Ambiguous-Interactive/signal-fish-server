@@ -39,13 +39,13 @@ files=()
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     while IFS= read -r -d '' file; do
         case "$file" in
-            target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*) ;;
+            target/*|third_party/*|node_modules/*|.github/test-fixtures/*|test-fixtures/*|docs/generated/*|site/*) ;;
             *) files+=("./$file") ;;
         esac
     done < <(git ls-files -z -- '*.md')
 else
     files=(.)
-    lint_args+=(--exclude 'target/**,third_party/**,node_modules/**,.github/test-fixtures/**,test-fixtures/**')
+    lint_args+=(--exclude 'target/**,third_party/**,node_modules/**,.github/test-fixtures/**,test-fixtures/**,docs/generated/**,site/**')
 fi
 
 if (( ${#files[@]} == 0 )); then
