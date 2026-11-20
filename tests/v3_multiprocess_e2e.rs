@@ -408,6 +408,45 @@ async fn multiprocess_sigterm_gracefully_drains_with_goingaway_and_4000() {
     );
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn multiprocess_sigterm_exits_after_last_websocket_leaves_during_grace() {
+    let mut server = spawn_server(json!({
+        "server": { "drain_grace_secs": 60 }
+    }))
+    .await;
+    let mut peer = connect_client(server.port).await;
+    authenticate_v3(&mut peer).await;
+    join_room(&mut peer, "mp-drain-early-exit", None, "DrainPeer", 2).await;
+
+    server.send_sigterm();
+    next_matching_server_message_within(
+        &mut peer,
+        SOCKET_CLOSE_TIMEOUT,
+        "shutdown GoingAway",
+        |message| match message {
+            ServerMessage::GoingAway {
+                retry_after_secs, ..
+            } => {
+                assert_eq!(retry_after_secs, Some(60));
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    tokio::time::timeout(SOCKET_CLOSE_TIMEOUT, peer.close(None))
+        .await
+        .expect("client close must finish")
+        .expect("client close must succeed");
+    drop(peer);
+
+    let status = tokio::time::timeout(SOCKET_CLOSE_TIMEOUT, server.wait_for_exit())
+        .await
+        .expect("server must exit before the advertised grace expires");
+    assert!(status.success(), "server must exit cleanly, got {status}");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn multiprocess_server_restart_invalidates_reconnect_tokens() {
     let mut server = spawn_server(config_overlay("mesh")).await;

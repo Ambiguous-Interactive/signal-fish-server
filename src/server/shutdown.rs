@@ -187,7 +187,7 @@ impl EnhancedGameServer {
         requested
     }
 
-    /// Wait for close-requested socket handlers to finish before process exit.
+    /// Wait for socket handlers to finish during shutdown.
     ///
     /// The close frames are written by per-connection send tasks after
     /// [`Self::close_connections_for_shutdown`] requests `CloseReason::Shutdown`.
@@ -241,8 +241,8 @@ impl EnhancedGameServer {
 pub(crate) const DRAIN_IDLE_HANDLER_SETTLE: Duration = Duration::from_millis(50);
 
 /// Everything the shutdown drain does after the shutdown signal arrives:
-/// begin the drain, fan out the v3 `GoingAway` advisories, wait out the
-/// grace (skipped when no socket handler can observe the close), force the
+/// begin the drain, fan out the v3 `GoingAway` advisories, wait until grace
+/// expires or the last socket handler finishes, force the
 /// coded `4000` closes, and settle the handlers before process exit.
 ///
 /// Embedded servers that run their own accept loop call this after their
@@ -269,20 +269,16 @@ pub async fn run_drain_choreography(
     let _ = shutdown_tx.send(true);
 
     let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
-    // During a drain new registrations are refused, so with no live socket
-    // handler no connection can ever receive the coded `4000` close. Waiting
-    // out the grace anyway would be pure restart delay that eats into the
-    // operator's termination budget. An upgraded connection whose handler
-    // task has not been polled yet does not count as live, so the empty
-    // reading is confirmed after one scheduling beat before the wait is
-    // skipped; a handler surfacing during that beat still gets its grace.
+    // A handler that has not been polled yet does not count as live. Give it
+    // one scheduling beat when the initial count is zero. Once all tracked
+    // handlers finish, there is no reason to wait for the grace deadline.
     if wait_before_close > Duration::ZERO {
         if !server.has_active_socket_tasks() {
             tokio::time::sleep(DRAIN_IDLE_HANDLER_SETTLE).await;
         }
-        if server.has_active_socket_tasks() {
-            tokio::time::sleep(wait_before_close).await;
-        }
+        server
+            .wait_for_shutdown_connections(wait_before_close)
+            .await;
     }
 
     let close_requests = server.close_connections_for_shutdown();
@@ -332,6 +328,7 @@ mod tests {
         CoordinationConfig, MetricsConfig, ProtocolConfig, RelayTypeConfig, SessionConfig,
         TransportSecurityConfig, TurnConfig,
     };
+    use crate::coordination::ConnectionCloseSignal;
     use crate::database::DatabaseConfig;
     use crate::protocol::{Topology, Transport};
     use tokio::sync::mpsc::error::TryRecvError;
@@ -504,13 +501,8 @@ mod tests {
         );
     }
 
-    /// A connection whose handler task arms during the idle settle beat must
-    /// still get the grace wait: the empty active-task reading that would
-    /// skip the wait is confirmed only after the beat, so a handler
-    /// surfacing inside it flips the choreography back onto the full wait
-    /// and receives its coded `4000` close. Red condition: an immediate
-    /// skip (no settle beat) completes the choreography long before the
-    /// grace elapses.
+    /// A connection whose handler task arms during the idle settle beat
+    /// must still get the grace period before the forced close.
     #[tokio::test(start_paused = true)]
     async fn handler_armed_during_idle_settle_still_gets_the_grace() {
         let grace = Duration::from_millis(300);
@@ -532,10 +524,13 @@ mod tests {
         .await
         .expect("failed to construct test server");
 
+        let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+        let (close, mut listener) = ConnectionCloseSignal::channel();
+        server
+            .register_client_with_close(sender, close, "127.0.0.1:48990".parse().unwrap())
+            .await
+            .expect("client registration succeeds");
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-        // Paused tokio time: `elapsed` measures virtual time, so the
-        // grace-waited choreography lands at ~settle + grace while an
-        // immediate skip would land near zero.
         let started = tokio::time::Instant::now();
         let choreography = {
             let server = std::sync::Arc::clone(&server);
@@ -550,24 +545,61 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         let guard = server.track_socket_task();
 
-        // Release the guard well after the recheck but before the grace
-        // expires, so the trailing settle wait observes zero active tasks.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let close_reason = tokio::time::timeout(Duration::from_secs(1), listener.closed())
+            .await
+            .expect("drain requests a shutdown close");
+        assert_eq!(close_reason, Some(CloseReason::Shutdown));
+        assert!(
+            started.elapsed() >= grace,
+            "handler gets the advertised grace"
+        );
         drop(guard);
 
         choreography
             .await
             .expect("choreography task must not panic");
+    }
 
-        // The choreography began ~0 ms into this test; completing it must
-        // have waited out at least the grace (settle beat + grace), not
-        // skipped the wait while the handler was arming.
-        assert!(
-            started.elapsed() >= grace,
-            "a handler that armed during the settle beat must still get the grace wait \
-             (elapsed {:?}, grace {grace:?})",
-            started.elapsed()
-        );
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_grace_ends_when_the_last_socket_task_finishes() {
+        let server = EnhancedGameServer::new(
+            ServerConfig {
+                drain_grace: Duration::from_secs(30),
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("failed to construct test server");
+        let first = server.track_socket_task();
+        let last = server.track_socket_task();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let drain = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { run_drain_choreography(&server, shutdown_tx).await })
+        };
+        shutdown_rx
+            .wait_for(|started| *started)
+            .await
+            .expect("drain starts while both sockets are live");
+
+        drop(first);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(!drain.is_finished(), "the remaining socket still has grace");
+
+        drop(last);
+        tokio::time::timeout(Duration::from_millis(10), drain)
+            .await
+            .expect("a drain with no live sockets must finish before grace expires")
+            .expect("drain task must not panic");
     }
 
     #[tokio::test(start_paused = true)]

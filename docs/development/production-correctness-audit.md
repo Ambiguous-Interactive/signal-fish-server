@@ -60,7 +60,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36; interrupted heartbeat retry in F224 |
-| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12 |
+| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12; idle grace after socket teardown repaired in F420 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197; premature native rebuild success in F198 |
@@ -20134,3 +20134,43 @@ frame. A network partition can delay detection until transport or a timeout
 reports it. Early restore must wait for the home process to release the old
 seat and capture the recovery record. A restarted or separate process without
 the record must decline restoration. This advances A04. #826 stays open.
+
+### F420 — Shutdown grace kept running after the last WebSocket left
+
+On `8175b4ee`, a paused-clock test starts drain with two tracked WebSockets.
+The first departure leaves one handler and the drain stays active. The last
+handler finishes, but the drain misses the 10 ms completion bound
+(Linux ARM64 Nextest `0bc6dd52`). The grace timer still had 29 seconds left.
+
+The grace wait now ends when the last socket supervisor returns or the timer
+expires. The wait arms the existing completion notification before checking
+the count. A handler that starts during the initial idle settle can still get
+the grace period. The real TCP regression seats a v3 player, sends SIGTERM,
+reads `GoingAway`, then closes the client. It checks clean exit before the
+advertised deadline. The companion test holds a socket and requires
+`4000 server_shutdown`. All 14 scoped Linux ARM64 tests pass in Nextest
+`a186c6c9`, including TLS shutdown, same-port restart, three-player WebRTC
+signaling, and three directional-loss controls.
+
+Matched Linux ARM64 runs use the default debug binary, real SIGTERM, a
+four-second grace, and two authenticated v3 clients for both active cases.
+Both clients receive the advisory. The first closes immediately. The second
+closes 100 ms later or stays for code 4000. The runs alternate build order
+and measure from the signal to process exit.
+
+| Workload | Runs per build | Baseline median (range) | Fixed median (range) |
+| --- | ---: | ---: | ---: |
+| Both clients leave | 7 | 4,009 ms (4,007–4,011) | 110 ms (109–130) |
+| One client stays | 5 | 4,012 ms (4,008–4,013) | 4,010 ms (4,009–4,019) |
+| No clients at drain start | 5 | 59 ms (57–59) | 57 ms (57–62) |
+
+The remaining client receives code 4000 at a median of 4,003 ms in both
+builds. The longest fixed run with a remaining client exits six milliseconds
+later than the longest baseline run. These samples measure local shutdown
+time. They do not establish a tail latency or throughput guarantee.
+
+The home process owns the room and refuses new upgrades and restores during
+drain. An advisory or close frame can be delayed or lost during a partition.
+When a handler stays active, the server still waits for grace and then requests
+close. A restart or a different home lacks the old room and reconnect record
+and must decline restore. This advances A17. #826 stays open.
