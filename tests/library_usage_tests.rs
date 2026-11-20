@@ -1,10 +1,12 @@
 #[path = "../examples/embedded_server.rs"]
 mod embedded_server;
+mod test_helpers;
 
 use futures_util::{SinkExt, StreamExt};
 use signal_fish_server::{config::Config, protocol::ServerMessage};
 use std::net::SocketAddr;
 use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
@@ -195,6 +197,177 @@ async fn starter_finishes_an_existing_drain_after_its_original_deadline() {
     })
     .await;
     drain_result.expect("expired grace must not restart when the starter takes over");
+}
+
+#[tokio::test]
+async fn starter_shutdown_bounds_unresponsive_http2_peer() {
+    let mut cfg = starter_config();
+    cfg.server.drain_grace_secs = 12;
+    cfg.websocket.server_ping_interval_secs = 0;
+    let server = embedded_server::build_server(&cfg)
+        .await
+        .expect("build starter");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(embedded_server::serve_until(listener, server, "*", async {
+        shutdown_rx.await.expect("shutdown trigger");
+        Ok(())
+    }));
+
+    let startup = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut http2 = TcpStream::connect(addr).await.expect("connect HTTP/2");
+        http2
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+            .await
+            .expect("send HTTP/2 preface and SETTINGS");
+        // The SETTINGS ACK proves the server reached HTTP/2 before shutdown.
+        loop {
+            let mut header = [0; 9];
+            http2.read_exact(&mut header).await.expect("frame header");
+            let [high, middle, low, frame_type, flags, ..] = header;
+            let length = u64::from(u32::from_be_bytes([0, high, middle, low]));
+            if frame_type == 4 && flags == 1 {
+                assert_eq!(length, 0, "SETTINGS ACK body");
+                break;
+            }
+            tokio::io::copy(&mut (&mut http2).take(length), &mut tokio::io::sink())
+                .await
+                .expect("frame body");
+        }
+        (http2, connect_v3(addr).await)
+    })
+    .await;
+    let (mut http2, mut socket) = startup.expect("both protocol handshakes finish");
+    shutdown_tx.send(()).expect("request shutdown");
+
+    let advisory_result = tokio::time::timeout(Duration::from_secs(5), socket.next()).await;
+    let advisory = advisory_result
+        .expect("shutdown advisory deadline")
+        .expect("advisory")
+        .expect("transport");
+    let advisory: ServerMessage =
+        serde_json::from_str(advisory.to_text().expect("advisory text")).expect("advisory JSON");
+    assert!(matches!(advisory, ServerMessage::GoingAway { .. }));
+
+    // A settle timer started with the shutdown signal would fire during grace.
+    let settle = signal_fish_server::websocket::registered_connection_shutdown_settle_timeout();
+    tokio::time::pause();
+    tokio::time::advance(settle + Duration::from_secs(1)).await;
+    tokio::time::resume();
+    let ping = Message::Ping(b"drain grace".as_slice().into());
+    let grace_probe = tokio::time::timeout(Duration::from_secs(3), async {
+        socket.send(ping).await.expect("ping during shutdown grace");
+        socket.next().await.expect("pong").expect("transport")
+    })
+    .await;
+    assert_eq!(
+        grace_probe.expect("WebSocket stays live after a full settle period during grace"),
+        Message::Pong(b"drain grace".as_slice().into())
+    );
+
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(7)).await;
+    tokio::time::resume();
+    let websocket_drain = tokio::time::timeout(Duration::from_secs(5), async {
+        let close = socket.next().await.expect("close").expect("transport");
+        let Message::Close(Some(frame)) = close else {
+            panic!("expected the coded shutdown close, got {close:?}");
+        };
+        assert_eq!(u16::from(frame.code), 4000);
+        assert_eq!(frame.reason, "server_shutdown");
+        socket.flush().await.expect("close acknowledgement");
+    })
+    .await;
+    websocket_drain.expect("WebSocket drain finishes while the HTTP/2 peer stays open");
+
+    // Keep the TCP connection open while the HTTP/2 peer stops responding.
+    let served = tokio::time::timeout(settle + Duration::from_secs(2), tasks.join_next()).await;
+    let error = served
+        .expect("embedded shutdown must finish after the post-drain budget")
+        .expect("server task")
+        .expect("server task join")
+        .expect_err("a forced listener exit must report an error");
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut)
+    );
+    let mut final_frames = Vec::new();
+    let closed =
+        tokio::time::timeout(Duration::from_secs(2), http2.read_to_end(&mut final_frames)).await;
+    closed
+        .expect("the HTTP/2 connection closes with the listener")
+        .expect("read HTTP/2 EOF");
+    let restart_result = tokio::time::timeout(Duration::from_secs(5), async {
+        let restarted_server = embedded_server::build_server(&cfg)
+            .await
+            .expect("build replacement server");
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .expect("rebind the same address");
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        tasks.spawn(embedded_server::serve_until(
+            listener,
+            restarted_server,
+            "*",
+            async {
+                stop_rx.await.expect("replacement shutdown trigger");
+                Ok(())
+            },
+        ));
+        let mut fresh = connect_v3(addr).await;
+        fresh.close(None).await.expect("close fresh socket");
+        stop_tx.send(()).expect("stop replacement server");
+        tasks
+            .join_next()
+            .await
+            .expect("replacement server task")
+            .expect("task join")
+            .expect("replacement server exits cleanly");
+    })
+    .await;
+    restart_result.expect("fresh authentication and shutdown on the same address");
+}
+
+#[tokio::test]
+async fn starter_shutdown_allows_responsive_http2_peer_to_finish() {
+    let server = embedded_server::build_server(&starter_config())
+        .await
+        .expect("build starter");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("address");
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut tasks = tokio::task::JoinSet::new();
+    tasks.spawn(embedded_server::serve_until(listener, server, "*", async {
+        shutdown_rx.await.expect("shutdown trigger");
+        Ok(())
+    }));
+
+    let lifecycle_result = tokio::time::timeout(Duration::from_secs(10), async {
+        let stream = TcpStream::connect(addr).await.expect("connect HTTP/2");
+        let (mut sender, _driver) = test_helpers::open_h2(stream).await;
+        let request = hyper::Request::get(format!("http://{addr}/health"))
+            .body(axum::body::Body::empty())
+            .expect("health request");
+        let response = sender.send_request(request).await.expect("health response");
+        assert_eq!(response.status(), hyper::StatusCode::OK);
+        shutdown_tx.send(()).expect("request shutdown");
+        tasks
+            .join_next()
+            .await
+            .expect("server task")
+            .expect("task join")
+            .expect("a responsive HTTP/2 peer permits clean shutdown");
+    })
+    .await;
+    lifecycle_result.expect("responsive HTTP/2 startup and shutdown must finish");
 }
 
 #[tokio::test]
