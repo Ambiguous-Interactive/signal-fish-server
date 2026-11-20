@@ -286,11 +286,13 @@ def wait_for_checks(repo, default, branch, base, head, number):
 def merge(repo, default, branch, base, head, number):
     path = f"repos/{repo}/pulls/{number}"
     verify_pr(api(path), repo, default, branch, head)
-    verify_base(repo, default, base)
     if not checks_passed(repo, branch, head, number):
         raise ReleaseError("Release checks changed before merge.")
     expected_tree = api(f"repos/{repo}/git/commits/{head}")["tree"]["sha"]
     token = os.environ["RELEASE_APP_TOKEN"]
+    # GitHub's merge API accepts an expected head SHA. Check the base as late
+    # as possible and require an exact tree before handing off publication.
+    verify_base(repo, default, base)
     reply = json.loads(command(
         "gh", "api", "--method", "PUT", f"{path}/merge",
         "-f", "merge_method=squash", "-f", f"sha={head}",
@@ -301,7 +303,10 @@ def merge(repo, default, branch, base, head, number):
         raise ReleaseError("GitHub did not confirm the release PR merge.")
     merged_tree = api(f"repos/{repo}/git/commits/{source}")["tree"]["sha"]
     if merged_tree != expected_tree:
-        raise ReleaseError("The merged release tree differs from its validated PR head.")
+        raise ReleaseError(
+            "The merged release tree differs from its validated PR head. "
+            "Refresh the unpublished release and validate it again before publishing."
+        )
     output(source=source)
     summary(f"Squash-merged weekly release PR #{number} at {source}.")
 

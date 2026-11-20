@@ -22,7 +22,9 @@ To rehearse the weekly path, dispatch **Prepare Release** on the default branch
 with `weekly=true` and `dry_run=true`. To retry the weekly path before Sunday,
 dispatch it with `weekly=true` and `dry_run=false`. GitHub can delay a scheduled
 run. If branch policy blocks the App from merging, the PR stays open and the
-run reports the failure.
+run reports the failure. If the default branch advances during the merge and
+the final tree differs from the tested PR tree, publication stops. Use the
+unpublished-release refresh process below to validate a new candidate.
 
 ## Prepare the Release Commit
 

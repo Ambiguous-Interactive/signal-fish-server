@@ -91,7 +91,7 @@ class WeeklyReleaseTests(unittest.TestCase):
             ):
                 actual_base = merged if outcome == "advanced" else base
                 result_tree = {"tree": {"sha": merged}} if outcome == "wrong-tree" else tree
-                api.side_effect = [pr, {"object": {"sha": actual_base}}, tree, result_tree]
+                api.side_effect = [pr, tree, {"object": {"sha": actual_base}}, result_tree]
                 command.return_value = f'{{"merged":true,"sha":"{merged}"}}'
                 if outcome == "advanced":
                     with self.assertRaises(weekly.ReleaseError):
