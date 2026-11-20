@@ -205,10 +205,6 @@ function Start-WorktreePolicyQueries {
             "ls-files", "--others", "--exclude-standard", "-z", "--"
         ) + $script:WorktreePolicyPathspecs
         $script:PendingWorktreeUntracked = Start-PendingGit -GitArguments $untrackedArguments
-        $rustDiffArguments = @(
-            "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
-        )
-        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments $rustDiffArguments
         # The content policy always reads the index, including on clean trees.
         # Overlap that read with discovery without changing its verdict.
         $script:PendingChangelogBlob = Start-PendingGit -GitArguments @("show", ":CHANGELOG.md")
@@ -2232,6 +2228,15 @@ try {
         } else {
             Get-StagedFiles
         })
+    $changedFilesTimer.Stop()
+    $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
+    if ($script:InspectWorktree -and $changedProductionRustFiles.Count -gt 0) {
+        # Avoid a second tracked-tree scan when no Rust policy uses it.
+        # Overlap the diff with the checks that precede the Rust policy.
+        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments @(
+            "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
+        )
+    }
 } catch {
     # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.
     # Get-WorktreeChangedFiles already drained the status/untracked pair, so
@@ -2240,7 +2245,6 @@ try {
     try { Remove-PreCommitPendingGit } catch { }
     throw $discoveryError
 }
-$changedFilesTimer.Stop()
 Write-Profile -Name "Changed file discovery" -ElapsedMilliseconds $changedFilesTimer.ElapsedMilliseconds
 [void]$script:CheckTimings.Add([pscustomobject]@{
         Name = "Changed file discovery"
@@ -2282,7 +2286,6 @@ if (-not (Invoke-Check "Changelog gate" { Test-ChangelogGate -ChangedFiles (Get-
 if (-not (Invoke-Check "Changelog content" { Test-ChangelogContentVisibility })) { Complete-PreCommit }
 
 if (-not (Invoke-Check "Hook speed policy" { Test-FastHookSource })) { Complete-PreCommit }
-$changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
 if ($changedProductionRustFiles.Count -eq 0) {
     if (-not (Invoke-Check "Rust panic patterns" { Skip "Rust panic patterns" "no production Rust files staged" })) { Complete-PreCommit }
 } elseif (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs $changedProductionRustFiles)) {

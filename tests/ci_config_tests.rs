@@ -25597,7 +25597,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
 
                 $script:RealStartPendingGit = ${function:Start-PendingGit}
                 $script:StartedPending = [System.Collections.Generic.List[object]]::new()
-                $script:StartupFailureAfter = 3
+                $script:StartupFailureAfter = 2
                 function Start-PendingGit {
                     param([string[]]$GitArguments)
                     if ($script:StartedPending.Count -eq $script:StartupFailureAfter) { throw "startup probe" }
@@ -26331,18 +26331,35 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     // Seed one commit so worktree discovery's `git diff HEAD` probe has a
     // valid revision, exactly like any real repository.
     write_file(&dir.join("README.md"), "# profile probe\n");
-    assert!(git(&["add", "README.md"]).unwrap().status.success());
+    write_file(&dir.join("src/lib.rs"), "fn probe() {}\n");
+    assert!(git(&["add", "README.md", "src/lib.rs"]).unwrap().status.success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
         .status
         .success());
 
+    let trace_path = dir.join("git-trace.jsonl");
+    let rust_diff_count = || {
+        read_file(&trace_path)
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .filter(|event| {
+                event["event"] == "start"
+                    && event["argv"].as_array().is_some_and(|args| {
+                        args.iter().any(|arg| arg == "-G")
+                            && args.iter().any(|arg| arg == "--unified=0")
+                    })
+            })
+            .count()
+    };
     let run_hook = |profile: bool| -> std::io::Result<std::process::Output> {
+        write_file(&trace_path, "");
         let mut command = Command::new("pwsh");
         command
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
             .arg(&hook)
             .arg("-Worktree")
+            .env("GIT_TRACE2_EVENT", &trace_path)
             .current_dir(dir);
         if profile {
             command.env("SIGNAL_FISH_HOOK_PROFILE", "1");
@@ -26396,6 +26413,7 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         "the preflight must report its total runtime.\nstdout: {stdout}"
     );
     assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[], &[]);
+    assert_eq!(rust_diff_count(), 0, "clean worktree started a Rust diff");
 
     // 3) A metadata commit exercises the PASS path and the staged-content
     //    preload emitter, which runs outside Invoke-Check. README.md is
@@ -26433,6 +26451,13 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         &["Staged content preload"],
         &["Staged content preload"],
     );
+    assert_eq!(rust_diff_count(), 0, "metadata preflight started a Rust diff");
+
+    write_file(&dir.join("src/lib.rs"), "fn probe() { panic!(\"probe\"); }\n");
+    let rust = run_hook(true).unwrap();
+    assert!(!rust.status.success());
+    assert!(String::from_utf8_lossy(&rust.stdout).contains("FAIL: Rust panic patterns"));
+    assert_eq!(rust_diff_count(), 1, "production Rust must run one pickaxe diff");
 }
 
 /// Every executed check (`PASS:`/`SKIP:`/`FAIL:` outcome lines) must emit one
