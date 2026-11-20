@@ -26101,6 +26101,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "clients/fortress/src/main.rs", "clients/fortress/src/nested/peer.rs",
                     "clients/fortress-wasm/src/lib.rs", "clients/fortress-wasm/src/nested/peer.rs",
                     "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd",
+                    "clients/fortress-wasm/README.md",
                     "src/server_tests.rs", "src/main_test.rs", "src/server/tests.rs",
                     "docs/ci-cd-testing.md", "docs/test-analysis.md", "docs/git-hooks-guide.md",
                     "docs/hooks-quick-reference.md", "docs/pre-commit-hooks-summary.md",

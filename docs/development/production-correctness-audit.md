@@ -47,7 +47,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380; relay null metadata repaired in F381 |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
-| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10 |
+| A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10; router refusal waits released on close in F415 |
 | A05 | `reconnection.rs`, `server/reconnection_service.rs` | Claim, restore, rollback, token rotation, reconnect races and expiry | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; embedded receiver-loss rollback in F18; size-refusal rollback in F21; known socket-close rollback in F22; stale expiry cleanup in F32 |
 | A06 | Control replay and `Reconnected` snapshots | Snapshot precedence, replay completeness, lost responses, resynchronization | Initial; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; known receiver closure before response submission in F18; aggregate replay bounds in F21; socket close before queue commit in F22 |
 | A07 | `server/room_service.rs`, `database/` | Join, leave, capacity, passwords, room codes, tenant ownership, partial admission | Initial; stale expiry cleanup in F32; concurrent join/start histories in session 471; concurrent departure/start histories in session 474; spectator admission versus ready-off/start in session 589; spectator departure versus ready-off/start in session 592; queued access changes repaired in F413 |
@@ -20009,3 +20009,31 @@ A partition can delay that request, and an already queued reply can reach
 the old socket. A replacement uses the current room baseline and bounded
 replay. A restart loses the room and reconnect record. A process without
 the home record refuses restore. This advances A04 and A08. #826 remains open.
+
+### F415 — A router refusal could hold teardown after WebSocket close
+
+At `7ba74f55bac5e4ce963fc5590f8188cdeaf1f3d4`, a router refusal held the source lifecycle while
+waiting for a reply route or queue space. Under a full queue, dispatch
+missed a 10 ms virtual deadline after the server requested close. On a
+real v3 WebSocket without the room operation capability, close 4003 reached
+the client but teardown missed a five-second deadline to enter the room
+gate while the reply route was held. Both regressions fail in Nextest
+`9adf4029`. The existing open-socket cancellation control passes.
+
+The router now binds each refusal to the source socket. Close releases
+dispatch and the lifecycle. A delivery already started still accounts for
+its result. An open source retains its exact refusal and the order of later
+commands if the caller is canceled. A v3 replacement restores the original
+player and room, sees no stale refusal, and gets Pong. The six focused
+controls pass on Linux ARM64 in Nextest `2ae1b857`.
+
+The live test also waits for a blocked route read before requesting close.
+When routing returns, no refusal delivery starts. A separate test verifies
+that close releases a refusal waiting for its source lifecycle. Removing
+either close check fails its owning test.
+
+The home server still needs the room gate to capture a reconnect record.
+A partition can delay close detection, and a reply already queued can
+reach the old socket. The replacement sees the current home snapshot
+and bounded room replay. A restarted or separate server without the home
+record must refuse restoration. This advances A04 and A07. #826 stays open.

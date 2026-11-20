@@ -2648,6 +2648,8 @@ impl EnhancedGameServer {
 /// timeout window before being evicted.
 pub struct InMemoryMessageCoordinator {
     local_clients: Arc<RwLock<HashMap<PlayerId, ClientDeliveryHandle>>>,
+    #[cfg(all(test, signal_fish_repository_tests))]
+    socket_reply_route_wait: tokio::sync::Notify,
     room_players: Arc<RwLock<HashMap<RoomId, HashSet<PlayerId>>>>,
     // Each identity has one route. Read under its player gate; update with room_players.
     player_rooms: Arc<StdMutex<HashMap<PlayerId, RoomId>>>,
@@ -3235,6 +3237,8 @@ impl InMemoryMessageCoordinator {
     ) -> Self {
         Self {
             local_clients: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(all(test, signal_fish_repository_tests))]
+            socket_reply_route_wait: tokio::sync::Notify::new(),
             room_players: Arc::new(RwLock::new(HashMap::new())),
             player_rooms: Arc::new(StdMutex::new(HashMap::new())),
             spectator_routes: Arc::new(StdMutex::new(HashSet::new())),
@@ -5217,7 +5221,17 @@ impl MessageCoordinator for InMemoryMessageCoordinator {
         message: Arc<ServerMessage>,
     ) -> anyhow::Result<()> {
         let started = {
-            let Some(clients) = close.while_open(self.local_clients.read()).await else {
+            let read_routes = self.local_clients.read();
+            #[cfg(all(test, signal_fish_repository_tests))]
+            let read_routes = async {
+                tokio::pin!(read_routes);
+                if let std::task::Poll::Ready(clients) = futures_util::poll!(&mut read_routes) {
+                    return clients;
+                }
+                self.socket_reply_route_wait.notify_one();
+                read_routes.await
+            };
+            let Some(clients) = close.while_open(read_routes).await else {
                 return Ok(());
             };
             self.start_targeted_delivery(&clients, player_id, &message, Some(close))

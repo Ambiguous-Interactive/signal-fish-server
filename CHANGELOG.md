@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release closing WebSockets waiting on an unsupported room operation error (#826).
 - Let closing WebSockets stop waiting for replies to refused ready and start commands (#826).
 - Keep the current join settings when the authority's WebSocket closes before a room access change is admitted (#826).
 - Keep room bans in place when the authority's WebSocket closes before an unban is admitted (#826).

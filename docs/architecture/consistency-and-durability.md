@@ -56,6 +56,14 @@ teardown while any delivery already started finishes accounting. After
 reconnect, the client uses the current lobby snapshot and any committed room
 events in the replay window. A network partition can delay close detection.
 
+A room operation sent without its negotiated capability can trigger a private
+error while the source socket is open and has reply budget. Exhausting that
+budget can trigger a rate-limit farewell and close. If the server requests
+close while the capability error waits for its route,
+the server skips the reply and releases the socket lifecycle. Delivery that
+already started can finish on the old socket. The replacement gets the home
+server's room snapshot and replay without the private error.
+
 Peer connection metadata updates wait for the source lifecycle and room
 admission. If the server requests socket close during those waits or the
 read-only Direct endpoint checks, it cancels the pending update. A refusal
