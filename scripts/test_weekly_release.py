@@ -119,10 +119,20 @@ class WeeklyReleaseTests(unittest.TestCase):
             weekly.dispatch(repo, "main", head)
             payload = api.call_args.kwargs["payload"]
             self.assertEqual(payload["inputs"], {"expected_source_revision": head})
-            self.assertIs(payload["return_run_details"], True)
+            self.assertEqual(api.call_args.kwargs["headers"], ("X-GitHub-Api-Version: 2026-03-10",))
+            self.assertTrue(api.call_args.kwargs["allow_empty"])
             self.assertIn("https://example.test/5", summary.call_args.args[0])
 
-    def test_dispatch_requires_run_receipt(self):
+    def test_successful_empty_dispatch_response_does_not_trigger_a_second_publish(self):
+        with (
+            patch.object(weekly, "api", return_value=None) as api,
+            patch.object(weekly, "summary") as summary,
+        ):
+            weekly.dispatch(repo, "main", head)
+            api.assert_called_once()
+            self.assertIn("without a run receipt", summary.call_args.args[0])
+
+    def test_dispatch_rejects_a_malformed_run_receipt(self):
         with patch.object(weekly, "api", return_value={"workflow_run_id": 5}):
             with self.assertRaises(weekly.ReleaseError):
                 weekly.dispatch(repo, "main", head)

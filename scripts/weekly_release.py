@@ -32,7 +32,7 @@ def command(*args, env=None):
     return subprocess.check_output(args, env=env, text=True).strip()
 
 
-def api(path, *, paginate=False, payload=None, method="POST", headers=()):
+def api(path, *, paginate=False, payload=None, method="POST", headers=(), allow_empty=False):
     args = ["gh", "api", path]
     for header in headers:
         args += ["--header", header]
@@ -44,6 +44,8 @@ def api(path, *, paginate=False, payload=None, method="POST", headers=()):
         args, input=json.dumps(payload) if payload is not None else None,
         text=True,
     )
+    if allow_empty and not output.strip():
+        return None
     return json.loads(output)
 
 
@@ -312,10 +314,17 @@ def dispatch(repo, default, source):
         payload={
             "ref": default,
             "inputs": {"expected_source_revision": source},
-            "return_run_details": True,
         },
-        headers=("X-GitHub-Api-Version: 2022-11-28",),
+        # This API version returns the run ID without the legacy opt-in field.
+        headers=("X-GitHub-Api-Version: 2026-03-10",),
+        allow_empty=True,
     )
+    if receipt is None:
+        summary(
+            f"GitHub accepted publication of {source} without a run receipt. "
+            f"[Publication runs](https://github.com/{repo}/actions/workflows/release.yml)"
+        )
+        return
     run_id = receipt.get("workflow_run_id")
     if type(run_id) is not int or run_id <= 0 or not receipt.get("html_url"):
         raise ReleaseError("GitHub did not return the publication run receipt.")
