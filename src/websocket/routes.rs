@@ -162,10 +162,8 @@ use tower_service::Service;
 /// (issue #553). This path drives the same hyper-util auto builder axum
 /// drives, but arms `timer` + `header_read_timeout` + h2 keep-alive, applies
 /// the same accepted-socket configuration as [`bind_serve_listener`],
-/// preserves axum's graceful-shutdown semantics for in-flight connections
-/// (same trigger semantics as `axum::serve::with_graceful_shutdown` over the
-/// shutdown watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps
-/// working.
+/// keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps working, and releases
+/// the listening socket before waiting for accepted connections to finish.
 pub async fn serve_with_http_header_deadline(
     listener: TcpListener,
     mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
@@ -188,8 +186,9 @@ pub async fn serve_with_http_header_deadline(
         }
     }
 
-    let shutdown = shutdown_resolved(shutdown_rx.clone());
+    let shutdown = shutdown_resolved(shutdown_rx);
     tokio::pin!(shutdown);
+    let (connection_shutdown_tx, connection_shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Track every in-flight connection task so the serve future — like axum's
     // graceful shutdown — waits for them after the accept loop stops.
@@ -197,6 +196,7 @@ pub async fn serve_with_http_header_deadline(
 
     loop {
         tokio::select! {
+            biased;
             _ = &mut shutdown => break,
             accepted = listener.accept() => {
                 // Retry semantics copied from axum's Listener impl: transient
@@ -229,7 +229,7 @@ pub async fn serve_with_http_header_deadline(
                     .await
                     .unwrap_or_else(|error| match error {});
                 let hyper_service = TowerToHyperService::new(tower_service);
-                let shutdown_rx_clone = shutdown_rx.clone();
+                let connection_shutdown = shutdown_resolved(connection_shutdown_rx.clone());
 
                 // Per-connection builder, mirroring axum::serve. The timer
                 // must be set for the header-read timeout to take effect at
@@ -254,8 +254,7 @@ pub async fn serve_with_http_header_deadline(
                         .keep_alive_interval(Some(timeouts.h2_keep_alive_interval))
                         .keep_alive_timeout(timeouts.h2_keep_alive_timeout);
 
-                    let shutdown_for_task = shutdown_resolved(shutdown_rx_clone.clone());
-                    tokio::pin!(shutdown_for_task);
+                    tokio::pin!(connection_shutdown);
                     let conn = builder.serve_connection_with_upgrades(
                         TokioIo::new(stream),
                         hyper_service,
@@ -263,7 +262,7 @@ pub async fn serve_with_http_header_deadline(
                     tokio::pin!(conn);
                     tokio::select! {
                         _ = &mut conn => {},
-                        _ = &mut shutdown_for_task => {
+                        _ = &mut connection_shutdown => {
                             // The signal future is complete. Polling it again
                             // panics and drops an active response during drain.
                             conn.as_mut().graceful_shutdown();
@@ -275,9 +274,13 @@ pub async fn serve_with_http_header_deadline(
         }
     }
 
+    // Close the listening socket before accepted connections can announce
+    // HTTP shutdown. Those tasks own their established streams separately.
+    drop(listener);
+    connection_shutdown_tx.send_replace(true);
+
     // axum's graceful shutdown also WAITS for the in-flight connection tasks
-    // after the accept loop stops (each task observed the watch flip above and
-    // called `graceful_shutdown` on its connection). Mirror that: the serve
+    // after the accept loop stops. Mirror that: the serve
     // future resolves only once every tracked connection has finished, so
     // callers' post-drain bounds remain the true deadline instead of racing
     // detached tasks.

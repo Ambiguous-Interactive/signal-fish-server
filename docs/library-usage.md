@@ -42,10 +42,11 @@ repository. For another application, use the dependencies above and copy the
 code below. Use the [configuration guide](configuration.md) to provide valid
 settings. The default metrics policy needs a configured token.
 Press Ctrl+C to send the shutdown advisory, close sockets, and wait for cleanup
-before the runtime exits. The listener uses the server HTTP timeouts. If an HTTP
-connection stays open past the WebSocket drain and final settle period, the
-starter closes the listener and returns a timeout. Signal setup failures return
-the original error after cleanup.
+before the runtime exits. The server closes the listening socket when shutdown
+starts. Accepted connections can finish during the drain. If an HTTP connection
+stays open past the WebSocket drain and final settle period, the starter closes
+that connection and returns a timeout. Signal setup failures return the original
+error after cleanup.
 
 The source is [examples/embedded_server.rs](https://github.com/Ambiguous-Interactive/signal-fish-server/blob/main/examples/embedded_server.rs).
 The example and this block use the same code. The tests run its startup and
