@@ -2231,11 +2231,18 @@ try {
     $changedFilesTimer.Stop()
     $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
     if ($script:InspectWorktree -and $changedProductionRustFiles.Count -gt 0) {
-        # Avoid a second tracked-tree scan when no Rust policy uses it.
-        # Overlap the diff with the checks that precede the Rust policy.
-        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments @(
-            "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--", "src"
-        )
+        # Keep all changed paths under src, including the two sides of a rename
+        # reported as add/delete by discovery, so the patch matches the src diff.
+        $changedSourcePaths = @($allChangedFiles | Where-Object {
+            $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
+        })
+        # Keep capacity for Git options and native argument quoting on Windows.
+        if (($changedSourcePaths -join ' ').Length -gt 4096) {
+            $changedSourcePaths = @('src')
+        }
+        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments (@(
+            "--literal-pathspecs", "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--"
+        ) + $changedSourcePaths)
     }
 } catch {
     # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.
