@@ -4,8 +4,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::coordination::CloseReason;
 use crate::protocol::ServerMessage;
+use tokio::time::Instant;
 
 use super::EnhancedGameServer;
+
+/// Both clocks are sampled once when the instance commits to drain.
+pub(super) struct ShutdownDrainTiming {
+    deadline_ms: u64,
+    close_at: Instant,
+}
 
 /// Tracks an accepted upgrade until it fails or its socket supervisor returns.
 pub(crate) struct SocketTaskGuard {
@@ -36,7 +43,7 @@ impl Drop for SocketTaskGuard {
 pub struct ShutdownDrain {
     /// Unix epoch millisecond deadline advertised to v3 clients.
     pub deadline_ms: u64,
-    /// How long this drain waits before forcing close code 4000.
+    /// The configured grace period before close code 4000.
     pub grace: Duration,
     /// Optional retry hint included in the v3 `GoingAway` advisory.
     pub retry_after_secs: Option<u64>,
@@ -54,6 +61,9 @@ impl ShutdownDrain {
     /// grace period; the bound also keeps an overflowed `u64::MAX` sentinel
     /// deadline (or a backwards wall-clock step) from stretching the drain
     /// into a near-infinite sleep.
+    ///
+    /// Use [`run_drain_choreography`] to preserve the server's original
+    /// monotonic deadline across callers and wall-clock adjustments.
     pub fn wait_before_close(self, elapsed_since_start: Duration) -> Duration {
         self.wait_before_close_since(elapsed_since_start, unix_epoch_ms_now())
     }
@@ -91,7 +101,7 @@ impl EnhancedGameServer {
 
     /// Whether this server is already draining for shutdown.
     pub fn is_draining(&self) -> bool {
-        self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
+        self.shutdown_drain_timing.get().is_some()
     }
 
     /// Whether any accepted WebSocket upgrade or its handler is still active.
@@ -107,34 +117,37 @@ impl EnhancedGameServer {
     /// The first caller fixes the deadline. Later callers observe the same
     /// deadline and do not re-announce a second drain window.
     pub fn begin_shutdown_drain(&self) -> ShutdownDrain {
+        self.start_or_observe_shutdown_drain().0
+    }
+
+    fn start_or_observe_shutdown_drain(&self) -> (ShutdownDrain, Instant) {
         let _commit_guard = self
             .shutdown_drain_commit_gate
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let grace = self.config.drain_grace;
-        let deadline_ms = unix_deadline_ms_after(grace);
-        match self.shutdown_drain_deadline_ms.compare_exchange(
-            0,
-            deadline_ms,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => {
-                let _ = self.shutdown_drain_tx.send(true);
-                ShutdownDrain {
-                    deadline_ms,
-                    grace,
-                    retry_after_secs: retry_after_secs(grace),
-                    started_by_this_call: true,
-                }
+        let started_by_this_call = self.shutdown_drain_timing.get().is_none();
+        let timing = self.shutdown_drain_timing.get_or_init(|| {
+            // The advisory represents time in u64 milliseconds. Limit
+            // the local wait to that range and the platform clock range.
+            let timer_grace = grace.min(Duration::from_millis(u64::MAX));
+            ShutdownDrainTiming {
+                close_at: crate::deadline::saturating_after(Instant::now(), timer_grace),
+                deadline_ms: unix_deadline_ms_after(grace),
             }
-            Err(existing_deadline_ms) => ShutdownDrain {
-                deadline_ms: existing_deadline_ms,
+        });
+        if started_by_this_call {
+            let _ = self.shutdown_drain_tx.send(true);
+        }
+        (
+            ShutdownDrain {
+                deadline_ms: timing.deadline_ms,
                 grace,
                 retry_after_secs: retry_after_secs(grace),
-                started_by_this_call: false,
+                started_by_this_call,
             },
-        }
+            timing.close_at,
+        )
     }
 
     pub(crate) fn shutdown_drain_receiver(&self) -> tokio::sync::watch::Receiver<bool> {
@@ -209,16 +222,18 @@ impl EnhancedGameServer {
     /// waits on the owned WebSocket supervisor lifetime instead of connection-map
     /// membership. It returns the number of handlers still active at timeout.
     pub async fn wait_for_shutdown_connections(&self, max_wait: Duration) -> usize {
-        self.wait_for_shutdown_connections_after_active_check(max_wait, || {})
-            .await
+        self.wait_for_shutdown_connections_until(
+            crate::deadline::after(Instant::now(), max_wait),
+            || {},
+        )
+        .await
     }
 
-    async fn wait_for_shutdown_connections_after_active_check(
+    async fn wait_for_shutdown_connections_until(
         &self,
-        max_wait: Duration,
+        deadline: Option<Instant>,
         mut after_active_check: impl FnMut(),
     ) -> usize {
-        let deadline = crate::deadline::after(tokio::time::Instant::now(), max_wait);
         loop {
             let notified = self.active_socket_tasks_notify.notified();
             tokio::pin!(notified);
@@ -231,7 +246,7 @@ impl EnhancedGameServer {
                 return 0;
             }
 
-            let now = tokio::time::Instant::now();
+            let now = Instant::now();
             if deadline.is_some_and(|deadline| now >= deadline) {
                 return active_tasks;
             }
@@ -259,8 +274,7 @@ pub async fn run_drain_choreography(
     server: &EnhancedGameServer,
     shutdown_tx: tokio::sync::watch::Sender<bool>,
 ) {
-    let drain_started_at = tokio::time::Instant::now();
-    let drain = server.begin_shutdown_drain();
+    let (drain, close_at) = server.start_or_observe_shutdown_drain();
     tracing::info!(
         deadline_ms = drain.deadline_ms,
         grace_ms = u64::try_from(drain.grace.as_millis()).unwrap_or(u64::MAX),
@@ -276,9 +290,8 @@ pub async fn run_drain_choreography(
 
     let _ = shutdown_tx.send(true);
 
-    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
     server
-        .wait_for_shutdown_connections(wait_before_close)
+        .wait_for_shutdown_connections_until(Some(close_at), || {})
         .await;
 
     let close_requests = server.close_connections_for_shutdown();
@@ -332,6 +345,26 @@ mod tests {
     use crate::database::DatabaseConfig;
     use crate::protocol::{Topology, Transport};
     use tokio::sync::mpsc::error::TryRecvError;
+
+    async fn test_server_with_grace(grace: Duration) -> Arc<EnhancedGameServer> {
+        EnhancedGameServer::new(
+            ServerConfig {
+                drain_grace: grace,
+                ..ServerConfig::default()
+            },
+            ProtocolConfig::default(),
+            RelayTypeConfig::default(),
+            SessionConfig::default(),
+            TurnConfig::default(),
+            DatabaseConfig::InMemory,
+            MetricsConfig::default(),
+            CoordinationConfig::default(),
+            TransportSecurityConfig::default(),
+            Vec::new(),
+        )
+        .await
+        .expect("construct server")
+    }
 
     #[test]
     fn unix_deadline_ms_after_never_returns_drain_sentinel() {
@@ -556,6 +589,56 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn observed_shutdown_drain_uses_the_first_monotonic_deadline() {
+        let grace = Duration::from_secs(30);
+        let server = test_server_with_grace(grace).await;
+        let (sender, _receiver) = tokio::sync::mpsc::channel(4);
+        let (close, mut listener) = ConnectionCloseSignal::channel();
+        server
+            .register_client_with_close(sender, close, "127.0.0.1:48991".parse().unwrap())
+            .await
+            .expect("register client");
+        let guard = server.try_track_socket_upgrade().expect("accept upgrade");
+        let started = tokio::time::Instant::now();
+        assert!(server.begin_shutdown_drain().started_by_this_call);
+        tokio::time::advance(Duration::from_secs(20)).await;
+
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let choreography = {
+            let server = Arc::clone(&server);
+            tokio::spawn(async move { run_drain_choreography(&server, shutdown_tx).await })
+        };
+        let early = started + grace - Duration::from_millis(10);
+        assert!(tokio::time::timeout_at(early, listener.closed())
+            .await
+            .is_err());
+        let close_reason = tokio::time::timeout_at(
+            started + grace + Duration::from_millis(5),
+            listener.closed(),
+        )
+        .await
+        .expect("the later caller must close at the first drain's deadline");
+        assert_eq!(close_reason, Some(CloseReason::Shutdown));
+        drop(guard);
+        choreography.await.expect("choreography finishes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oversized_shutdown_grace_has_a_finite_shared_deadline() {
+        let server = test_server_with_grace(Duration::MAX).await;
+        let started = Instant::now();
+        let (first, close_at) = server.start_or_observe_shutdown_drain();
+        let expected = crate::deadline::saturating_after(started, Duration::from_millis(u64::MAX));
+        assert_eq!(close_at, expected, "oversized grace gets a finite deadline");
+        assert_eq!(first.deadline_ms, u64::MAX);
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let (observed, observed_close_at) = server.start_or_observe_shutdown_drain();
+        assert_eq!(observed_close_at, close_at);
+        assert_eq!(observed.deadline_ms, first.deadline_ms);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn shutdown_grace_ends_when_the_last_socket_task_finishes() {
         let server = EnhancedGameServer::new(
             ServerConfig {
@@ -621,8 +704,8 @@ mod tests {
         let mut guard = Some(server.track_socket_task());
 
         let remaining = tokio::select! {
-            remaining = server.wait_for_shutdown_connections_after_active_check(
-                Duration::from_secs(30),
+            remaining = server.wait_for_shutdown_connections_until(
+                Some(Instant::now() + Duration::from_secs(30)),
                 || {
                     drop(guard.take());
                 },
@@ -653,10 +736,9 @@ mod tests {
         .expect("failed to construct test server");
         let mut guard = Some(server.track_socket_task());
 
+        let deadline = crate::deadline::after(Instant::now(), Duration::from_secs(u64::MAX));
         let remaining = server
-            .wait_for_shutdown_connections_after_active_check(Duration::from_secs(u64::MAX), || {
-                drop(guard.take())
-            })
+            .wait_for_shutdown_connections_until(deadline, || drop(guard.take()))
             .await;
 
         assert_eq!(

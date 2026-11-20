@@ -23,11 +23,11 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 #[cfg(test)]
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8};
-use std::sync::atomic::{AtomicU64, AtomicUsize};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8};
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, OnceLock};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch, Notify, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 use tokio::time::Duration;
@@ -1056,9 +1056,8 @@ pub struct EnhancedGameServer {
     transport_security: crate::config::TransportSecurityConfig,
     /// Cached metrics used by the admin dashboard
     dashboard_metrics_cache: Arc<DashboardMetricsCache>,
-    /// Nonzero once graceful shutdown drain has started; stores the advertised
-    /// Unix epoch millisecond close deadline.
-    shutdown_drain_deadline_ms: Arc<AtomicU64>,
+    /// Shared drain state with the advisory timestamp and local close deadline.
+    shutdown_drain_timing: Arc<OnceLock<shutdown::ShutdownDrainTiming>>,
     /// Serializes the reconnect baseline enqueue with the drain transition.
     shutdown_drain_commit_gate: StdMutex<()>,
     /// Wakes drain-sensitive delivery paths so they can cancel backpressured
@@ -1507,7 +1506,7 @@ impl EnhancedGameServer {
         };
 
         let room_applications = Arc::new(DashMap::new());
-        let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
+        let shutdown_drain_timing = Arc::new(OnceLock::new());
         let (shutdown_drain_tx, _) = watch::channel(false);
         let spectator_service = SpectatorService::new(
             database.clone(),
@@ -1520,7 +1519,7 @@ impl EnhancedGameServer {
             reconnection_manager.clone(),
             Arc::clone(&connection_manager),
             Arc::clone(&rate_limiter),
-            Arc::clone(&shutdown_drain_deadline_ms),
+            Arc::clone(&shutdown_drain_timing),
             shutdown_drain_tx.subscribe(),
         );
         let server = Arc::new(Self {
@@ -1576,7 +1575,7 @@ impl EnhancedGameServer {
             spectator_service,
             transport_security,
             dashboard_metrics_cache: dashboard_metrics_cache.clone(),
-            shutdown_drain_deadline_ms,
+            shutdown_drain_timing,
             shutdown_drain_commit_gate: StdMutex::new(()),
             shutdown_drain_tx,
             metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),

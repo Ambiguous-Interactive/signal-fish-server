@@ -534,7 +534,7 @@ async fn setup_service() -> (
         Arc::new(RoomRateLimiter::new(
             crate::rate_limit::RateLimitConfig::default(),
         )),
-        Arc::new(AtomicU64::new(0)),
+        Arc::new(OnceLock::new()),
         drain_rx,
     );
 

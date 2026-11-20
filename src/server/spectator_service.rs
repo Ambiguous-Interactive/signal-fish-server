@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::future::Future;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use dashmap::DashMap;
 use futures_util::FutureExt;
@@ -28,6 +28,7 @@ use tokio::sync::watch;
 
 use super::connection_manager::ClientLifecycle;
 use super::room_service::ROOM_JOIN_LOCK_TTL;
+use super::shutdown::ShutdownDrainTiming;
 use super::ConnectionManager;
 
 /// The owed repair behind a [`SpectatorService::pending_unpublished_detaches`]
@@ -78,7 +79,7 @@ pub(crate) struct SpectatorService {
     reconnection_manager: Option<Arc<ReconnectionManager>>,
     connection_manager: Arc<ConnectionManager>,
     rate_limiter: Arc<RoomRateLimiter>,
-    shutdown_drain_deadline_ms: Arc<AtomicU64>,
+    shutdown_drain_timing: Arc<OnceLock<ShutdownDrainTiming>>,
     shutdown_drain_rx: watch::Receiver<bool>,
     /// Dev-only panic-injection slot for the owned spectator join transaction
     /// (mirrors `EnhancedGameServer::owned_room_operation_panic`).
@@ -156,7 +157,7 @@ async fn wait_for_join<T>(
 }
 
 impl SpectatorService {
-    pub(crate) fn new(
+    pub(super) fn new(
         database: Arc<dyn GameDatabase>,
         room_coordinator: Arc<dyn RoomOperationCoordinatorTrait>,
         message_coordinator: Arc<dyn MessageCoordinator>,
@@ -167,7 +168,7 @@ impl SpectatorService {
         reconnection_manager: Option<Arc<ReconnectionManager>>,
         connection_manager: Arc<ConnectionManager>,
         rate_limiter: Arc<RoomRateLimiter>,
-        shutdown_drain_deadline_ms: Arc<AtomicU64>,
+        shutdown_drain_timing: Arc<OnceLock<ShutdownDrainTiming>>,
         shutdown_drain_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
@@ -184,7 +185,7 @@ impl SpectatorService {
             reconnection_manager,
             connection_manager,
             rate_limiter,
-            shutdown_drain_deadline_ms,
+            shutdown_drain_timing,
             shutdown_drain_rx,
             #[cfg(test)]
             join_panic_point: Arc::new(AtomicU8::new(0)),
@@ -194,7 +195,7 @@ impl SpectatorService {
     }
 
     fn is_draining(&self) -> bool {
-        self.shutdown_drain_deadline_ms.load(Ordering::Acquire) != 0
+        self.shutdown_drain_timing.get().is_some()
     }
 
     /// Undo a durable spectator admission that never became externally

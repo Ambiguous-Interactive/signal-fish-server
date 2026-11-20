@@ -20,8 +20,8 @@ use crate::protocol::{
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use tokio::sync::{mpsc, watch, Notify, RwLock};
 use tokio::time::{timeout, Duration};
 
@@ -131,7 +131,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
     ));
     let protocol_config = ProtocolConfig::default();
     let room_applications = Arc::new(DashMap::new());
-    let shutdown_drain_deadline_ms = Arc::new(AtomicU64::new(0));
+    let shutdown_drain_timing = Arc::new(OnceLock::new());
     let (shutdown_drain_tx, _) = watch::channel(false);
     let spectator_service = SpectatorService::new(
         Arc::clone(&database),
@@ -144,7 +144,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         reconnection_manager.clone(),
         Arc::clone(&connection_manager),
         Arc::clone(&rate_limiter),
-        Arc::clone(&shutdown_drain_deadline_ms),
+        Arc::clone(&shutdown_drain_timing),
         shutdown_drain_tx.subscribe(),
     );
     Arc::new(EnhancedGameServer {
@@ -191,7 +191,7 @@ pub(super) async fn create_test_server_with_message_coordinator_and_lock(
         spectator_service,
         transport_security: TransportSecurityConfig::default(),
         dashboard_metrics_cache,
-        shutdown_drain_deadline_ms,
+        shutdown_drain_timing,
         shutdown_drain_commit_gate: StdMutex::new(()),
         shutdown_drain_tx,
         metrics_rejection_log: crate::websocket::RejectionLogThrottle::new(),
