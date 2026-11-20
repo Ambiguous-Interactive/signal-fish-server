@@ -93,8 +93,8 @@ resolve_release_pr() {
     fi
     if [ -n "${RELEASE_EXPECTED_SOURCE:-}" ]; then
         local reviewed_tree merged_tree
-        if ! reviewed_tree=$(gh api "repos/${REPO}/git/commits/${head_sha}" --jq '.tree.sha') \
-            || ! merged_tree=$(gh api "repos/${REPO}/git/commits/${COMMIT_SHA}" --jq '.tree.sha') \
+        if ! reviewed_tree=$(gh api --method GET "repos/${REPO}/git/commits/${head_sha}" --jq '.tree.sha') \
+            || ! merged_tree=$(gh api --method GET "repos/${REPO}/git/commits/${COMMIT_SHA}" --jq '.tree.sha') \
             || [[ ! "$reviewed_tree" =~ ^[0-9a-f]{40}$ ]] \
             || [ "$reviewed_tree" != "$merged_tree" ]; then
             RELEASE_PR_RESOLUTION="Automated publication requires the squash tree to match PR #${number}."
@@ -141,6 +141,11 @@ DEFAULT_BRANCH=$RELEASE_DEFAULT_BRANCH
 
 if [[ ! "$COMMIT_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "ERROR: RELEASE_COMMIT_SHA must be a full 40-character commit SHA, got '${COMMIT_SHA}'." >&2
+    exit 1
+fi
+
+# Weekly publication requires the reviewed squash tree for both CI proof paths.
+if [ -n "${RELEASE_EXPECTED_SOURCE:-}" ] && ! resolve_release_pr; then
     exit 1
 fi
 
