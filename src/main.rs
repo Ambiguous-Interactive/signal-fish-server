@@ -493,7 +493,7 @@ async fn main() -> anyhow::Result<()> {
 
     // The settle budget the drain choreography grants registered connections
     // for their close frames. It is also the bound on how long the process
-    // will keep the listener alive after the drain completes: a client parked
+    // will wait for HTTP connections after the drain completes: a client parked
     // mid-HTTP-request (or mid-TLS handshake) can otherwise hold the serve
     // future open forever, hanging the process after a *successful* drain.
     let post_drain_settle_budget = websocket::registered_connection_shutdown_settle_timeout();
@@ -609,8 +609,8 @@ async fn main() -> anyhow::Result<()> {
     match serve_result {
         Some(result) => result.map_err(|error| anyhow::anyhow!("server error: {error}"))?,
         None => anyhow::bail!(
-            "forced exit: the listener did not stop within {post_drain_settle_budget:?} after \
-             the drain completed (a client likely holds a stalled partial request)"
+            "forced exit: HTTP connections did not close within {post_drain_settle_budget:?} \
+             after the drain completed"
         ),
     }
 
@@ -647,8 +647,7 @@ async fn serve_with_post_drain_bound(
         () = post_drain_settle_bound(drain_done_rx, settle) => {
             tracing::warn!(
                 settle = ?settle,
-                "drain completed but the listener did not stop within the settle budget; \
-                 forcing exit"
+                "HTTP connections stayed open after the drain and settle period"
             );
             None
         }

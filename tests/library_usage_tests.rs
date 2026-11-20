@@ -45,6 +45,18 @@ async fn connect_v3(addr: SocketAddr) -> WebSocketStream<MaybeTlsStream<TcpStrea
     socket
 }
 
+async fn read_http2_frame(stream: &mut TcpStream) -> (u8, u8, u64) {
+    let mut header = [0; 9];
+    stream.read_exact(&mut header).await.expect("frame header");
+    let [high, middle, low, frame_type, flags, ..] = header;
+    let length = u64::from(u32::from_be_bytes([0, high, middle, low]));
+    let read = tokio::io::copy(&mut stream.take(length), &mut tokio::io::sink())
+        .await
+        .expect("frame body");
+    assert_eq!(read, length, "complete HTTP/2 frame");
+    (frame_type, flags, length)
+}
+
 #[test]
 fn documented_starter_matches_compiled_example() {
     let guide = include_str!("../docs/library-usage.md");
@@ -226,17 +238,11 @@ async fn starter_shutdown_bounds_unresponsive_http2_peer() {
             .expect("send HTTP/2 preface and SETTINGS");
         // The SETTINGS ACK proves the server reached HTTP/2 before shutdown.
         loop {
-            let mut header = [0; 9];
-            http2.read_exact(&mut header).await.expect("frame header");
-            let [high, middle, low, frame_type, flags, ..] = header;
-            let length = u64::from(u32::from_be_bytes([0, high, middle, low]));
+            let (frame_type, flags, length) = read_http2_frame(&mut http2).await;
             if frame_type == 4 && flags == 1 {
                 assert_eq!(length, 0, "SETTINGS ACK body");
                 break;
             }
-            tokio::io::copy(&mut (&mut http2).take(length), &mut tokio::io::sink())
-                .await
-                .expect("frame body");
         }
         (http2, connect_v3(addr).await)
     })
@@ -269,6 +275,27 @@ async fn starter_shutdown_bounds_unresponsive_http2_peer() {
         Message::Pong(b"drain grace".as_slice().into())
     );
 
+    // The existing HTTP/2 task has entered graceful shutdown. Keep it
+    // parked while a fresh connection attempts to reach the old listener.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let (frame_type, _, _) = read_http2_frame(&mut http2).await;
+            if frame_type == 7 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("the existing HTTP/2 peer receives GOAWAY");
+    let reconnect = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(addr))
+        .await
+        .expect("loopback connection attempt finishes");
+    assert_eq!(
+        reconnect.as_ref().err().map(std::io::Error::kind),
+        Some(std::io::ErrorKind::ConnectionRefused),
+        "the listener must refuse fresh TCP connections while the drain is active: {reconnect:?}"
+    );
+
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(7)).await;
     tokio::time::resume();
@@ -290,7 +317,7 @@ async fn starter_shutdown_bounds_unresponsive_http2_peer() {
         .expect("embedded shutdown must finish after the post-drain budget")
         .expect("server task")
         .expect("server task join")
-        .expect_err("a forced listener exit must report an error");
+        .expect_err("forced HTTP connection closure must report an error");
     assert_eq!(
         error
             .downcast_ref::<std::io::Error>()
@@ -301,7 +328,7 @@ async fn starter_shutdown_bounds_unresponsive_http2_peer() {
     let closed =
         tokio::time::timeout(Duration::from_secs(2), http2.read_to_end(&mut final_frames)).await;
     closed
-        .expect("the HTTP/2 connection closes with the listener")
+        .expect("the HTTP/2 connection closes after the settle period")
         .expect("read HTTP/2 EOF");
     let restart_result = tokio::time::timeout(Duration::from_secs(5), async {
         let restarted_server = embedded_server::build_server(&cfg)

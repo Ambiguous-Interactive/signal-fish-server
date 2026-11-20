@@ -162,10 +162,8 @@ use tower_service::Service;
 /// (issue #553). This path drives the same hyper-util auto builder axum
 /// drives, but arms `timer` + `header_read_timeout` + h2 keep-alive, applies
 /// the same accepted-socket configuration as [`bind_serve_listener`],
-/// preserves axum's graceful-shutdown semantics for in-flight connections
-/// (same trigger semantics as `axum::serve::with_graceful_shutdown` over the
-/// shutdown watch), and keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps
-/// working.
+/// keeps HTTP/2 CONNECT so WebSocket-over-HTTP/2 keeps working, and releases
+/// the listening socket before waiting for accepted connections to finish.
 pub async fn serve_with_http_header_deadline(
     listener: TcpListener,
     mut make_service: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
@@ -274,6 +272,10 @@ pub async fn serve_with_http_header_deadline(
             }
         }
     }
+
+    // Stop the kernel from completing new TCP handshakes while accepted
+    // connections finish. Those connections own their streams separately.
+    drop(listener);
 
     // axum's graceful shutdown also WAITS for the in-flight connection tasks
     // after the accept loop stops (each task observed the watch flip above and

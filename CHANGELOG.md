@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refuse new plain TCP connections while existing connections drain during shutdown (#826).
 - Finish embedded server shutdown when an HTTP peer stops responding (#826).
 - Honor the first shutdown grace deadline across callers and keep the wait finite (#826).
 - Finish shutdown early once all WebSockets and pending upgrades have ended (#826).
