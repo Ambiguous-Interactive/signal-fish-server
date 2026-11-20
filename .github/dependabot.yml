@@ -197,35 +197,6 @@ updates:
           - "patch"
 
   # ============================================================================
-  # JavaScript Dependencies - Repository Tooling
-  # ============================================================================
-  # Covers the locked markdownlint toolchain used by local and hosted checks.
-  - package-ecosystem: "npm"
-    directory: "/"
-    schedule:
-      interval: "daily"
-      time: "03:45"
-      timezone: "America/Los_Angeles"
-    assignees:
-      - "wallstop"
-    rebase-strategy: "auto"
-    commit-message:
-      prefix: "chore(deps)"
-      include: "scope"
-    open-pull-requests-limit: 2
-    labels:
-      - "dependencies"
-      - "automated"
-    groups:
-      npm-tooling-updates:
-        patterns:
-          - "*"
-        update-types:
-          - "major"
-          - "minor"
-          - "patch"
-
-  # ============================================================================
   # JavaScript Dependencies - Browser Reference Client
   # ============================================================================
   - package-ecosystem: "npm"

@@ -4906,32 +4906,17 @@ fn test_typos_config_covers_known_files() {
 
 #[test]
 fn test_markdown_config_exists() {
-    // This test ensures the .markdownlint.json configuration exists
-    // Prevents missing markdownlint configuration
-
-    let root = repo_root();
-    let markdownlint_config = root.join(".markdownlint.json");
-
-    assert!(
-        markdownlint_config.exists(),
-        ".markdownlint.json configuration file is missing.\n\
-         This file is required for markdown linting in CI.\n\
-         See .github/workflows/markdownlint.yml"
-    );
-
-    let content = read_live_file(&markdownlint_config);
-
-    // Verify it's valid JSON
-    assert!(
-        content.trim().starts_with('{') && content.trim().ends_with('}'),
-        ".markdownlint.json does not appear to be valid JSON"
-    );
-
-    // Check for MD040 rule (code block language identifiers)
-    assert!(
-        content.contains("MD040"),
-        ".markdownlint.json must include MD040 rule (code block language identifiers)"
-    );
+    let content = read_live_file(&repo_root().join(".rumdl.toml"));
+    let rules = content
+        .split_once("enable = [")
+        .and_then(|(_, tail)| tail.split_once(']'))
+        .map(|(rules, _)| rules)
+        .expect("explicit rule set");
+    assert_eq!(rules.matches("\"MD").count(), 51);
+    assert!(rules.contains("\"MD040\""));
+    for rule in ["MD041", "MD060", "MD076", "MD077"] {
+        assert!(!rules.contains(rule));
+    }
 }
 
 #[test]
@@ -5238,7 +5223,7 @@ fn test_check_readme_badges_script_rejects_multiple_positional_args() {
 
 #[test]
 fn test_markdown_guidance_avoids_stale_md060_references() {
-    // The repository disables MD060 in .markdownlint.json, so guidance should not
+    // The repository disables MD060 in .rumdl.toml, so guidance should not
     // instruct contributors to rely on MD060 behavior.
     let root = repo_root();
     let guidance_files = [
@@ -5268,163 +5253,20 @@ fn test_markdown_guidance_avoids_stale_md060_references() {
 
 #[test]
 fn test_check_markdown_script_enforces_pinned_runner_policy() {
-    // Supply-chain hardening policy:
-    //   - No npx runtime downloads
-    //   - No Docker latest fallback for markdownlint
-    //   - Enforce pinned markdownlint version via .markdownlint-version
-    let root = repo_root();
-    let script = root.join("scripts/check-markdown.sh");
-    let content = read_file(&script);
-    // Presence checks assert against the live view (the script's header comment
-    // names `.markdownlint-version`); the npx/docker MUST-NOT-appear checks below
-    // stay on raw `content`.
-    let content_live = strip_comment_lines(&content);
-
-    assert!(
-        content_live.contains(".markdownlint-version"),
-        "check-markdown.sh must read required version from .markdownlint-version.\n\
-         Missing pinned version reference in {}",
-        script.display()
-    );
-
-    assert!(
-        content_live.contains("command -v markdownlint-cli2"),
-        "check-markdown.sh must still detect locally available markdownlint-cli2.\n\
-         Missing detection logic in {}",
-        script.display()
-    );
-
-    assert!(
-        !content.contains("npx --yes") && !content.contains("command -v npx"),
-        "check-markdown.sh must not execute markdownlint via npx runtime downloads.\n\
-         Remove npx fallback logic from {}",
-        script.display()
-    );
-
-    assert!(
-        !content.contains("davidanson/markdownlint-cli2:latest")
-            && !content.contains("command -v docker"),
-        "check-markdown.sh must not use Docker latest fallback for markdownlint.\n\
-         Remove docker fallback logic from {}",
-        script.display()
-    );
-
-    assert!(
-        content_live.contains("npm install --save-dev --save-exact markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}")
-            && content_live.contains("npm install -g markdownlint-cli2@${REQUIRED_MARKDOWNLINT_VERSION}"),
-        "check-markdown.sh should document both local and global pinned markdownlint installation paths.\n\
-         Update install guidance in {}",
-        script.display()
-    );
-
-    assert!(
-        content_live.contains("Detected runner mode: ${MARKDOWNLINT_MODE}"),
-        "check-markdown.sh should print detected runner mode on version mismatch for clearer diagnostics.\n\
-         Update mismatch guidance in {}",
-        script.display()
-    );
-
-    assert!(
-        content_live.contains("./scripts/check-markdown-link-text.sh"),
-        "check-markdown.sh must enforce human-readable internal markdown link text via scripts/check-markdown-link-text.sh.\n\
-         Missing link-text policy enforcement in {}",
-        script.display()
-    );
-
-    assert!(
-        content_live.contains("git ls-files -z -- '*.md'"),
-        "check-markdown.sh must lint tracked Markdown files from git when \
-         available. This keeps local runs aligned with clean CI checkouts and \
-         avoids ignored planning artifacts causing false failures.\n\
-         Missing tracked-file discovery in {}",
-        script.display()
-    );
-}
-
-#[test]
-fn test_check_markdown_script_common_issue_guidance_is_data_driven() {
-    struct GuidanceCase {
-        rule_id: &'static str,
-        symptom: &'static str,
-        fix_hint: &'static str,
+    let content = read_live_file(&repo_root().join("scripts/check-markdown.sh"));
+    for fragment in [
+        ".rumdl-version",
+        "rumdl --version",
+        "\"rumdl $required_version\"",
+        "--deny-config-warnings",
+        "--output-format full",
+        "scripts/check-markdown-link-text.sh",
+        "git ls-files -z -- '*.md'",
+    ] {
+        assert!(content.contains(fragment), "Markdown runner requires {fragment}");
     }
-
-    let root = repo_root();
-    let script = root.join("scripts/check-markdown.sh");
-    let content = read_live_file(&script);
-
-    let cases = [
-        GuidanceCase {
-            rule_id: "MD013",
-            symptom: "Line length exceeds configured limit",
-            fix_hint: "Reflow paragraphs or split long list items/links across lines",
-        },
-        GuidanceCase {
-            rule_id: "MD040",
-            symptom: "Missing language identifier on code blocks",
-            fix_hint: "Add language identifier after opening backticks",
-        },
-        GuidanceCase {
-            rule_id: "MD046",
-            symptom: "Inconsistent code block style",
-            fix_hint: "Use fenced code blocks",
-        },
-    ];
-
-    for case in cases {
-        let rule_line = format!("  - {}: {}", case.rule_id, case.symptom);
-        assert!(
-            content.contains(&rule_line),
-            "check-markdown.sh missing common issue guidance for {}.\nExpected line: {}\nFile: {}",
-            case.rule_id,
-            rule_line,
-            script.display()
-        );
-
-        assert!(
-            content.contains(case.fix_hint),
-            "check-markdown.sh missing fix hint for {}.\nExpected hint fragment: {}\nFile: {}",
-            case.rule_id,
-            case.fix_hint,
-            script.display()
-        );
-    }
-}
-
-#[test]
-fn test_check_markdown_script_md013_diagnostics_are_data_driven() {
-    struct DiagnosticCase {
-        expected_fragment: &'static str,
-        purpose: &'static str,
-    }
-
-    let root = repo_root();
-    let script = root.join("scripts/check-markdown.sh");
-    let content = read_live_file(&script);
-
-    let cases = [
-        DiagnosticCase {
-            expected_fragment: "MD013 diagnostics (source lines):",
-            purpose: "prints a dedicated MD013 diagnostics heading",
-        },
-        DiagnosticCase {
-            expected_fragment: "grep \"MD013/line-length\"",
-            purpose: "extracts MD013 failures from markdownlint output",
-        },
-        DiagnosticCase {
-            expected_fragment: "sed -n \"${line_number}p\"",
-            purpose: "prints the offending source line for faster debugging",
-        },
-    ];
-
-    for case in cases {
-        assert!(
-            content.contains(case.expected_fragment),
-            "check-markdown.sh is missing MD013 diagnostic behavior: {}.\nExpected fragment: {}\nFile: {}",
-            case.purpose,
-            case.expected_fragment,
-            script.display()
-        );
+    for tool in ["npx ", "npm ", "docker run"] {
+        assert!(!content.contains(tool), "Markdown runner must work without {tool}");
     }
 }
 
@@ -5480,62 +5322,16 @@ fn test_run_local_ci_fails_closed_when_markdownlint_is_unavailable() {
 
     assert!(
         content_live.contains(
-            "FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)",
+            "FAIL${NC}: markdown (pinned rumdl unavailable or version mismatch)",
         ),
-        "scripts/run-local-ci.sh must mark markdown as FAIL when markdownlint-cli2 is unavailable.\n\
+        "scripts/run-local-ci.sh must mark markdown as FAIL when rumdl is unavailable.\n\
          Missing fail-closed markdown status in {}",
         script_path.display()
     );
 
     assert!(
-        !content.contains("SKIP${NC}: markdown (pinned markdownlint-cli2 unavailable)"),
-        "scripts/run-local-ci.sh should not skip markdown checks when pinned markdownlint-cli2 is unavailable."
-    );
-}
-
-#[test]
-fn test_markdownlint_install_guidance_includes_local_and_global_options() {
-    let root = repo_root();
-    let guidance_files = [
-        "scripts/check-markdown.sh",
-        "scripts/enable-hooks.sh",
-        "docs/git-hooks-guide.md",
-        ".llm/skills/markdown-best-practices/SKILL.md",
-    ];
-
-    let mut missing_local = Vec::new();
-    let mut missing_global = Vec::new();
-
-    for relative_path in guidance_files {
-        let path = root.join(relative_path);
-        let raw = read_file(&path);
-        // `.sh` guidance can be commented out and still match a raw substring search;
-        // strip its comments. Markdown (`#` = heading) must stay raw.
-        let content = if relative_path.ends_with(".md") {
-            raw
-        } else {
-            strip_comment_lines(&raw)
-        };
-
-        if !content.contains("npm install --save-dev --save-exact markdownlint-cli2@") {
-            missing_local.push(relative_path.to_string());
-        }
-        if !content.contains("npm install -g markdownlint-cli2@") {
-            missing_global.push(relative_path.to_string());
-        }
-    }
-
-    assert!(
-        missing_local.is_empty(),
-        "Markdownlint guidance should include local pinned install instructions.\n\
-         Missing in:\n  - {}",
-        missing_local.join("\n  - ")
-    );
-    assert!(
-        missing_global.is_empty(),
-        "Markdownlint guidance should include global pinned install instructions as an alternative.\n\
-         Missing in:\n  - {}",
-        missing_global.join("\n  - ")
+        !content.contains("SKIP${NC}: markdown (pinned rumdl unavailable)"),
+        "scripts/run-local-ci.sh should not skip markdown checks when pinned rumdl is unavailable."
     );
 }
 
@@ -5630,41 +5426,26 @@ fn test_git_hook_skill_external_code_sample_links_exist() {
 #[test]
 fn test_markdownlint_version_file_exists_and_is_semver() {
     let root = repo_root();
-    let version_file = root.join(".markdownlint-version");
+    let version_file = root.join(".rumdl-version");
 
     assert!(
         version_file.exists(),
-        ".markdownlint-version must exist to pin markdownlint-cli2 version for local automation."
+        ".rumdl-version must exist to pin the rumdl version for local automation."
     );
 
     let version = read_file(&version_file).trim().to_string();
     let semver_pattern = regex::Regex::new(r"^\d+\.\d+\.\d+$").expect("valid semver regex");
     assert!(
         semver_pattern.is_match(&version),
-        ".markdownlint-version must contain a plain semantic version (X.Y.Z).\n\
+        ".rumdl-version must contain a plain semantic version (X.Y.Z).\n\
          Found: '{version}'"
     );
 
-    // scripts/check-markdown.sh requires the installed markdownlint-cli2 to
-    // equal .markdownlint-version exactly, and prefers the npm-installed
-    // runner. The two pins must move in the same commit or the Markdownlint
-    // CI job fails on version mismatch.
-    let lock: serde_json::Value =
-        serde_json::from_str(&read_live_file(&root.join("package-lock.json")))
-            .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
-    let installed = lock
-        .get("packages")
-        .and_then(|packages| packages.get("node_modules/markdownlint-cli2"))
-        .and_then(|entry| entry.get("version"))
-        .and_then(|version| version.as_str())
-        .expect("package-lock.json must install markdownlint-cli2");
-    assert_eq!(
-        version, installed,
-        ".markdownlint-version ({version}) and the npm-installed markdownlint-cli2 \
-         ({installed}) must match exactly.\n\
-         Fix: bump both pins in the same commit (package.json + `npm install` \
-         + .markdownlint-version)."
-    );
+    let workflow = read_live_file(&root.join(".github/workflows/markdownlint.yml"));
+    let container = read_live_file(&root.join(".devcontainer/Dockerfile"));
+    assert!(workflow.contains("rumdl@$(cat .rumdl-version)"));
+    assert!(container.contains("COPY .rumdl-version"));
+    assert!(container.contains("rumdl@$(cat /tmp/signal-fish-rumdl-version)"));
 }
 
 #[test]
@@ -6774,19 +6555,6 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
 
     let mut consumed: BTreeSet<String> = BTreeSet::new();
     for step in deny_steps {
-        let working_directory = step
-            .as_mapping_get("working-directory")
-            .and_then(Yaml::as_str)
-            .unwrap_or(".")
-            .trim_end_matches('/')
-            .to_owned();
-        let in_directory = |file: &str| {
-            if working_directory == "." {
-                file.to_owned()
-            } else {
-                format!("{working_directory}/{file}")
-            }
-        };
         let Some(run) = step.as_mapping_get("run").and_then(Yaml::as_str) else {
             continue;
         };
@@ -6807,17 +6575,6 @@ fn test_ci_deny_job_skips_dependency_irrelevant_pull_requests() {
                 // The bare invocation audits the server graph at the repo root.
                 consumed.insert("Cargo.lock".to_owned());
             }
-        }
-        if run.lines().any(|line| {
-            let trimmed = line.trim();
-            // Either bare `npm audit` shape (kept for the historical retry
-            // form) or the gate invocation, whose graph argument names the
-            // audited directory (root → repo root, browser → clients/browser).
-            matches!(trimmed, "npm audit" | "if npm audit; then")
-                || trimmed == "bash scripts/npm-audit-gate.sh root"
-        }) {
-            consumed.insert(in_directory("package.json"));
-            consumed.insert(in_directory("package-lock.json"));
         }
         if run.contains("bash scripts/npm-audit-gate.sh encoding") {
             consumed.insert("benches/encoding/typescript/package.json".to_owned());
@@ -12269,7 +12026,7 @@ const MD_URL_STRIP_PATTERN: &str = r"\]\([^)]*\)";
 const RAW_URL_STRIP_PATTERN: &str = r"(?:https?|wss?|ftp)://\S+";
 
 // Regex pattern for stripping HTML elements (opening, closing, and self-closing tags)
-// to match .markdownlint.json MD044 "html_elements": false behavior, which skips
+// to match .rumdl.toml MD044 "html_elements": false behavior, which skips
 // content within HTML elements when checking proper noun capitalization.
 const HTML_ELEMENT_PATTERN: &str = r"<[^>]+>";
 
@@ -12278,7 +12035,7 @@ fn test_markdown_technical_terms_consistency() {
     // This test validates that technical terms use consistent capitalization
     // Prevents documentation inconsistency and improves professionalism
     //
-    // Based on .markdownlint.json MD044 configuration
+    // Based on .rumdl.toml MD044 configuration
 
     let root = repo_root();
 
@@ -12397,7 +12154,7 @@ fn test_markdown_technical_terms_consistency() {
         panic!(
             "Found inconsistent technical term capitalization:\n\n{}\n\n\
              Fix the capitalization in the files above.\n\
-             If markdownlint MD044 should catch these, verify .markdownlint.json 'names' array \
+             If markdownlint MD044 should catch these, verify .rumdl.toml 'names' array \
              is configured correctly.",
             violations.join("\n\n")
         );
@@ -13273,12 +13030,10 @@ fn test_markdownlint_workflow_exists_and_is_configured() {
     let content = read_live_file(&workflow);
     let script_content = read_live_file(&root.join("scripts/check-markdown.sh"));
 
-    // Verify workflow uses markdownlint-cli2-action
-    assert!(
-        content.contains("DavidAnson/markdownlint-cli2-action")
-            || content.contains("markdownlint-cli2"),
-        "markdownlint.yml must use markdownlint-cli2"
-    );
+    assert!(content.contains("tool: cargo-binstall"));
+    assert!(content.contains("bash scripts/check-markdown.sh"));
+    assert!(!content.contains("actions/setup-node"));
+    assert!(!content.contains("npm ci"));
 
     // Verify workflow excludes common directories
     let excluded_dirs = vec!["target", "third_party", "node_modules"];
@@ -25689,7 +25444,7 @@ fn test_hook_readiness_default_is_required_hook_health_only() {
         content.contains("[switch]$WorkflowTools")
             && content[..workflow_tools_gate].contains("$requiredTools = @(\"git\", \"pwsh\")")
             && content[workflow_tools_gate..].contains("$optionalTools = @(")
-            && content[workflow_tools_gate..].contains(".markdownlint-version"),
+            && content[workflow_tools_gate..].contains(".rumdl-version"),
         "scripts/check-hook-readiness.ps1 default mode must check only required hook \
          health. Optional workflow tools and markdownlint version probes belong behind \
          -WorkflowTools so native hook setup stays fast and dependency-light."
@@ -26148,7 +25903,7 @@ fn test_pre_commit_changelog_gate_classification_and_verdicts_when_pwsh_availabl
                     "docs/development.md", "docs/development/arm-capacity-audit.md", "docs/releasing.md",
                     "Cargo.lock", "PLAN.md", "AGENTS.md", "CLAUDE.md",
                     "pre-push.txt", "pre-commit.txt", "logs_2025.zip",
-                    ".markdownlint.yaml", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
+                    ".rumdl.toml", ".rumdl-version", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
                     ".gitignore", ".dockerignore",
                     "clippy.toml", "deny.toml", "tarpaulin.toml", "rust-toolchain.toml",
                     "mkdocs.yml", "requirements-docs.txt"
@@ -29664,7 +29419,6 @@ fn test_audit_job_covers_every_dependabot_managed_npm_graph() {
                 .lines()
                 .find_map(|line| line.trim().strip_prefix("bash scripts/npm-audit-gate.sh "))?;
             match graph.trim() {
-                "root" => Some(".".to_owned()),
                 "browser" => Some("clients/browser".to_owned()),
                 "encoding" => Some("benches/encoding/typescript".to_owned()),
                 other => panic!(
@@ -29727,7 +29481,6 @@ fn test_npm_audit_retry_steps_fail_closed() {
     let graphs = dependabot_npm_directories()
         .iter()
         .map(|directory| match directory.as_str() {
-            "/" => "root".to_owned(),
             "/clients/browser" => "browser".to_owned(),
             "/benches/encoding/typescript" => "encoding".to_owned(),
             other => panic!(
@@ -29906,93 +29659,6 @@ fn collect_shell_scripts(directory: &Path, sources: &mut Vec<PathBuf>) {
             sources.push(path);
         }
     }
-}
-
-/// A `major.minor.patch` triple for advisory-range comparisons; unknown
-/// components parse as 0 so malformed versions fail closed (flagged).
-fn npm_version_triple(version: &str) -> (u64, u64, u64) {
-    let mut parts = version.split('.');
-    let mut component = || {
-        parts
-            .next()
-            .and_then(|part| part.parse::<u64>().ok())
-            .unwrap_or(0)
-    };
-    (component(), component(), component())
-}
-
-#[test]
-fn test_root_npm_lock_resolves_patched_smol_toml() {
-    // GHSA-7w5x-hrqm-74c2: smol-toml <=1.7.0 has a high-severity DoS via
-    // malformed TOML documents. The temporary root `override` is gone:
-    // markdownlint-cli2 0.23.3 declares smol-toml 1.8.0 itself (issue #603).
-    // This pin keeps the installed graph honest and flags the vulnerable
-    // range if it ever sneaks back in.
-    let root = repo_root();
-    let text = read_live_file(&root.join("package-lock.json"));
-    let lock: serde_json::Value = serde_json::from_str(&text)
-        .unwrap_or_else(|error| panic!("package-lock.json must parse as JSON: {error}"));
-    let packages = lock
-        .get("packages")
-        .and_then(|packages| packages.as_object())
-        .expect("package-lock.json must define a packages map");
-
-    let vulnerable = packages
-        .iter()
-        .filter(|(path, entry)| {
-            path.contains("smol-toml")
-                && entry
-                    .get("version")
-                    .and_then(|version| version.as_str())
-                    .is_some_and(|version| npm_version_triple(version) <= (1, 7, 0))
-        })
-        .map(|(path, _)| path.as_str())
-        .collect::<Vec<_>>();
-    assert!(
-        vulnerable.is_empty(),
-        "package-lock.json resolves smol-toml versions in the vulnerable \
-         GHSA-7w5x-hrqm-74c2 range (<=1.7.0): {vulnerable:?}.\n\
-         Fix: raise every smol-toml source to a patched release (>=1.7.1) — \
-         prefer a markdownlint-cli2 bump that declares it — and regenerate \
-         the lockfile."
-    );
-}
-
-#[test]
-fn test_markdownlint_workflow_uses_supported_node_runtime() {
-    let root = repo_root();
-    let path = root.join(".github/workflows/markdownlint.yml");
-    let content = read_live_file(&path);
-    let documents = Yaml::load_from_str(&content).expect("markdownlint.yml must parse as YAML");
-    let steps = documents
-        .first()
-        .and_then(|document| document.as_mapping_get("jobs"))
-        .and_then(|jobs| jobs.as_mapping_get("markdownlint"))
-        .and_then(|job| job.as_mapping_get("steps"))
-        .and_then(Yaml::as_sequence)
-        .unwrap_or_else(|| panic!("markdownlint.yml must define jobs.markdownlint.steps"));
-    let setup_node_index = steps.iter().position(|step| {
-        step.as_mapping_get("uses")
-            .and_then(Yaml::as_str)
-            .is_some_and(|uses| uses.starts_with("actions/setup-node@"))
-            && step
-                .as_mapping_get("with")
-                .and_then(|with| with.as_mapping_get("node-version"))
-                .and_then(Yaml::as_str)
-                == Some("22")
-    });
-    let npm_ci_index = steps.iter().position(|step| {
-        step.as_mapping_get("run")
-            .and_then(Yaml::as_str)
-            .is_some_and(|run| run.contains("npm ci"))
-    });
-
-    assert!(
-        setup_node_index.is_some_and(|setup| npm_ci_index.is_some_and(|install| setup < install)),
-        "markdownlint.yml must install Node 22 before `npm ci`; the pinned markdownlint-cli2 \
-         requires that runtime.\nFix: add a pinned actions/setup-node step with node-version: \"22\" \
-         before the dependency-install step."
-    );
 }
 
 #[test]
@@ -34723,7 +34389,9 @@ const SHARED_INTERNAL_PATH_PATTERNS: &[&str] = &[
     "docs/pre-commit-*",
     "docs/development.md",
     "docs/releasing.md",
-    ".markdownlint*",
+    "docs/adr/msrv-consistency-enforcement.md",
+    ".rumdl.toml",
+    ".rumdl-version",
     ".lychee.toml",
     ".lycheecache",
     ".typos.toml",
@@ -34863,7 +34531,7 @@ const INTERNAL_PATH_CLASSIFICATION_CASES: &[(&str, bool, &str)] = &[
     ("deny.toml", true, "deny.toml is internal tooling config"),
     (".llm/context.md", true, "LLM context files are internal"),
     (
-        ".markdownlint.yaml",
+        ".rumdl.toml",
         true,
         "linter config files are internal",
     ),

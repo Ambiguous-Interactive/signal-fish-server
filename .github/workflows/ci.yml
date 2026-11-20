@@ -570,7 +570,7 @@ jobs:
                 clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd) ;;
                 src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs) ;;
                 docs/ci-cd-*|docs/test-*|docs/git-hooks-*|docs/hooks-*|docs/pre-commit-*|docs/development.md|docs/development/*|docs/releasing.md|docs/quickstart.md) ;;
-                .markdownlint*|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
+                .markdownlint*|.rumdl.toml|.rumdl-version|.lychee.toml|.lycheecache|.typos.toml|.yamllint.yml) ;;
                 .gitignore|.dockerignore) ;;
                 PLAN.md|AGENTS.md|CLAUDE.md|pre-push.txt) ;;
                 logs_*.zip) ;;
@@ -790,9 +790,6 @@ jobs:
       # stale, and keeps the #533 transient-503 retry with backoff. The #601
       # rule holds: a parseable report is authoritative and never retried, so
       # no finding can be swallowed by the retry loop's exit status.
-      - name: Run npm audit (repository tooling)
-        if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        run: bash scripts/npm-audit-gate.sh root
       - name: Run npm audit (browser reference client)
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
         run: bash scripts/npm-audit-gate.sh browser

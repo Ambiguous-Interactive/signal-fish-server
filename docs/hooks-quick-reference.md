@@ -47,14 +47,13 @@ The default readiness check verifies `core.hooksPath`, executable bits, and
 required tools (`git`, `pwsh`). Add `-WorkflowTools` to inventory optional
 local-CI tools.
 
-## Markdownlint
+## Markdown checks
 
-Markdownlint is fail-closed in local CI and CI, not in git hooks. Install the
-pinned version with either:
+Local CI and GitHub Actions run the pinned rumdl version. Install it with cargo-binstall.
 
 ```bash
-npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+cargo binstall --locked --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"
+bash scripts/check-markdown.sh
 ```
 
 ## Bypass Hooks

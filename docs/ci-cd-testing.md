@@ -68,7 +68,7 @@ Tests that validate markdown formatting and consistency:
 | `test_markdown_no_capitalized_filenames_in_links` | Catches capitalization issues in links | Link breakage on case-sensitive filesystems |
 | `test_markdown_technical_terms_consistency` | Validates technical term capitalization (strips URLs/HTML before checking) | Inconsistent documentation (GitHub vs `github`) |
 | `test_markdown_common_patterns_are_correct` | Data-driven pattern validation | Common formatting mistakes |
-| `test_markdown_config_exists` | Validates `.markdownlint.json` exists | Missing markdownlint configuration |
+| `test_markdown_config_exists` | Validates `.rumdl.toml` exists | Missing markdownlint configuration |
 
 **Example:** Data-driven pattern validation
 
@@ -771,7 +771,7 @@ ls -la .githooks/pre-commit
 
 #### 6. Tests Failing After Config Changes
 
-**Symptom:** CI tests fail after updating `.lychee.toml` or `.markdownlint.json`.
+**Symptom:** CI tests fail after updating `.lychee.toml` or `.rumdl.toml`.
 
 **Solution:**
 
@@ -787,8 +787,8 @@ cargo test --manifest-path tools/repo-checks/Cargo.toml --test ci_config_tests
 # For .lychee.toml
 lychee --dump .lychee.toml
 
-# For .markdownlint.json
-markdownlint-cli2 --help  # Validates config on load
+# For .rumdl.toml
+bash scripts/check-markdown.sh
 ```
 
 #### 7. Panic Policy Check Failing

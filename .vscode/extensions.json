@@ -6,7 +6,7 @@
     "serayuzgur.crates",
 
     // Markdown linting and formatting
-    "davidanson.vscode-markdownlint",
+    "rvben.rumdl",
 
     // YAML validation
     "redhat.vscode-yaml",

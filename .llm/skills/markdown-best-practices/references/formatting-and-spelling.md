@@ -236,7 +236,7 @@ inline code (e.g., `` `rust:1.88` ``) to suppress MD044 inside code spans.
 
 ## Pitfall: MD044 and URLs in HTML Attributes
 
-The `.markdownlint.json` has `"html_elements": false` for MD044, meaning content inside
+The `.rumdl.toml` has `html-elements = false` for MD044, meaning content inside
 HTML elements is not checked for proper name capitalization. URLs in HTML attributes
 (`href="..."`, `src="..."`) contain domain names like `github.io` that are correctly
 lowercase.
@@ -263,7 +263,7 @@ constant in `tests/ci_config_tests.rs`.
 
 ## VS Code Integration
 
-Recommended extensions for `.vscode/extensions.json`: `davidanson.vscode-markdownlint`,
+Recommended extensions for `.vscode/extensions.json`: `rvben.rumdl`,
 `streetsidesoftware.code-spell-checker`. Configure `.vscode/settings.json` to set
 `"MD040": true` and disable `"MD013": false`, and add technical terms to `cSpell.words`.
 

@@ -72,11 +72,11 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     "third_party/webrtc/src/*_tests.rs", "third_party/webrtc/src/*_test.rs", "third_party/webrtc/src/*/tests.rs",
     # CI/infrastructure docs
     "docs/ci-cd-*", "docs/test-*", "docs/git-hooks-*", "docs/hooks-*", "docs/pre-commit-*",
-    "docs/development.md", "docs/development/*", "docs/releasing.md",
+    "docs/development.md", "docs/development/*", "docs/releasing.md", "docs/adr/msrv-consistency-enforcement.md",
     # Standalone internal files
     "Cargo.lock", "package.json", "package-lock.json", "PLAN.md", "AGENTS.md", "CLAUDE.md", "pre-push.txt", "pre-commit.txt", "logs_*.zip",
     # Linter and tool config
-    ".markdownlint*", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
+    ".markdownlint*", ".rumdl.toml", ".rumdl-version", ".lychee.toml", ".lycheecache", ".typos.toml", ".yamllint.yml",
     # VCS and Docker ignore files
     ".gitignore", ".dockerignore",
     # Build tool configs

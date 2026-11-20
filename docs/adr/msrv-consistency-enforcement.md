@@ -20,7 +20,6 @@ The project defines its MSRV in multiple configuration files:
 - `Cargo.toml` (`rust-version` field) - Cargo's MSRV metadata
 - `rust-toolchain.toml` (channel field) - Developer toolchain pinning
 - `clippy.toml` (msrv field) - MSRV-aware linting
-<!-- markdownlint-disable-next-line MD044 -- rust:X.Y is a Docker image name -->
 - `Dockerfile` (`FROM rust:X.Y`) - Production build environment
 - `.devcontainer/Dockerfile` - Development environment
 

@@ -88,14 +88,13 @@ This is a paragraph...
 ### Table Formatting (Project Style)
 
 Keep table formatting readable and consistent even when not enforced by a specific
-markdownlint rule. Use `markdownlint-cli2 --fix` for basic normalization, then
+markdownlint rule. Use `bash scripts/check-markdown.sh fix` for basic normalization, then
 manually align difficult tables if needed.
 
 ### Lint Test Fixtures
 
 Test fixture markdown files often contain intentional lint violations. Exclude them
-from linting by adding paths to `.markdownlintignore` rather than weakening rules
-project-wide.
+from linting through the tracked-file exclusions in `scripts/check-markdown.sh`.
 
 ---
 
@@ -104,10 +103,8 @@ project-wide.
 **Before committing:**
 
 ```bash
-# Install pinned markdownlint version once (see .markdownlint-version)
-npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-# or global if preferred:
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+# Install pinned rumdl version once (see .rumdl-version)
+cargo binstall --locked --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"
 
 # Run markdown linting (uses pinned version enforcement)
 ./scripts/check-markdown.sh
@@ -150,8 +147,8 @@ on:
     branches: [main]
     paths:
       - '**/*.md'
-      - '.markdownlint.json'
-      - '.markdownlintignore'
+      - '.rumdl.toml'
+      - '.rumdl-version'
       - '.lychee.toml'
       - '.typos.toml'
       - '.github/workflows/markdownlint.yml'
@@ -159,8 +156,8 @@ on:
     branches: [main]
     paths:
       - '**/*.md'
-      - '.markdownlint.json'
-      - '.markdownlintignore'
+      - '.rumdl.toml'
+      - '.rumdl-version'
       - '.lychee.toml'
       - '.typos.toml'
       - '.github/workflows/markdownlint.yml'
@@ -172,12 +169,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v6.0.3
-      - uses: DavidAnson/markdownlint-cli2-action@v22.0.0
+      - uses: taiki-e/install-action@v2.90.6
         with:
-          globs: |
-            **/*.md
-            !target/**
-            !node_modules/**
+          tool: cargo-binstall
+      - run: cargo binstall --locked --no-confirm --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"
+      - run: bash scripts/check-markdown.sh
 
   link-check:
     runs-on: ubuntu-latest
@@ -244,7 +240,7 @@ fn test_typos_config_has_required_sections() {
 
 #[test]
 fn test_markdownlint_config_exists() {
-    assert!(repo_root().join(".markdownlint.json").exists());
+    assert!(repo_root().join(".rumdl.toml").exists());
 }
 ```
 

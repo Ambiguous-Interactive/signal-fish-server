@@ -173,21 +173,13 @@ recorded single warm run, 787 ms, holds the budget); the budget is
 confirmed rather than replaced. Record fresh baselines with the same
 command and table shape before revisiting it.
 
-## Markdownlint
+## Markdown checks
 
-Markdownlint remains fail-closed in local CI and CI. It is intentionally not run
-inside git hooks.
-
-Install the pinned version locally:
+Local CI and GitHub Actions run the pinned rumdl version. Install it with cargo-binstall.
 
 ```bash
-npm install --save-dev --save-exact markdownlint-cli2@$(cat .markdownlint-version)
-```
-
-Or install the pinned version globally:
-
-```bash
-npm install -g markdownlint-cli2@$(cat .markdownlint-version)
+cargo binstall --locked --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"
+bash scripts/check-markdown.sh
 ```
 
 ## Troubleshooting

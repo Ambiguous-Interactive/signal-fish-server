@@ -273,7 +273,7 @@ if [ -f scripts/check-markdown.sh ]; then
     else
         MARKDOWN_STATUS=$?
         if [ "$MARKDOWN_STATUS" -eq 2 ]; then
-            echo -e "${RED}✗ FAIL${NC}: markdown (pinned markdownlint-cli2 unavailable or version mismatch)"
+            echo -e "${RED}✗ FAIL${NC}: markdown (pinned rumdl unavailable or version mismatch)"
             echo "$MARKDOWN_OUTPUT"
             echo ""
             FAILED_CHECKS+=("markdown")

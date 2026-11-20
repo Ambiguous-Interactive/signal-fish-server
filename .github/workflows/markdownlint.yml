@@ -1,15 +1,4 @@
-# Markdown Linting Workflow
-#
-# Validates all Markdown files for consistency, formatting, and best practices
-# using markdownlint-cli2 with project-specific rules.
-#
-# Configuration:
-#   - .markdownlint.json: Rule configuration
-#   - .markdownlintignore: Files/directories to exclude
-#   - .markdownlint-version: pinned markdownlint-cli2 version
-#
-# Runs on:
-#   - Pull requests to main (only for changed Markdown files)
+# Check tracked Markdown on pull requests.
 
 name: Markdownlint
 
@@ -18,11 +7,8 @@ on:
     branches: [main]
     paths:
       - "**.md"
-      - ".markdownlint.json"
-      - ".markdownlintignore"
-      - ".markdownlint-version"
-      - "package.json"
-      - "package-lock.json"
+      - ".rumdl.toml"
+      - ".rumdl-version"
       - "scripts/check-markdown.sh"
       - "scripts/check-markdown-link-text.sh"
       - ".github/workflows/markdownlint.yml"
@@ -43,11 +29,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
-      - name: Install Node.js
-        uses: actions/setup-node@v7.1.0
+      - name: Install cargo-binstall
+        uses: taiki-e/install-action@v2.90.6
         with:
-          node-version: "22"
-      - name: Install pinned markdownlint-cli2
-        run: npm ci --no-audit --no-fund
+          tool: cargo-binstall
+      - name: Install pinned rumdl
+        run: cargo binstall --locked --no-confirm --disable-strategies quick-install,compile "rumdl@$(cat .rumdl-version)"
       - name: Run markdown checks
         run: bash scripts/check-markdown.sh

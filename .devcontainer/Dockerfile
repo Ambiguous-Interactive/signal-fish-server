@@ -197,6 +197,7 @@ ENV CARGO_HTTP_TIMEOUT=120
 # release or QuickInstall), so the amd64 build disables the source-compile
 # strategy and fails fast instead. arm64 keeps source fallback: cargo-watch
 # ships no aarch64-musl release artifact.
+COPY .rumdl-version /tmp/signal-fish-rumdl-version
 RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked,uid=1000,gid=1000 \
     --mount=type=cache,id=signal-fish-cargo-install-target-${TARGETARCH}-v2,target=/tmp/cargo-install-target,sharing=locked,uid=1000,gid=1000 \
@@ -221,6 +222,8 @@ RUN --mount=type=cache,id=signal-fish-cargo-registry-v2,target=/usr/local/cargo/
     cargo-nextest@0.9.149 \
     cargo-mutants@27.1.0 \
     cargo-fuzz \
+    && cargo binstall --no-confirm --locked --target "$cargo_binstall_target" --disable-strategies quick-install,compile "rumdl@$(cat /tmp/signal-fish-rumdl-version)" \
+    && rumdl --version \
     && cargo install --locked taplo-cli --version "$TAPLO_CLI_VERSION" \
     && taplo --version \
     && cargo-deny --version \
