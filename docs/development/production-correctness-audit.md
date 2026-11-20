@@ -20259,12 +20259,18 @@ stays open while the server waits for accepted connections. The kernel can
 complete a TCP handshake even though the server will never serve that
 connection.
 
-The plain server now closes the listening socket before waiting for its
-connection tasks. The same dial gets connection refused. The WebSocket
-receives `4000 server_shutdown`, the stalled HTTP/2 peer reaches EOF after
-the settle period, and a fresh server authenticates a client on the same
-address. A responsive HTTP/2 peer and pending HTTP/1.1 responses finish
-normally (ARM64 Nextest `41f9c0c2`).
+The first fix drops the listening socket before joining connection tasks.
+Review found that the outer shutdown watch could still reach an HTTP/2 task
+first. A second test parks the accept loop while the HTTP/2 task runs.
+GOAWAY arrives before the loop closes the listener on `05b08039` (ARM64
+Nextest `111fa461`).
+
+The accept loop now closes the listening socket before notifying accepted
+connection tasks. After GOAWAY, the same dial gets connection refused.
+The WebSocket receives `4000 server_shutdown`, the stalled HTTP/2 peer
+reaches EOF after the settle period, and a fresh server authenticates a
+client on the same address. A responsive HTTP/2 peer and pending HTTP/1.1
+responses finish normally (ARM64 Nextest `dff148aa`).
 
 The home process owns room state and orders admitted operations. It refuses
 new upgrades and room restores during drain. A partition or proxy can hide
