@@ -4,8 +4,8 @@ use crate::config::{
 };
 use crate::database::{DatabaseConfig, InMemoryDatabase};
 use crate::protocol::{
-    ClientMessage, PlayerId, RoomId, RoomOperationRequest, RoomOperationResult, ServerMessage,
-    Topology, Transport,
+    ClientMessage, ErrorCode, PlayerId, RoomId, RoomOperationRequest, RoomOperationResult,
+    ServerMessage, Topology, Transport,
 };
 use crate::server::{EnhancedGameServer, NegotiatedProtocol, ServerConfig, TransportStatusUpdate};
 use std::net::SocketAddr;
@@ -2692,12 +2692,173 @@ async fn closing_socket_releases_backpressured_router_refusals() {
     }
 }
 
+/// #826: A closing socket stops waiting for a frame refusal's lifecycle admission.
+#[tokio::test(start_paused = true)]
+async fn closing_socket_releases_frame_refusal_lifecycle_wait() {
+    use crate::coordination::CloseReason;
+    use crate::protocol::ErrorCode;
+
+    let server = create_test_server().await;
+    let (player, mut replies) = register_router_test_client(&server).await;
+    let lifecycle = server.client_lifecycle(&player).unwrap();
+    let guard = lifecycle.lock().await;
+    let attempts = lifecycle.lock_attempt_count_for_test();
+    let refusal = server.send_error_to_player_from_lifecycle(
+        &player,
+        "Invalid client message".into(),
+        Some(ErrorCode::InvalidInput),
+        Arc::clone(&lifecycle),
+    );
+    tokio::pin!(refusal);
+    assert!(futures_util::poll!(&mut refusal).is_pending());
+    assert_eq!(lifecycle.lock_attempt_count_for_test(), attempts + 1);
+
+    assert!(server
+        .connection_manager
+        .request_close_for(&player, CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), refusal)
+        .await
+        .expect("close must release the pending lifecycle wait")
+        .unwrap();
+    let reply = replies.try_recv();
+    assert!(
+        matches!(reply, Err(mpsc::error::TryRecvError::Empty)),
+        "a refusal canceled before lifecycle admission must leave the queue empty: {reply:?}"
+    );
+    drop(guard);
+}
+
+/// #826: A started frame refusal retains its delivery outcome after socket close.
+#[tokio::test(start_paused = true)]
+#[cfg_attr(miri, ignore)]
+async fn closing_socket_releases_backpressured_frame_refusal() {
+    use crate::coordination::CloseReason;
+    use crate::protocol::ErrorCode;
+
+    let server = create_test_server().await;
+    let (player, mut replies) = register_router_test_client(&server).await;
+    for _ in 0..replies.max_capacity() {
+        server
+            .message_coordinator
+            .send_to_player(&player, Arc::new(ServerMessage::Pong))
+            .await
+            .unwrap();
+    }
+    let lifecycle = server.client_lifecycle(&player).unwrap();
+    let source = Arc::clone(&lifecycle);
+    let dispatch_server = Arc::clone(&server);
+    let dispatch = tokio::spawn(async move {
+        dispatch_server
+            .send_error_to_player_from_lifecycle(
+                &player,
+                "Invalid client message".into(),
+                Some(ErrorCode::InvalidInput),
+                source,
+            )
+            .await
+            .unwrap();
+    });
+    let backpressure = &server.metrics.websocket_backpressure_events;
+    timeout(Duration::from_secs(1), async {
+        while backpressure.load(Ordering::Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("refusal must reach the full reply queue");
+
+    let mut teardown = Box::pin(lifecycle.lock());
+    assert!(futures_util::poll!(&mut teardown).is_pending());
+    assert!(server
+        .connection_manager
+        .request_close_for(&player, CloseReason::ActivityTimeout));
+    timeout(Duration::from_millis(10), dispatch)
+        .await
+        .expect("close must release dispatch while the queue is full")
+        .unwrap();
+    drop(
+        timeout(Duration::from_millis(10), teardown)
+            .await
+            .expect("close must release the lifecycle while the queue is full"),
+    );
+    let closed = &server.metrics.websocket_deliveries_channel_closed;
+    assert_eq!(closed.load(Ordering::Acquire), 0);
+    assert_eq!(replies.len(), replies.max_capacity());
+    replies.close();
+    timeout(Duration::from_secs(1), async {
+        while closed.load(Ordering::Acquire) == 0 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("started delivery must account for the closed queue");
+    assert_eq!(closed.load(Ordering::Acquire), 1);
+    for _ in 0..replies.max_capacity() {
+        assert!(matches!(
+            replies.recv().await.unwrap().as_ref(),
+            ServerMessage::Pong
+        ));
+    }
+    assert!(replies.recv().await.is_none());
+}
+
+/// #826: A frame refusal waiting for its route must allow real socket teardown.
+#[tokio::test]
+#[cfg_attr(miri, ignore)]
+async fn real_socket_frame_refusal_does_not_hold_up_reconnect() {
+    use tokio_tungstenite::tungstenite::Message;
+
+    let max_size = ServerConfig::default().max_message_size;
+    let oversized = format!(
+        "Message too large ({} bytes, max {max_size} bytes)",
+        max_size + 1
+    );
+    for (frame, code, message) in [
+        (
+            Message::text("{"),
+            ErrorCode::InvalidInput,
+            "Invalid client message",
+        ),
+        (
+            Message::binary(vec![1]),
+            ErrorCode::InvalidInput,
+            "Binary payloads are disabled for this connection",
+        ),
+        (
+            Message::text("x".repeat(max_size + 1)),
+            ErrorCode::MessageTooLarge,
+            oversized.as_str(),
+        ),
+    ] {
+        check_real_socket_refusal(frame, code, message).await;
+    }
+}
+
 /// #826: A v3 capability refusal waiting for its route must allow real socket teardown.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]
 async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
+    use tokio_tungstenite::tungstenite::Message;
+
+    let refused = ClientMessage::RoomOperation {
+        operation_id: uuid::Uuid::from_u128(123),
+        operation: Box::new(RoomOperationRequest::LeaveRoom),
+    };
+    check_real_socket_refusal(
+        Message::text(serde_json::to_string(&refused).unwrap()),
+        ErrorCode::InvalidInput,
+        "RoomOperation requires the negotiated room_operation_ids capability",
+    )
+    .await;
+}
+
+async fn check_real_socket_refusal(
+    refused: tokio_tungstenite::tungstenite::Message,
+    expected_code: ErrorCode,
+    expected_error: &str,
+) {
     use crate::coordination::{CloseReason, MessageCoordinator};
-    use crate::protocol::ErrorCode;
+    use crate::protocol::GameDataEncoding;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
 
@@ -2732,7 +2893,7 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
                 connect_token: None,
                 sdk_version: None,
                 platform: None,
-                game_data_format: None,
+                game_data_format: Some(GameDataEncoding::Json),
                 protocol_version: Some(3),
                 supported_transports: Some(vec![Transport::Relay]),
                 supported_topologies: Some(vec![Topology::Relay]),
@@ -2798,15 +2959,14 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
         receive(&mut socket).await,
         ServerMessage::LobbyStateChanged { .. }
     ));
-    let refused = || ClientMessage::RoomOperation {
-        operation_id: uuid::Uuid::from_u128(123),
-        operation: Box::new(RoomOperationRequest::LeaveRoom),
-    };
-    send(&mut socket, refused()).await;
+    timeout(BOUND, socket.send(refused.clone()))
+        .await
+        .unwrap()
+        .unwrap();
     let reply = receive(&mut socket).await;
     assert!(
-        matches!(&reply, ServerMessage::Error { message, error_code: Some(ErrorCode::InvalidInput) }
-            if message == "RoomOperation requires the negotiated room_operation_ids capability"),
+        matches!(&reply, ServerMessage::Error { message, error_code: Some(code) }
+            if *code == expected_code && message == expected_error),
         "{reply:?}"
     );
 
@@ -2816,7 +2976,7 @@ async fn real_socket_router_refusal_does_not_hold_up_reconnect() {
     let routes = coordinator.local_clients.write().await;
     let deliveries = &coordinator.metrics.websocket_delivery_attempts;
     let prior_deliveries = deliveries.load(Ordering::Acquire);
-    send(&mut socket, refused()).await;
+    timeout(BOUND, socket.send(refused)).await.unwrap().unwrap();
     timeout(BOUND, coordinator.socket_reply_route_wait.notified())
         .await
         .expect("second refusal must wait for routing before close");

@@ -617,44 +617,11 @@ impl EnhancedGameServer {
         {
             return;
         }
-        let server = Arc::clone(self);
-        let player_id = *player_id;
-        let mut close_listener = close.subscribe();
-        let completion = tokio::spawn(async move {
-            if close
-                .while_open(server.charge_error_reply(&player_id))
-                .await
-                != Some(true)
-            {
-                return;
-            }
-            let delivery = server.message_coordinator.send_to_player_on_socket(
-                &player_id,
-                &close,
-                Arc::new(message),
-            );
-            tokio::pin!(delivery);
-            let result = match close.while_open(&mut delivery).await {
-                Some(result) => result,
-                None => {
-                    // Close releases source order. Keep ownership of any
-                    // delivery that already started on this socket.
-                    drop(guard);
-                    delivery.await
-                }
-            };
-            if let Err(error) = result {
-                tracing::error!(%player_id, %error, "Router refusal delivery failed");
-            }
-        });
-        tokio::select! {
-            biased;
-            result = completion => {
-                if let Err(error) = result {
-                    tracing::error!(%player_id, %error, "Router refusal transaction failed");
-                }
-            }
-            _ = close_listener.closed() => {}
+        if let Err(error) = self
+            .send_ordered_socket_refusal(*player_id, close, guard, message)
+            .await
+        {
+            tracing::error!(%player_id, %error, "Router refusal failed");
         }
     }
 
