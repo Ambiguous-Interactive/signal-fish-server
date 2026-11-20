@@ -64,6 +64,12 @@ the server skips the reply and releases the socket lifecycle. Delivery that
 already started can finish on the old socket. The replacement gets the home
 server's room snapshot and replay without the private error.
 
+An invalid frame can trigger a private error before message routing. The
+server addresses it to the source socket. When the server requests close,
+the frame stops waiting for socket admission or a reply route. If delivery
+already started, its accounting can finish while teardown proceeds. The
+replacement socket never receives that error through reconnect replay.
+
 Peer connection metadata updates wait for the source lifecycle and room
 admission. If the server requests socket close during those waits or the
 read-only Direct endpoint checks, it cancels the pending update. A refusal

@@ -92,7 +92,6 @@ impl EnhancedGameServer {
     }
 
     /// Send a socket-originated refusal only while that socket owns the ID.
-    /// The owned completion retains source order through the queued reply.
     pub(crate) async fn send_error_to_player_from_lifecycle(
         &self,
         player_id: &PlayerId,
@@ -100,7 +99,18 @@ impl EnhancedGameServer {
         error_code: Option<ErrorCode>,
         source_lifecycle: Arc<ClientLifecycle>,
     ) -> anyhow::Result<()> {
-        let guard = Arc::clone(&source_lifecycle).lock_owned().await;
+        let Some(close) = self
+            .connection_manager
+            .close_signal_for_lifecycle(player_id, &source_lifecycle)
+        else {
+            return Ok(());
+        };
+        let Some(guard) = close
+            .while_open(Arc::clone(&source_lifecycle).lock_owned())
+            .await
+        else {
+            return Ok(());
+        };
         if source_lifecycle.player_id() != *player_id
             || !self
                 .connection_manager
@@ -108,22 +118,59 @@ impl EnhancedGameServer {
         {
             return Ok(());
         }
-        let connection_manager = Arc::clone(&self.connection_manager);
-        let message_coordinator = Arc::clone(&self.message_coordinator);
-        let player_id = *player_id;
-        tokio::spawn(async move {
-            let _guard = guard;
-            send_error_to_player(
-                connection_manager.as_ref(),
-                message_coordinator.as_ref(),
-                &player_id,
+        self.send_ordered_socket_refusal(
+            *player_id,
+            close,
+            guard,
+            ServerMessage::Error {
                 message,
                 error_code,
-            )
-            .await
-        })
+            },
+        )
         .await
-        .map_err(|error| anyhow::anyhow!("Source refusal transaction failed: {error}"))?
+    }
+
+    /// Retain source order after caller cancellation. Socket close releases
+    /// the lifecycle while delivery that already started finishes accounting.
+    pub(super) async fn send_ordered_socket_refusal(
+        &self,
+        player_id: PlayerId,
+        close: ConnectionCloseSignal,
+        guard: tokio::sync::OwnedMutexGuard<()>,
+        message: ServerMessage,
+    ) -> anyhow::Result<()> {
+        let connections = Arc::clone(&self.connection_manager);
+        let coordinator = Arc::clone(&self.message_coordinator);
+        let mut close_listener = close.subscribe();
+        let completion = tokio::spawn(async move {
+            if close
+                .while_open(connections.charge_error_reply(&player_id))
+                .await
+                != Some(true)
+            {
+                return Ok(());
+            }
+            let delivery =
+                coordinator.send_to_player_on_socket(&player_id, &close, Arc::new(message));
+            tokio::pin!(delivery);
+            match close.while_open(&mut delivery).await {
+                Some(result) => result,
+                None => {
+                    // The coordinator cancels pending route lookup on close.
+                    // A delivery past that boundary still owns its outcome.
+                    drop(guard);
+                    if let Err(error) = delivery.await {
+                        tracing::error!(%player_id, %error, "Source refusal delivery failed during close");
+                    }
+                    Ok(())
+                }
+            }
+        });
+        tokio::select! {
+            biased;
+            result = completion => result.map_err(|error| anyhow::anyhow!("Source refusal transaction failed: {error}"))?,
+            _ = close_listener.closed() => Ok(()),
+        }
     }
 
     /// Charge one polite per-frame reply against the player's per-connection

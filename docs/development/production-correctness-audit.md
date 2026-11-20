@@ -20037,3 +20037,27 @@ A partition can delay close detection, and a reply already queued can
 reach the old socket. The replacement sees the current home snapshot
 and bounded room replay. A restarted or separate server without the home
 record must refuse restoration. This advances A04 and A07. #826 stays open.
+
+### F416 — A rejected WebSocket frame could hold teardown
+
+At `145edc7b98cb6d1a57ed4004540bd53937d9c5db`, an invalid JSON frame
+held its socket lifecycle while its error waited for routing. On a real v3
+WebSocket, the client observed close 4003 but teardown could not reach the
+room gate in five seconds while the reply route stayed held. Nextest
+`4689ad7c` fails at that assertion. An open socket receives the expected
+error before the test blocks routing.
+
+Frame errors and router refusals now use the same socket-bound completion.
+The source retains reply order while open. Close releases dispatch and
+lifecycle admission. A parked reply starts no delivery when routing returns.
+A delivery already waiting for capacity accounts for the closed queue once.
+The real v3 test covers invalid JSON, binary data on a JSON connection, and
+oversized text. Each replacement receives the original room and player IDs,
+an empty replay, and Pong. Nine scoped Linux ARM64 tests pass in Nextest
+`bce74047`.
+
+The home process still needs authoritative membership before it can prepare
+the reconnect record. A partition can delay close detection. An error that
+already entered the queue can reach the old socket. Restart loses the
+room and token. Another process without the home record must decline restore.
+This advances A04 and A07. #826 stays open.
