@@ -36944,6 +36944,12 @@ Old body.
 fn test_weekly_release_runs_on_sunday_at_nine_utc() {
     let workflow = read_live_file(&repo_root().join(".github/workflows/prepare-release.yml"));
     let triggers = extract_yaml_mapping_block(&workflow, "on", 0).expect("workflow triggers");
-    assert!(triggers.contains("schedule:"), "release preparation needs a schedule");
-    assert!(triggers.contains("0 9 * * 0"), "weekly release must use fixed UTC");
+    assert!(
+        triggers.contains("schedule:"),
+        "release preparation needs a schedule"
+    );
+    assert!(
+        triggers.contains("0 9 * * 0"),
+        "weekly release must use fixed UTC"
+    );
 }

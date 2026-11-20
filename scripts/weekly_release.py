@@ -281,8 +281,12 @@ def dispatch(repo, default, source):
         raise ReleaseError("A full reviewed source SHA is required for publication.")
     receipt = api(
         f"repos/{repo}/actions/workflows/release.yml/dispatches",
-        payload={"ref": default, "inputs": {"expected_source_revision": source}},
-        headers=("X-GitHub-Api-Version: 2026-03-10",),
+        payload={
+            "ref": default,
+            "inputs": {"expected_source_revision": source},
+            "return_run_details": True,
+        },
+        headers=("X-GitHub-Api-Version: 2022-11-28",),
     )
     run_id = receipt.get("workflow_run_id")
     if type(run_id) is not int or run_id <= 0 or not receipt.get("html_url"):

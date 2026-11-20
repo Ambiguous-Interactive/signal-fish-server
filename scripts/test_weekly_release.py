@@ -111,7 +111,9 @@ class WeeklyReleaseTests(unittest.TestCase):
             patch.object(weekly, "summary") as summary,
         ):
             weekly.dispatch(repo, "main", head)
-            self.assertEqual(api.call_args.kwargs["payload"]["inputs"], {"expected_source_revision": head})
+            payload = api.call_args.kwargs["payload"]
+            self.assertEqual(payload["inputs"], {"expected_source_revision": head})
+            self.assertIs(payload["return_run_details"], True)
             self.assertIn("https://example.test/5", summary.call_args.args[0])
 
     def test_dispatch_requires_run_receipt(self):
