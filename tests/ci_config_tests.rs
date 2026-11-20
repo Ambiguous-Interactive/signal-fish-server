@@ -26338,28 +26338,36 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         .status
         .success());
 
-    let trace_path = dir.join("git-trace.jsonl");
+    let trace_dir = dir.join("git-trace");
+    fs::create_dir(&trace_dir).unwrap();
     let rust_diff_count = || {
-        read_file(&trace_path)
-            .lines()
-            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-            .filter(|event| {
-                event["event"] == "start"
-                    && event["argv"].as_array().is_some_and(|args| {
-                        args.iter().any(|arg| arg == "-G")
-                            && args.iter().any(|arg| arg == "--unified=0")
+        fs::read_dir(&trace_dir)
+            .unwrap()
+            .map(|entry| {
+                read_file(&entry.unwrap().path())
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .filter(|event| {
+                        event["event"] == "start"
+                            && event["argv"].as_array().is_some_and(|args| {
+                                args.iter().any(|arg| arg == "-G")
+                                    && args.iter().any(|arg| arg == "--unified=0")
+                            })
                     })
+                    .count()
             })
-            .count()
+            .sum::<usize>()
     };
     let run_hook = |profile: bool| -> std::io::Result<std::process::Output> {
-        write_file(&trace_path, "");
+        for entry in fs::read_dir(&trace_dir)? {
+            fs::remove_file(entry?.path())?;
+        }
         let mut command = Command::new("pwsh");
         command
             .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
             .arg(&hook)
             .arg("-Worktree")
-            .env("GIT_TRACE2_EVENT", &trace_path)
+            .env("GIT_TRACE2_EVENT", &trace_dir)
             .current_dir(dir);
         if profile {
             command.env("SIGNAL_FISH_HOOK_PROFILE", "1");
