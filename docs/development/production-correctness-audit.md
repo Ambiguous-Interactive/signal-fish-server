@@ -60,7 +60,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 | A14 | `coordination/outbound_queue.rs`, `protocol/delivery.rs` | Reliable/latest/volatile, sequence ranges, generations, sojourn, bounded memory | Initial |
 | A15 | `websocket/sending.rs`, `batching.rs`, writer in `connection.rs` | Encoding, partial writes, idle reports, cancellation, terminal close | Initial; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415; aggregate reconnect admission bound in F21; socket close before queue commit in F22 |
 | A16 | `server/heartbeat.rs`, `maintenance.rs`, `deadline.rs`, `distributed.rs`, `retry.rs` | Ping, deadlines, clock jumps, lease ownership, GC, stale cleanup | Initial; stale expiry cleanup in F32; delayed first-tick overflow in F36; interrupted heartbeat retry in F224 |
-| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12; idle grace after socket teardown repaired in F420 |
+| A17 | `server/shutdown.rs`, `main.rs`, deployment configs | Drain, restart, room routing, directional partitions, process failure | Initial; plain HTTP response loss repaired in F12; idle grace after socket teardown repaired in F420; shared monotonic grace repaired in F421 |
 | A18 | `config/`, `rate_limit.rs`, `server.rs`, `lib.rs` | Construction validation, safe limits, public embedder contract, feature combinations | Initial; invalid binding aliases in F34; room-code frame bounds in F35; timer overflow in F36 |
 | A19 | Metrics, logging, admin, dashboard cache, session records | Bounded resources, accounting consistency, diagnostic claims | Initial; credential diagnostics reviewed in F08 |
 | A20 | Native, browser, Fortress, WASM clients | Event application, numeric precision, interop, reconnect, generation resets | Initial; stale peer exchange evidence recorded in F16; invalid probe receipts recorded in F17; buffered ICE rejection recorded in F20; duplicate data-channel replacement recorded in F23; unsupported admission and reset/reopen failure recorded in F24; retired poller retention in F25; unread required-label announcement growth in F26; incoming message backlog in F27; browser input and output retention in F28; native stdout stalls in F29; native stderr stalls in F30; nominated ICE path evidence in F33; native remote shutdown and stream termination in F37; required delivery modes in F39; SCTP reset/reopen lifetime in F40; retired channel retention in F41; browser peer-requested retries in F42; native late retries in F43; browser authoritative replacement waits in F44; wall-clock duration changes in F45; authoritative recovery events in F46; peer incarnation link fencing in F47; closed browser channel registration in F49; blocked browser negotiation in F50; serial planned-peer deadline renewal in F54; handshake command windows in F55; blocked WebSocket writes and swallowed signaling failures in F56; expired ready negotiation results in F57; expired WebSocket upgrades in F58; buffered receive deadline bypass in F59; late native write completion in F60; shortened native Pong response windows in F61; latched reference-client readiness in F62; crippled browser SDP in F66; native exchange send loss in F67; native receipt cutoffs in F84; browser linger expiry in F85; native held-send windows in F86; replacement-link probes in F87; expired relay sends in F88; relay receipt admission in F89; terminal callback formation in F91; queued keepalive liveness in F97; admitted native receipt retention in F101; local closing notification in F102; browser state history in session 486; native fragmentation/reset histories in session 504; native stdout receive ownership in F197; premature native rebuild success in F198 |
@@ -20188,3 +20188,31 @@ drain. An advisory or close frame can be delayed or lost during a partition.
 When a handler stays active, the server still waits for grace and then requests
 close. A restart or a different home lacks the old room and reconnect record
 and must decline restore. This advances A17. #826 stays open.
+
+### F421 — A later drain caller could extend shutdown grace
+
+On `ad06ba03`, an embedder starts drain with a 30-second grace. A later
+caller enters the public drain routine after 20 seconds on the server's
+monotonic clock. Wall time has barely advanced. The client is still active,
+but the routine misses the original close deadline by the 5 ms test bound
+(Linux ARM64 Nextest `3ec2968b`). The later caller derived its wait from the
+advisory timestamp and current wall time. A forward wall-clock step could
+also make that wait expire early.
+
+The first caller now publishes both deadlines together. The server keeps one
+monotonic deadline through each call to the drain routine. The advisory keeps
+the first caller's wall-clock timestamp. An empty socket count still ends the
+wait early. The original test passes in Nextest `76f07b55`.
+
+A real TCP test starts the drain through the public API, advances the server
+clock past grace, then tells the compiled embedding starter to finish the
+drain. The baseline misses the five-second close bound (`0891601a`). The fix
+delivers one `GoingAway` with the original timestamp and then `4000
+server_shutdown`. The starter, real SIGTERM, last-socket exit, same-port
+restart, and three-player signaling controls pass in `b53198ef`.
+
+The home process owns the shutdown timer and room state. Its drain refuses
+new upgrades and reconnects. A partition can delay or lose the advisory or
+close even if the server requests it on time. A restarted or separate home
+must decline a restore when it has no recovery record. This advances A17.
+Issue #826 stays open.

@@ -803,7 +803,7 @@ async fn finish_background_shutdown(
     // fan-out completes. If the serve future returns inside that window, a
     // watch-based guard aborts a committed drain and every connected client
     // is dropped with no close frame at all. Once `begin_shutdown_drain`
-    // has CAS'd the deadline the task is past its signal wait and will run
+    // has published the deadline the task is past its signal wait and will run
     // the full choreography to completion, so it must be joined. With no
     // drain begun the task is parked in the signal wait and could never
     // complete, so aborting lets a spontaneous serve-loop failure exit.

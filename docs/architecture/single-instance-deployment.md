@@ -77,6 +77,8 @@ For the supported single-active deployment:
 4. The server rejects new upgrades, sends v3 `GoingAway`, and closes remaining
    sockets with `4000 server_shutdown` at the end of the grace period. If every
    WebSocket handler finishes during grace, the server can exit earlier.
+   The local grace timer uses elapsed time from the first drain request.
+   The `GoingAway` timestamp is a wall-clock advisory.
 5. Clients create or join a fresh room after drain; they must not reconnect to
    the exiting process, and the drain deliberately does not arm reconnect state.
 
