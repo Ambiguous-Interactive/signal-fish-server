@@ -89,7 +89,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Let the server finish a shutdown drain as soon as the last WebSocket handler exits (#826).
+- Let the server finish shutdown early after the last WebSocket handler exits (#826).
 - Start WebSocket shutdown when a peer disconnects or a socket task fails, even while room cleanup waits (#826).
 - Release closing WebSockets waiting on an unsupported room operation error (#826).
 - Let closing WebSockets stop waiting for replies to refused ready and start commands (#826).

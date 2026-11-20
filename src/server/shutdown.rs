@@ -234,16 +234,14 @@ impl EnhancedGameServer {
     }
 }
 
-/// Scheduling beat granted to upgraded-but-unpolled connection handlers to
-/// arm their shutdown lifetime guard before the idle drain decides the
-/// grace wait protects nothing. Far below any meaningful grace, so the idle
-/// restart fast path stays fast.
+/// Give upgraded handlers a scheduling window to start when no socket task
+/// is tracked. This window fits inside the remaining drain grace.
 pub(crate) const DRAIN_IDLE_HANDLER_SETTLE: Duration = Duration::from_millis(50);
 
 /// Everything the shutdown drain does after the shutdown signal arrives:
-/// begin the drain, fan out the v3 `GoingAway` advisories, wait until grace
-/// expires or the last socket handler finishes, force the
-/// coded `4000` closes, and settle the handlers before process exit.
+/// begin the drain, fan out the v3 `GoingAway` advisories, wait for grace or
+/// for sockets to finish, force any remaining coded `4000` closes, and
+/// settle the handlers before process exit.
 ///
 /// Embedded servers that run their own accept loop call this after their
 /// serve future returns, instead of reimplementing the choreography.
@@ -268,17 +266,26 @@ pub async fn run_drain_choreography(
 
     let _ = shutdown_tx.send(true);
 
-    let wait_before_close = drain.wait_before_close(drain_started_at.elapsed());
-    // A handler that has not been polled yet does not count as live. Give it
-    // one scheduling beat when the initial count is zero. Once all tracked
-    // handlers finish, there is no reason to wait for the grace deadline.
-    if wait_before_close > Duration::ZERO {
-        if !server.has_active_socket_tasks() {
-            tokio::time::sleep(DRAIN_IDLE_HANDLER_SETTLE).await;
+    let grace_wait_started_at = tokio::time::Instant::now();
+    let wait_before_close =
+        drain.wait_before_close(grace_wait_started_at.duration_since(drain_started_at));
+    let remaining_grace = || wait_before_close.saturating_sub(grace_wait_started_at.elapsed());
+    loop {
+        let remaining = remaining_grace();
+        if remaining.is_zero() || server.wait_for_shutdown_connections(remaining).await != 0 {
+            break;
         }
-        server
-            .wait_for_shutdown_connections(wait_before_close)
-            .await;
+
+        // A handler can start after the tracked count reaches zero. Give
+        // pending handlers a scheduling window within the original grace.
+        let settle = DRAIN_IDLE_HANDLER_SETTLE.min(remaining_grace());
+        if settle.is_zero() {
+            break;
+        }
+        tokio::time::sleep(settle).await;
+        if !server.has_active_socket_tasks() {
+            break;
+        }
     }
 
     let close_requests = server.close_connections_for_shutdown();
@@ -505,6 +512,15 @@ mod tests {
     /// must still get the grace period before the forced close.
     #[tokio::test(start_paused = true)]
     async fn handler_armed_during_idle_settle_still_gets_the_grace() {
+        assert_grace_for_handler_armed_during_settle(false).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn handler_armed_after_the_last_socket_finishes_still_gets_grace() {
+        assert_grace_for_handler_armed_during_settle(true).await;
+    }
+
+    async fn assert_grace_for_handler_armed_during_settle(had_live_handler: bool) {
         let grace = Duration::from_millis(300);
         let server = EnhancedGameServer::new(
             ServerConfig {
@@ -530,7 +546,8 @@ mod tests {
             .register_client_with_close(sender, close, "127.0.0.1:48990".parse().unwrap())
             .await
             .expect("client registration succeeds");
-        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let previous_handler = had_live_handler.then(|| server.track_socket_task());
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
         let started = tokio::time::Instant::now();
         let choreography = {
             let server = std::sync::Arc::clone(&server);
@@ -539,6 +556,11 @@ mod tests {
             })
         };
 
+        shutdown_rx
+            .wait_for(|started| *started)
+            .await
+            .expect("drain starts before the last socket finishes");
+        drop(previous_handler);
         // Arm a handler inside the 50 ms settle beat. Timer deadlines are
         // ordered on one runtime, so this 20 ms sleep fires before the
         // beat's 50 ms recheck, deterministically.
@@ -549,9 +571,11 @@ mod tests {
             .await
             .expect("drain requests a shutdown close");
         assert_eq!(close_reason, Some(CloseReason::Shutdown));
+        let elapsed = started.elapsed();
+        assert!(elapsed >= grace, "handler gets the advertised grace");
         assert!(
-            started.elapsed() >= grace,
-            "handler gets the advertised grace"
+            elapsed <= grace + Duration::from_millis(5),
+            "settling must fit within grace, got {elapsed:?}"
         );
         drop(guard);
 
@@ -596,7 +620,7 @@ mod tests {
         assert!(!drain.is_finished(), "the remaining socket still has grace");
 
         drop(last);
-        tokio::time::timeout(Duration::from_millis(10), drain)
+        tokio::time::timeout(Duration::from_millis(100), drain)
             .await
             .expect("a drain with no live sockets must finish before grace expires")
             .expect("drain task must not panic");

@@ -20142,15 +20142,18 @@ The first departure leaves one handler and the drain stays active. The last
 handler finishes, but the drain misses the 10 ms completion bound
 (Linux ARM64 Nextest `0bc6dd52`). The grace timer still had 29 seconds left.
 
-The grace wait now ends when the last socket supervisor returns or the timer
-expires. The wait arms the existing completion notification before checking
-the count. A handler that starts during the initial idle settle can still get
-the grace period. The real TCP regression seats a v3 player, sends SIGTERM,
-reads `GoingAway`, then closes the client. It checks clean exit before the
-advertised deadline. The companion test holds a socket and requires
-`4000 server_shutdown`. All 14 scoped Linux ARM64 tests pass in Nextest
-`a186c6c9`, including TLS shutdown, same-port restart, three-player WebRTC
-signaling, and three directional-loss controls.
+The first repair returned at a zero task count. Review found that a pending
+handler could start after the last tracked task left. Linux ARM64 Nextest
+`a226ab6d` reproduces the premature close. The final grace wait arms the
+existing completion notification before checking the count. At zero it
+allows up to 50 ms for pending handlers to start, then checks the count
+again. The settle windows share the original deadline.
+
+The real TCP regression seats a v3 player, sends SIGTERM, reads `GoingAway`,
+then closes the client. It checks clean exit before the advertised deadline.
+The companion test holds a socket and requires `4000 server_shutdown`.
+Linux ARM64 Nextest `939823bf` passes 22 scoped tests, including TLS shutdown,
+same-port restart, three-player WebRTC signaling, and directional loss.
 
 Matched Linux ARM64 runs use the default debug binary, real SIGTERM, a
 four-second grace, and two authenticated v3 clients for both active cases.
@@ -20160,14 +20163,14 @@ and measure from the signal to process exit.
 
 | Workload | Runs per build | Baseline median (range) | Fixed median (range) |
 | --- | ---: | ---: | ---: |
-| Both clients leave | 7 | 4,009 ms (4,007–4,011) | 110 ms (109–130) |
-| One client stays | 5 | 4,012 ms (4,008–4,013) | 4,010 ms (4,009–4,019) |
-| No clients at drain start | 5 | 59 ms (57–59) | 57 ms (57–62) |
+| Both clients leave | 7 | 4,008 ms (4,007–4,010) | 161 ms (160–161) |
+| One client stays | 5 | 4,008 ms (4,007–4,009) | 4,008 ms (4,007–4,009) |
+| No clients at drain start | 5 | 57 ms (55–58) | 57 ms (56–58) |
 
-The remaining client receives code 4000 at a median of 4,003 ms in both
-builds. The longest fixed run with a remaining client exits six milliseconds
-later than the longest baseline run. These samples measure local shutdown
-time. They do not establish a tail latency or throughput guarantee.
+The remaining client receives code 4000 at about 4,003 ms in both builds.
+With one client still connected, the exit median grows by 0.7 ms and the
+ranges overlap. These samples measure local shutdown time. They do not
+establish a tail latency or throughput guarantee.
 
 The home process owns the room and refuses new upgrades and restores during
 drain. An advisory or close frame can be delayed or lost during a partition.
