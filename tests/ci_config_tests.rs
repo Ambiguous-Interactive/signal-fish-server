@@ -4298,7 +4298,11 @@ fn test_no_language_specific_cache_mismatch() {
         || root.join("Pipfile").exists()
         || root.join("pyproject.toml").exists()
         || has_any_requirements_txt;
-    let is_node_project = root.join("package.json").exists();
+    let is_node_project = dependabot_npm_directories().iter().any(|directory| {
+        root.join(directory.trim_start_matches('/'))
+            .join("package.json")
+            .is_file()
+    });
     let pip_cache_re =
         Regex::new(r#"(?m)^[ \t]*cache[ \t]*:[ \t]*['"]?pip['"]?(?:[ \t]*(?:#.*)?)?$"#)
             .expect("valid pip cache regex");
