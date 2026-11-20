@@ -26332,7 +26332,10 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     // valid revision, exactly like any real repository.
     write_file(&dir.join("README.md"), "# profile probe\n");
     write_file(&dir.join("src/lib.rs"), "fn probe() {}\n");
-    assert!(git(&["add", "README.md", "src/lib.rs"]).unwrap().status.success());
+    assert!(git(&["add", "README.md", "src/lib.rs"])
+        .unwrap()
+        .status
+        .success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
         .status
@@ -26459,13 +26462,24 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         &["Staged content preload"],
         &["Staged content preload"],
     );
-    assert_eq!(rust_diff_count(), 0, "metadata preflight started a Rust diff");
+    assert_eq!(
+        rust_diff_count(),
+        0,
+        "metadata preflight started a Rust diff"
+    );
 
-    write_file(&dir.join("src/lib.rs"), "fn probe() { panic!(\"probe\"); }\n");
+    write_file(
+        &dir.join("src/lib.rs"),
+        "fn probe() { panic!(\"probe\"); }\n",
+    );
     let rust = run_hook(true).unwrap();
     assert!(!rust.status.success());
     assert!(String::from_utf8_lossy(&rust.stdout).contains("FAIL: Rust panic patterns"));
-    assert_eq!(rust_diff_count(), 1, "production Rust must run one pickaxe diff");
+    assert_eq!(
+        rust_diff_count(),
+        1,
+        "production Rust must run one pickaxe diff"
+    );
 }
 
 /// Every executed check (`PASS:`/`SKIP:`/`FAIL:` outcome lines) must emit one
