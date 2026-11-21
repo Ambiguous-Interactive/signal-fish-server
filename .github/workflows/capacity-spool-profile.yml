@@ -1,0 +1,66 @@
+name: Capacity Spool Profile
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' &&
+    github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  replay:
+    name: Paired Room Replay
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.1
+      - name: Read Rust toolchain
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(bash scripts/read-toml-string.sh rust-toolchain.toml channel toolchain)
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2.9.3
+      - name: Build the capacity runner
+        shell: bash
+        run: >-
+          cargo test --locked --test capacity_runner --no-run --message-format json
+          > "$RUNNER_TEMP/capacity-build.jsonl"
+      - name: Run paired trials
+        shell: bash
+        run: |
+          binary=$(python3 -c '
+          import json, sys
+          with open(sys.argv[1]) as source:
+              paths = [item["executable"] for line in source
+                       if (item := json.loads(line)).get("executable")
+                       and item["target"]["name"] == "capacity_runner"]
+          (path,) = paths
+          print(path)
+          ' "$RUNNER_TEMP/capacity-build.jsonl")
+          python3 scripts/profile-capacity-spool.py "$binary" "$RUNNER_TEMP/capacity-spool"
+      - name: Preserve trial results
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: capacity-spool-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/capacity-spool/profile.json
+            ${{ runner.temp }}/capacity-spool/summary.json
+            ${{ runner.temp }}/capacity-spool/attempts.jsonl
+            ${{ runner.temp }}/capacity-spool/**/*.log
+          retention-days: 30

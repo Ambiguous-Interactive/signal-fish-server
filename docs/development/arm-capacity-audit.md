@@ -8124,3 +8124,137 @@ CRITERION_HOME="$run_dir" taskset -c 0 "$saved_executable" --bench room_finaliza
 
 Saved binaries, full timing reports and allocation logs are in ignored
 `progress/session-738`.
+
+### Bounded room capture and replay checkpoint ([#775][bounded-room-run])
+
+The steady reliable v3 JSON collector can spool raw sends, receipts and gaps
+by room. A bounded queue feeds one writer. Capture ordinals preserve evidence
+order across rooms. Queue and disk failures leave the spool incomplete.
+The shard index reports the queue capacity and observed pending-frame high
+water, including a producer reservation before enqueue.
+
+The red two-room admission control required 57,344 bytes with a 28,672-byte
+test budget. The room-wise check admits the same topology under that per-room
+limit. The legacy 999-room refusal remains green.
+
+On Linux ARM64 under WSL2, three fresh legacy and three fresh partitioned
+processes read the same evidence in alternating order. All 24 reader attempts
+passed, and the exact record digests matched for each shape. Peak child RSS
+uses Linux `wait4`. Fixture production runs outside the measured readers.
+
+| Rooms | Sends per player | JSONL bytes | Spool bytes | Legacy median peak KiB | Partitioned median peak KiB |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2 | 100 | 8,540,727 | 1,938,000 | 16,908 | 16,204 |
+| 2 | 400 | 34,639,527 | 8,401,024 | 26,508 | 20,844 |
+| 4 | 400 | 69,279,015 | 16,802,048 | 39,292 | 20,720 |
+| 8 | 400 | 138,557,991 | 33,604,096 | 65,032 | 20,856 |
+
+The next cohort measured decoding and oracle evaluation separately. All 48
+reader attempts passed. Record digests and full summary digests matched within
+each shape. At 400 sends per player, median peak RSS was 29,760/23,200 KiB
+for legacy/partitioned evaluation at two rooms. It was 42,736/28,820 KiB at
+four rooms and 68,280/28,824 KiB at eight rooms.
+
+A compatibility build
+also ran three two-room live controls at 16 players per room, 60 sends/s,
+five seconds of warm-up, and 30 seconds of measurement. The first spool build
+exceeded the 250 ms generator limit and left 15,600 sends unsent. The retained
+control completed all 67,232 sends with 35,266 us maximum generator lag.
+Moving encoding to the writer thread let the next spool trial complete all
+67,232 sends and 1,008,480 deliveries with 17,662 us maximum lag. The last
+spool trial replayed its exact summary. The measurements describe these
+three trials on the test host.
+
+The room-wise evaluator uses one room of raw records for steady reliable
+runs. It combines histogram buckets and selects the exact global lag
+percentile. A large lag value triggers fixed-size radix rescans, with the
+same nearest-rank result. Schema 11 records the room shards and a JSONL file
+for control evidence. Schema 10 retains the original JSONL contract.
+
+Set `CAPACITY_RUNNER_ROOM_SPOOL_BYTES` on the standalone capacity runner to
+select room capture and cap disk use. The raw memory budget applies per room.
+The evaluator preserves exact missing, duplicate, out-of-order, misrouted,
+gap, and disconnect diagnostics for the supported fault cases. A foreign
+receipt can scan the source shard for the requested send keys and retain
+only timing matches for payload and latency accounting. Archive replay
+checks global capture order before applying the same order to its first
+reliable-gap diagnostic. Invalid runs retain per-sender diagnostic samples.
+
+Raw payload size, encoded body, receipt time, and send-ledger violations
+also retain their exact counts and first keys. A differential control with
+11 rooms covers lexical send order and interleaved receipt order. The
+evaluator includes unidentified GameData bytes and honors slow-reader
+exemptions without losing outstanding counts.
+
+One room can receive the full run-wide inbound allowance. The evaluator
+includes the first event that crossed the collector's limit. Each retained
+raw event is charged against the configured byte budget before insertion.
+Shards that exceed the room limits can use the separately admitted
+whole-run evaluator. The exact replay needs enough raw-event headroom for
+any excess receipts and separate headroom for indexes and other memory.
+
+Replay can use the whole-run evaluator for exceptional archive evidence
+such as byte-total overflow, unexpected churn records, or misplaced shards.
+When fallback exceeds the live memory budget, the runner retains the spool
+and reports the budget reason. A provisioned replay host can set
+`CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES` without editing the archive.
+
+The full two-room capture `301e1fb6-e1d8-4c06-970b-7b0303929577` ran for
+120 seconds of warm-up and 600 seconds of measurement. All 1,382,464 sends
+and 20,736,960 deliveries completed. Maximum generator lag was 36,803 us.
+The 722 interval samples peaked at 35,213,312 generator RSS bytes and
+34,562,048 server RSS bytes. The two spool files total 1,016,131,048 bytes.
+The compatibility build wrote 3,970,022,232 bytes of JSONL and replayed its
+exact summary. A fresh process independently replayed the same spool through
+schema 11. Both fresh replays matched the complete summary. Their peak RSS
+was 711,972 and 712,516 KiB. Local builds started after collection stopped.
+Post-run wall times are outside the comparison cohort.
+
+The integrated room-wise evaluator repeated the same workload in
+`ed456b63-8bc3-4e22-9147-8ae61c504b1b` under a 707,821,568-byte raw event
+budget, which admits one planned room. It completed all sends and
+deliveries with 46,671 us maximum generator lag and 35,569,664 bytes peak
+sampled generator RSS. The two shards contain 22,119,424 records and occupy
+1,016,131,242 bytes.
+
+Four rooms was the first short cell to exceed 250 ms of generator lag.
+At five seconds of warm-up and 30 seconds of measurement, two spooled
+attempts peaked at 395,687 and 304,801 us. The retained control peaked at
+289,839 us. Each offered 134,464 sends. These cells were generator-invalid,
+with 47,229, 18,738 and 21,008 sends unsent, respectively. Two rooms remains
+the largest qualified long cell in this cohort.
+Both spooled four-room attempts later replayed to their exact saved invalid
+summaries under a 34,422,784-byte raw event budget. That budget admits one
+planned room. The separate whole-run fallback would require four times that
+planned raw storage.
+
+For the full 999-room schedule, the preflight control measures the shortest
+possible send and receipt encodings and multiplies each by its offered count.
+All 11,048,652,288 offered records require at least 397,751,482,368 bytes in
+the current spool format. The workspace reported 162,626,375,680 available
+bytes. The standalone upper cell also refused 159,546,830,848 available
+bytes before creating an output directory. A complete upper capture cannot
+fit on this filesystem. A run on a provisioned host is a separate capacity
+result.
+
+Run the paired decode and evaluation experiment with
+`python3 scripts/profile-capacity-spool.py <capacity-runner-test-binary> <fresh-output-dir>`.
+The manual Capacity Spool Profile workflow runs the same command on hosted
+ARM64 and retains the attempt reports and logs.
+
+Reproduce the two-room live cell with a fresh output directory on Linux
+ARM64. The standalone test checks the exact replay before it exits.
+
+```bash
+CAPACITY_RUNNER_ROOMS=2 CAPACITY_RUNNER_PLAYERS=16 \
+CAPACITY_RUNNER_RATE_PER_SENDER=60 CAPACITY_RUNNER_PAYLOAD_BYTES=96 \
+CAPACITY_RUNNER_SEED=1 CAPACITY_RUNNER_ENCODING=v3-json CAPACITY_RUNNER_CLASS=reliable \
+CAPACITY_RUNNER_WARMUP_SECS=120 CAPACITY_RUNNER_DURATION_SECS=600 \
+CAPACITY_RUNNER_LAG_BOUND_MS=250 CAPACITY_RUNNER_SAMPLE_INTERVAL_MS=1000 \
+CAPACITY_RUNNER_RAW_EVENT_BUDGET_BYTES=707821568 CAPACITY_RUNNER_ROOM_SPOOL_BYTES=2147483648 \
+CAPACITY_RUNNER_OUTPUT_DIR=progress/c3-two-room-live \
+cargo test --locked --test capacity_runner \
+  a_standalone_env_configured_run_writes_artifacts_and_replays -- --ignored --nocapture
+```
+
+[bounded-room-run]: https://github.com/Ambiguous-Interactive/signal-fish-server/issues/775

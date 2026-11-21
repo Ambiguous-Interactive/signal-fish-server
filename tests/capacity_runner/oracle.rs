@@ -1253,30 +1253,68 @@ fn sender_epoch_index<'a>(
     epochs
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ReceiptTiming {
+    pub(super) latest: Option<(Phase, u64)>,
+    pub(super) epoch_intended_us: Option<u64>,
+}
+
+pub(super) type ForeignReceiptTimings = BTreeMap<usize, ReceiptTiming>;
+
+fn receipt_timing(receipt: &crate::records::ReceiptEvent, sent: &SendIndex<'_>) -> ReceiptTiming {
+    let sender = receipt.sender.as_str();
+    let latest = sent.get(sender, receipt.seq);
+    ReceiptTiming {
+        latest: latest.map(|event| (event.phase, event.intended_us)),
+        epoch_intended_us: latest
+            .filter(|event| event.epoch == receipt.epoch)
+            .or_else(|| sent.get_in_epoch(sender, receipt.epoch, receipt.seq))
+            .map(|event| event.intended_us),
+    }
+}
+
 /// One-way latency samples over the measured window, per recipient: for
 /// every receipt, the receipt time minus the intended send time of the same
 /// `(sender, seq)` delivery. Single source for the summary percentiles (run
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
 pub fn latency_pairs(records: &RunRecords) -> impl Iterator<Item = (&str, u64)> {
-    indexed_latency_pairs(records, SendIndex::new(&records.sent))
+    latency_pairs_with_foreign(records, None)
+}
+
+pub(super) fn latency_pairs_with_foreign<'a>(
+    records: &'a RunRecords,
+    foreign: Option<&'a ForeignReceiptTimings>,
+) -> impl Iterator<Item = (&'a str, u64)> {
+    indexed_latency_pairs(records, SendIndex::new(&records.sent), foreign)
 }
 
 fn indexed_latency_pairs<'a>(
     records: &'a RunRecords,
     sent_by_key: impl std::borrow::Borrow<SendIndex<'a>>,
+    foreign: Option<&'a ForeignReceiptTimings>,
 ) -> impl Iterator<Item = (&'a str, u64)> {
-    records.receipts.iter().filter_map(move |receipt| {
-        let sent = sent_by_key
-            .borrow()
-            .get(receipt.sender.as_str(), receipt.seq)?;
-        (sent.phase == Phase::Measured).then(|| {
-            (
-                receipt.recipient.as_str(),
-                receipt.received_us.saturating_sub(sent.intended_us),
-            )
+    records
+        .receipts
+        .iter()
+        .enumerate()
+        .filter_map(move |(ordinal, receipt)| {
+            let (phase, intended_us) = match foreign.and_then(|timings| timings.get(&ordinal)) {
+                Some(timing) => timing.latest?,
+                None => {
+                    let sent = sent_by_key
+                        .borrow()
+                        .get(receipt.sender.as_str(), receipt.seq)?;
+                    (sent.phase, sent.intended_us)
+                }
+            };
+            (phase == Phase::Measured).then(|| {
+                (
+                    receipt.recipient.as_str(),
+                    receipt.received_us.saturating_sub(intended_us),
+                )
+            })
         })
-    })
 }
 
 /// One-way latency samples over the measured window (all recipients).
@@ -1468,10 +1506,11 @@ fn individual_recipient_latency_statistics(
     sent_by_key: &SendIndex<'_>,
     room_of: &BTreeMap<&str, u32>,
     per_recipient: &mut [RecipientOutcome],
+    foreign: Option<&ForeignReceiptTimings>,
 ) -> LatencyStats {
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut by_recipient = BTreeMap::<&str, RecipientLatency>::new();
-    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
+    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key, foreign) {
         latency.record(sample);
         if let Some((&recipient, _)) = room_of.get_key_value(recipient) {
             by_recipient
@@ -1506,7 +1545,7 @@ fn recipient_latency_statistics<T: Counter>(
     );
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut latency_by_recipient: BTreeMap<&str, LatencyAccumulator<T>> = BTreeMap::new();
-    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key) {
+    for (recipient, sample) in indexed_latency_pairs(records, sent_by_key, None) {
         latency.record(sample);
         // Misrouted receipts remain in the aggregate. Allocate recipient
         // buckets only for roster peers with measured receipts.
@@ -1968,6 +2007,43 @@ fn snapshot_tail_evidence(
     }
 }
 
+const RELIABLE_GAP_DETAIL: &str = "reliable delivery permits no loss, yet a gap report arrived";
+
+fn gap_identity_violation(
+    recipient: &str,
+    sender: &str,
+    room_of: &BTreeMap<&str, u32>,
+) -> Option<&'static str> {
+    match (room_of.get(recipient), room_of.get(sender)) {
+        (None, _) | (_, None) => Some("gap references a peer outside the run roster"),
+        _ if recipient == sender => Some("gap names the recipient as its own sender"),
+        (left, right) if left != right => Some("gap names a sender from another room"),
+        _ => None,
+    }
+}
+
+pub(super) fn reliable_gap_violation(
+    gap: GapEvent<String>,
+    room_of: &BTreeMap<&str, u32>,
+) -> GapViolation {
+    let detail =
+        gap_identity_violation(&gap.recipient, &gap.sender, room_of).unwrap_or(RELIABLE_GAP_DETAIL);
+    GapViolation {
+        recipient: gap.recipient,
+        sender: gap.sender,
+        detail: detail.to_owned(),
+    }
+}
+
+/// Local receipt positions of the first violations. Partition replay
+/// resolves only these positions to global capture ordinals.
+#[derive(Default)]
+pub(super) struct RawViolationPositions {
+    pub(super) early: Option<usize>,
+    pub(super) size: Option<usize>,
+    pub(super) body: Option<usize>,
+}
+
 /// Validate raw sizes and receipt times before delivery filtering, including duplicates,
 /// misroutes, warm-up records, and receipt keys absent from the send ledger.
 fn raw_event_evidence(
@@ -1975,8 +2051,10 @@ fn raw_event_evidence(
     sent_by_key: &SendIndex<'_>,
     expected_application_bytes: u32,
     reasons: &mut Vec<InvalidReason>,
-) -> PayloadBytes {
+    foreign: Option<&ForeignReceiptTimings>,
+) -> (PayloadBytes, RawViolationPositions) {
     let mut evidence = PayloadBytes::default();
+    let mut position = RawViolationPositions::default();
     let mut mismatches = (0_u64, None);
     let mut invalid_bodies = (0_u64, None);
     let mut overflows = (0_u64, None);
@@ -1987,7 +2065,8 @@ fn raw_event_evidence(
                      seq: Option<u64>,
                      application: u64,
                      encoded: u64,
-                     overflow: bool| {
+                     overflow: bool,
+                     receipt_index: Option<usize>| {
         let violation = || PayloadSizeViolation {
             direction: direction.to_string(),
             sender: sender.map(str::to_string),
@@ -2003,13 +2082,19 @@ fn raw_event_evidence(
         }
         if application != u64::from(expected_application_bytes) {
             mismatches.0 += 1;
-            mismatches.1.get_or_insert_with(violation);
+            mismatches.1.get_or_insert_with(|| {
+                position.size = receipt_index;
+                violation()
+            });
         }
         // Current formats contain the full application value in their body.
         // Do not infer an envelope size: actual encoded sizes are raw evidence.
         if encoded < application || encoded == 0 {
             invalid_bodies.0 += 1;
-            invalid_bodies.1.get_or_insert_with(violation);
+            invalid_bodies.1.get_or_insert_with(|| {
+                position.body = receipt_index;
+                violation()
+            });
         }
     };
     for sent in &records.sent {
@@ -2028,15 +2113,20 @@ fn raw_event_evidence(
             sent.application_bytes,
             sent.encoded_frame_body_bytes,
             overflow,
+            None,
         );
     }
-    for receipt in &records.receipts {
-        let sent = sent_by_key.get(receipt.sender.as_str(), receipt.seq);
-        let receipt_send = sent.filter(|sent| sent.epoch == receipt.epoch).or_else(|| {
-            sent_by_key.get_in_epoch(receipt.sender.as_str(), receipt.epoch, receipt.seq)
-        });
-        if let Some(sent) = receipt_send.filter(|sent| receipt.received_us < sent.intended_us) {
+    for (ordinal, receipt) in records.receipts.iter().enumerate() {
+        let timing = foreign
+            .and_then(|timings| timings.get(&ordinal))
+            .copied()
+            .unwrap_or_else(|| receipt_timing(receipt, sent_by_key));
+        if let Some(intended_us) = timing
+            .epoch_intended_us
+            .filter(|time| receipt.received_us < *time)
+        {
             early_receipts.0 += 1;
+            position.early.get_or_insert(ordinal);
             early_receipts
                 .1
                 .get_or_insert_with(|| ReceiptTimeViolation {
@@ -2046,11 +2136,11 @@ fn raw_event_evidence(
                         epoch: receipt.epoch,
                         seq: receipt.server_seq,
                     },
-                    intended_us: sent.intended_us,
+                    intended_us,
                     received_us: receipt.received_us,
                 });
         }
-        let direction = match sent.map(|sent| sent.phase) {
+        let direction = match timing.latest.map(|(phase, _)| phase) {
             Some(Phase::Warmup) => &mut evidence.warmup.egress,
             Some(Phase::Measured) => &mut evidence.measured.egress,
             None => &mut evidence.unmatched_egress,
@@ -2065,6 +2155,7 @@ fn raw_event_evidence(
             receipt.application_bytes,
             receipt.encoded_frame_body_bytes,
             overflow,
+            Some(ordinal),
         );
     }
     // Unidentified deliveries are structured raw faults rather than fabricated
@@ -2088,6 +2179,7 @@ fn raw_event_evidence(
                 *application_bytes,
                 *encoded_frame_body_bytes,
                 overflow,
+                None,
             );
         }
     }
@@ -2115,7 +2207,23 @@ fn raw_event_evidence(
             first,
         });
     }
-    evidence
+    (evidence, position)
+}
+
+/// A room capture keeps unidentified GameData evidence with its controls.
+pub(super) fn control_payload_evidence(
+    records: &RunRecords,
+    expected_application_bytes: u32,
+) -> (PayloadBytes, Vec<InvalidReason>) {
+    let mut reasons = Vec::new();
+    let (payload, _) = raw_event_evidence(
+        records,
+        &SendIndex::new(&records.sent),
+        expected_application_bytes,
+        &mut reasons,
+        None,
+    );
+    (payload, reasons)
 }
 
 /// Summarize one run: the single source of the outcome summary.
@@ -2151,6 +2259,32 @@ pub fn summarize(
     churn: &ChurnPlan,
     experiment: Option<Experiment>,
 ) -> OutcomeSummary {
+    summarize_with_foreign(
+        plans,
+        roster,
+        records,
+        generator_lag_bound_us,
+        expected_application_bytes,
+        delivery_class,
+        churn,
+        experiment,
+        None,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn summarize_with_foreign(
+    plans: &[SenderPlan],
+    roster: &[(String, u32)],
+    records: &RunRecords,
+    generator_lag_bound_us: u64,
+    expected_application_bytes: u32,
+    delivery_class: DeliveryClass,
+    churn: &ChurnPlan,
+    experiment: Option<Experiment>,
+    foreign: Option<&ForeignReceiptTimings>,
+) -> (OutcomeSummary, RawViolationPositions) {
     // Share exact send lookups across validation and latency passes. Arbitrary
     // replay order needs one sort and one compact offset index, not three.
     let sent_by_key = SendIndex::new(&records.sent);
@@ -2158,11 +2292,12 @@ pub fn summarize(
     let room_of = &roster_index.room_of;
     let members_of_room = &roster_index.members_of_room;
     let mut reasons = records.faults.clone();
-    let payload_bytes = raw_event_evidence(
+    let (payload_bytes, raw_positions) = raw_event_evidence(
         records,
         &sent_by_key,
         expected_application_bytes,
         &mut reasons,
+        foreign,
     );
     churn_evidence(churn, room_of, records, &mut reasons);
     if !records.join_failures.is_empty() {
@@ -2345,17 +2480,12 @@ pub fn summarize(
         // The experiment's cross-format pair (opaque sender -> any co-room
         // peer): gap reports are the contract, not a violation.
         let opaque_pair = opaque_senders.contains(gap.sender.as_str());
-        if !room_of.contains_key(gap.recipient.as_str())
-            || !room_of.contains_key(gap.sender.as_str())
+        if let Some(violation) =
+            gap_identity_violation(gap.recipient.as_str(), gap.sender.as_str(), room_of)
         {
-            detail = Some("gap references a peer outside the run roster".to_string());
-        } else if gap.recipient == gap.sender {
-            detail = Some("gap names the recipient as its own sender".to_string());
-        } else if room_of.get(gap.recipient.as_str()) != room_of.get(gap.sender.as_str()) {
-            detail = Some("gap names a sender from another room".to_string());
+            detail = Some(violation.to_owned());
         } else if delivery_class == DeliveryClass::Reliable && !opaque_pair {
-            detail =
-                Some("reliable delivery permits no loss, yet a gap report arrived".to_string());
+            detail = Some(RELIABLE_GAP_DETAIL.to_owned());
         } else if sender_epochs
             .get(gap.sender.as_str())
             .is_none_or(|epochs| epochs.binary_search(&gap.epoch).is_err())
@@ -2674,8 +2804,13 @@ pub fn summarize(
     drop(arrivals);
     drop(gap_streams);
     drop(views);
-    let latency_us =
-        individual_recipient_latency_statistics(records, &sent_by_key, room_of, &mut per_recipient);
+    let latency_us = individual_recipient_latency_statistics(
+        records,
+        &sent_by_key,
+        room_of,
+        &mut per_recipient,
+        foreign,
+    );
 
     if let Some(reason) =
         missing.into_reason(|count, first| InvalidReason::MissingDeliveries { count, first })
@@ -2746,18 +2881,7 @@ pub fn summarize(
 
     // Unsent work with no explanatory fault is a generator bookkeeping bug:
     // every sender exit path must record why it stopped.
-    let fault_explains_unsent = reasons.iter().any(|reason| {
-        matches!(
-            reason,
-            InvalidReason::ServerTerminated
-                | InvalidReason::GeneratorSaturated { .. }
-                | InvalidReason::SendFailed { .. }
-                | InvalidReason::JoinFailed { .. }
-                | InvalidReason::RunnerDeadlineExceeded { .. }
-                | InvalidReason::GeneratorRecordBudgetExceeded { .. }
-                | InvalidReason::ReconnectFailed { .. }
-        )
-    });
+    let fault_explains_unsent = reasons.iter().any(explains_unsent);
     if total_unsent > 0 && !fault_explains_unsent {
         reasons.push(InvalidReason::UnsentWork {
             count: total_unsent,
@@ -2800,7 +2924,7 @@ pub fn summarize(
         });
     }
 
-    OutcomeSummary {
+    let summary = OutcomeSummary {
         valid: reasons.is_empty(),
         reasons,
         totals: Totals {
@@ -2821,7 +2945,21 @@ pub fn summarize(
         payload_bytes,
         experiment: experiment.map(Experiment::label).map(str::to_string),
         unsupported_notices: count_u64(records.unsupported_notices.len()),
-    }
+    };
+    (summary, raw_positions)
+}
+
+pub(super) fn explains_unsent(reason: &InvalidReason) -> bool {
+    matches!(
+        reason,
+        InvalidReason::ServerTerminated
+            | InvalidReason::GeneratorSaturated { .. }
+            | InvalidReason::SendFailed { .. }
+            | InvalidReason::JoinFailed { .. }
+            | InvalidReason::RunnerDeadlineExceeded { .. }
+            | InvalidReason::GeneratorRecordBudgetExceeded { .. }
+            | InvalidReason::ReconnectFailed { .. }
+    )
 }
 
 /// Counts and the first offending sequence preserve the category's exact key.
@@ -3169,21 +3307,39 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
     if sent.is_empty() || minimum == maximum {
         return (maximum, maximum);
     }
-    let mut rank = sent.len() - sent.len() / 100;
+    let p99 = select_generator_lag(count_u64(sent.len()), maximum, |visit| {
+        for event in sent {
+            visit(lag(event));
+        }
+        Ok::<(), std::convert::Infallible>(())
+    })
+    .unwrap_or_else(|never| match never {});
+    (maximum, p99)
+}
+
+/// Select the exact p99 by rescanning lag samples with 256 counters per pass.
+pub(super) fn select_generator_lag<E>(
+    samples: u64,
+    maximum: u64,
+    mut scan: impl FnMut(&mut dyn FnMut(u64)) -> Result<(), E>,
+) -> Result<u64, E> {
+    if maximum == 0 {
+        return Ok(0);
+    }
+    let mut rank = samples - samples / 100;
     let mut prefix = 0;
     let highest_byte = (u64::BITS - 1 - maximum.leading_zeros()) / 8;
     for byte in (0..=highest_byte).rev() {
         let shift = byte * 8;
         let mask = u64::MAX.checked_shl(shift + 8).unwrap_or(0);
-        let mut buckets = [0_usize; 256];
-        for event in sent {
-            let value = lag(event);
+        let mut buckets = [0_u64; 256];
+        scan(&mut |value| {
             if value & mask == prefix {
                 let digit =
                     usize::from(value.to_le_bytes()[usize::try_from(byte).expect("u64 byte")]);
                 buckets[digit] += 1;
             }
-        }
+        })?;
         for (digit, count) in buckets.into_iter().enumerate() {
             if rank > count {
                 rank -= count;
@@ -3193,7 +3349,7 @@ fn generator_lag_stats(sent: &[SentEvent]) -> (u64, u64) {
             }
         }
     }
-    (maximum, prefix)
+    Ok(prefix)
 }
 
 #[cfg(test)]
@@ -3462,7 +3618,7 @@ mod coverage_tests {
                     );
                 }
                 let mut reasons = Vec::new();
-                raw_event_evidence(&records, index, 96, &mut reasons);
+                raw_event_evidence(&records, index, 96, &mut reasons, None);
                 assert_eq!(
                     reasons,
                     vec![InvalidReason::InvalidReceiptTimes {
@@ -4019,6 +4175,7 @@ mod coverage_tests {
                             config_provenance: crate::artifacts::ConfigProvenance::UnknownExternal,
                         },
                         crate::artifacts::BuildIdentity::current(),
+                        None,
                     )
                     .expect("write replay manifest");
                     let (plans, churn) = crate::build_run_shape(&config).unwrap();
@@ -7016,8 +7173,13 @@ mod coverage_tests {
                         .record(receipt.application_bytes, receipt.encoded_frame_body_bytes));
                 }
                 let mut reasons = Vec::new();
-                let actual =
-                    raw_event_evidence(&records, &SendIndex::new(&records.sent), 96, &mut reasons);
+                let (actual, _) = raw_event_evidence(
+                    &records,
+                    &SendIndex::new(&records.sent),
+                    96,
+                    &mut reasons,
+                    None,
+                );
                 assert!(reasons.is_empty(), "{reasons:?}");
                 for (actual, expected) in [
                     (actual.warmup.egress, warmup),

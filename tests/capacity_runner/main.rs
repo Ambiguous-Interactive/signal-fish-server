@@ -48,8 +48,10 @@ mod attempt_artifacts;
 mod config;
 mod diagnostics;
 mod oracle;
+mod partition_oracle;
 mod received_counts;
 mod records;
+mod room_spool;
 mod runner;
 mod schedule;
 mod snapshot_tails;
@@ -4274,7 +4276,18 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
 #[ignore = "standalone capacity-host entry point: shape via CAPACITY_RUNNER_*"]
 async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
     let config = RunConfig::from_env().expect("CAPACITY_RUNNER_* env is valid");
-    let outcome = runner::run(config).await.expect("run completes");
+    let spool_budget = match std::env::var("CAPACITY_RUNNER_ROOM_SPOOL_BYTES") {
+        Ok(value) => Some(
+            value
+                .parse::<u64>()
+                .expect("room spool byte budget is an integer"),
+        ),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("invalid CAPACITY_RUNNER_ROOM_SPOOL_BYTES: {error}"),
+    };
+    let outcome = runner::run_with_capture(config, spool_budget)
+        .await
+        .expect("run completes");
     println!("run {} valid: {}", outcome.run_id, outcome.summary.valid);
     for reason in &outcome.summary.reasons {
         println!("reason: {reason:?}");
@@ -4289,6 +4302,9 @@ async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
         serde_json::to_value(&outcome.summary).expect("serialize summary"),
         "replaying the artifacts must reproduce the outcome summary"
     );
+    if spool_budget.is_some() {
+        assert!(outcome.summary.valid, "room capture run invalidated");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -6523,4 +6539,146 @@ fn generator_schedule_memory_profile() {
         "churn_cycles":churn.cycles.len()})
     );
     std::hint::black_box(&plans);
+}
+
+#[test]
+fn partitioned_capacity_shape_fits_one_room_at_a_time() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 1;
+    let one_room = config.validate_raw_event_budget().unwrap();
+    config.rooms = 2;
+    config.raw_event_budget_bytes = one_room;
+    assert!(config.validate_raw_event_budget().is_err());
+    assert_eq!(config.validate_partitioned_room_budget().unwrap(), one_room);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial_test::serial]
+async fn room_spool_live_capture_preserves_reliable_replay() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = wire_correctness_config(Encoding::V3Json);
+    config.raw_event_budget_bytes = config.validate_raw_event_budget().unwrap();
+    config.rooms = 2;
+    assert!(config.validate_raw_event_budget().is_err());
+    config.output_dir = temp.path().to_path_buf();
+    let outcome = runner::run_with_capture(config, Some(1024 * 1024))
+        .await
+        .unwrap();
+    assert!(outcome.summary.valid, "{:?}", outcome.summary.reasons);
+    assert!(outcome.output_dir.join("rooms/rooms.json").is_file());
+    let replay = artifacts::replay(&outcome.output_dir).unwrap();
+    let manifest = artifacts::read_manifest(&outcome.output_dir).unwrap();
+    let (plans, churn) = build_run_shape(&manifest.config).unwrap();
+    let roster = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect::<Vec<_>>();
+    let mut reference = artifacts::read_records(&outcome.output_dir).unwrap();
+    assert!(reference.sent.is_empty() && reference.receipts.is_empty());
+    room_spool::RoomReplay::open(&outcome.output_dir.join("rooms"), 2)
+        .unwrap()
+        .restore_hot_records(&mut reference, 32_000, u64::MAX)
+        .unwrap();
+    let expected = oracle::summarize(
+        &plans,
+        &roster,
+        &reference,
+        2_000_000,
+        96,
+        DeliveryClass::Reliable,
+        &churn,
+        None,
+    );
+    assert_eq!(
+        serde_json::to_value(&outcome.summary).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+    );
+    assert_eq!(
+        serde_json::to_value(outcome.summary).unwrap(),
+        serde_json::to_value(replay).unwrap(),
+    );
+    let buckets = |histogram: &hdrhistogram::Histogram<u64>| {
+        histogram
+            .iter_recorded()
+            .map(|bucket| (bucket.value_iterated_to(), bucket.count_at_value()))
+            .collect::<Vec<_>>()
+    };
+    let expected_histogram =
+        oracle::latency_histogram(oracle::latency_pairs(&reference).map(|(_, latency)| latency));
+    let mut artifact =
+        std::fs::File::open(outcome.output_dir.join(artifacts::HISTOGRAM_FILE)).unwrap();
+    let actual_histogram = hdrhistogram::serialization::Deserializer::new()
+        .deserialize(&mut artifact)
+        .unwrap();
+    assert_eq!(buckets(&actual_histogram), buckets(&expected_histogram));
+    let shards =
+        ["rooms/000.msgpack", "rooms/001.msgpack"].map(|name| outcome.output_dir.join(name));
+    let contents = shards.each_ref().map(|path| std::fs::read(path).unwrap());
+    let first = contents
+        .each_ref()
+        .map(|bytes| u64::from_le_bytes(bytes[2..10].try_into().unwrap()));
+    let later = usize::from(first[1] > first[0]);
+    let mut damaged = contents[later].clone();
+    damaged[2..10].copy_from_slice(&first[1 - later].to_le_bytes());
+    std::fs::write(&shards[later], damaged).unwrap();
+    assert!(artifacts::replay(&outcome.output_dir)
+        .unwrap_err()
+        .contains("repeats ordinal"));
+    std::fs::write(&shards[later], &contents[later]).unwrap();
+    std::fs::remove_file(outcome.output_dir.join("rooms/001.msgpack")).unwrap();
+    assert!(artifacts::replay(&outcome.output_dir)
+        .unwrap_err()
+        .contains("read room 1 spool"));
+}
+
+#[tokio::test]
+async fn room_spool_preflight_refuses_disk_budget_before_connecting() {
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("refused");
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let mut config = scenario_config(Encoding::V3Json);
+    config.endpoint = Some(format!("ws://{}", listener.local_addr().unwrap()));
+    config.output_dir.clone_from(&output);
+    let error = runner::run_with_capture(config, Some(1)).await.unwrap_err();
+    assert!(error.contains("full offered workload"), "{error}");
+    assert!(!output.exists());
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+}
+
+#[test]
+fn room_spool_disk_floor_preserves_the_full_999_room_shape() {
+    let mut config = scenario_config(Encoding::V3Json);
+    config.rooms = 999;
+    config.players_per_room = 16;
+    config.send_rate_per_sender = 60.0;
+    config.warmup = Duration::from_secs(120);
+    config.duration = Duration::from_secs(600);
+    config.planned_record_budget = u64::MAX;
+    assert_eq!(
+        config.validate_planned_record_budget().unwrap(),
+        11_048_652_288
+    );
+    let floor = room_spool::planned_disk_floor(&config).unwrap();
+    println!("999-room spool floor: {floor} bytes");
+    assert!(floor > 160_000_000_000);
+    let error = room_spool::preflight(&config, 160_000_000_000).unwrap_err();
+    assert!(error.contains(&format!("at least {floor} spool bytes")));
+}
+
+/// Verify a saved run in a fresh process, including its exact summary.
+#[test]
+#[ignore = "standalone replay of a saved capacity run"]
+fn a_standalone_capacity_replay_matches_the_saved_summary() {
+    let output = std::env::var_os("CAPACITY_RUNNER_OUTPUT_DIR")
+        .map(PathBuf::from)
+        .expect("set CAPACITY_RUNNER_OUTPUT_DIR to a saved run");
+    let expected: serde_json::Value =
+        serde_json::from_reader(std::fs::File::open(output.join(artifacts::SUMMARY_FILE)).unwrap())
+            .unwrap();
+    let summary = artifacts::replay(&output).expect("replay completes");
+    assert_eq!(serde_json::to_value(summary).unwrap(), expected);
 }
