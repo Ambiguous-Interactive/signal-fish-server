@@ -1078,7 +1078,11 @@ pub(super) async fn run_with_capture(
                 config.validate_raw_event_budget().map_err(|error| {
                     format!("exact diagnostics require the legacy memory budget: {error}")
                 })?;
-                replay.restore_hot_records(&mut records, capture_rows)?;
+                replay.restore_hot_records(
+                    &mut records,
+                    capture_rows,
+                    config.raw_event_budget_bytes,
+                )?;
             }
             Ok::<_, String>(evaluation)
         })();

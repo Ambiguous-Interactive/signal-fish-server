@@ -124,16 +124,31 @@ pub(super) fn evaluate_rooms(
             });
         }
         let mut names = ReceiptNames::default();
-        replay.visit(room as usize, room_rows, |ordinal, event| match event {
-            RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
-            RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
-            RoomEvent::Gap(event) => {
-                gap_count += 1;
-                if first_gap.as_ref().is_none_or(|(first, _)| ordinal < *first) {
-                    first_gap = Some((ordinal, oracle::reliable_gap_violation(event, &room_of)));
+        let mut remaining = Some(config.raw_event_budget_bytes);
+        replay.visit(room as usize, room_rows, |ordinal, event| {
+            // Gaps reduce to their total and first violation rather than a vector.
+            if !matches!(&event, RoomEvent::Gap(_)) {
+                remaining =
+                    remaining.and_then(|bytes| bytes.checked_sub(event.raw_storage_bytes()));
+            }
+            if remaining.is_none() {
+                return;
+            }
+            match event {
+                RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
+                RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
+                RoomEvent::Gap(event) => {
+                    gap_count += 1;
+                    if first_gap.as_ref().is_none_or(|(first, _)| ordinal < *first) {
+                        first_gap =
+                            Some((ordinal, oracle::reliable_gap_violation(event, &room_of)));
+                    }
                 }
             }
         })?;
+        if remaining.is_none() {
+            return Ok(None);
+        }
         crate::records::sort_sent_events(&mut records.sent);
         let summarize_room = |foreign| {
             oracle::summarize_with_foreign(

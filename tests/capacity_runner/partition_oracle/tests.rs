@@ -50,12 +50,26 @@ fn bounded_room_replay_keeps_the_run_wide_duplicate_allowance_in_one_room() {
         .unwrap()
         .expect("duplicates within the accepted allowance admit bounded replay");
     assert!(replay
-        .restore_hot_records(&mut RunRecords::default(), config.planned_record_budget)
+        .restore_hot_records(
+            &mut RunRecords::default(),
+            config.planned_record_budget,
+            u64::MAX
+        )
         .is_err());
     let (capture_rows, _) = crate::room_spool::row_limits(&config).unwrap();
+    let mut tight = config.clone();
+    tight.raw_event_budget_bytes = config.validate_partitioned_room_budget().unwrap();
+    assert!(evaluate_rooms(&replay, &tight, &plans, &control)
+        .unwrap()
+        .is_none());
+    let mut refused = RunRecords::default();
+    assert!(replay
+        .restore_hot_records(&mut refused, capture_rows, tight.raw_event_budget_bytes)
+        .unwrap_err()
+        .contains("exceed replay byte budget"));
     let mut restored = control;
     replay
-        .restore_hot_records(&mut restored, capture_rows)
+        .restore_hot_records(&mut restored, capture_rows, config.raw_event_budget_bytes)
         .unwrap();
     assert_eq!(
         serde_json::to_value(restored.receipts).unwrap(),

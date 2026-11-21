@@ -1029,7 +1029,7 @@ fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<Outcome
         admission.validate_raw_event_budget().map_err(|error| {
             format!("exact diagnostics exceed CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES: {error}")
         })?;
-        spool.restore_hot_records(&mut records, rows)?;
+        spool.restore_hot_records(&mut records, rows, limits.raw_event_bytes)?;
     }
     Ok(summarize(
         &plans,
@@ -1320,7 +1320,8 @@ mod tests {
         let actual = replay_with_limits(
             output.path(),
             ReplayLimits {
-                raw_event_bytes: one_room * 2,
+                raw_event_bytes: one_room * 2
+                    + std::mem::size_of::<crate::records::ReceiptEvent>() as u64,
                 ..limits
             },
         )

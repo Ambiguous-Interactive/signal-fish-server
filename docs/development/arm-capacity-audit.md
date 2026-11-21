@@ -8187,9 +8187,11 @@ evaluator includes unidentified GameData bytes and honors slow-reader
 exemptions without losing outstanding counts.
 
 One room can receive the full run-wide inbound allowance. The evaluator
-also retains the first event that crossed the collector's limit. If more
-than one room's planned receipts concentrate in the same shard beyond that
-allowance, exact replay uses the separately admitted whole-run evaluator.
+includes the first event that crossed the collector's limit. Each retained
+raw event is charged against the configured byte budget before insertion.
+Shards that exceed the room limits can use the separately admitted
+whole-run evaluator. The exact replay needs enough raw-event headroom for
+any excess receipts and separate headroom for indexes and other memory.
 
 Replay can use the whole-run evaluator for exceptional archive evidence
 such as byte-total overflow, unexpected churn records, or misplaced shards.

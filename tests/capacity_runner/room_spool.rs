@@ -26,6 +26,16 @@ pub(super) enum RoomEvent<Name = crate::records::ReceiptName> {
     Gap(GapEvent<Name>),
 }
 
+impl<Name> RoomEvent<Name> {
+    pub(super) fn raw_storage_bytes(&self) -> u64 {
+        match self {
+            Self::Sent(_) => std::mem::size_of::<SentEvent>() as u64,
+            Self::Receipt(_) => std::mem::size_of::<ReceiptEvent>() as u64,
+            Self::Gap(_) => std::mem::size_of::<GapEvent>() as u64,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
 struct RoomFile {
     bytes: u64,
@@ -503,13 +513,26 @@ impl RoomReplay {
         &self,
         records: &mut crate::records::RunRecords,
         row_budget: u64,
+        raw_event_budget: u64,
     ) -> Result<(), String> {
         let mut names = crate::records::ReceiptNames::default();
-        self.visit_ordered(row_budget, |event| match event {
-            RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
-            RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
-            RoomEvent::Gap(event) => records.gaps.push(names.share_gap(event)),
+        let mut remaining = Some(raw_event_budget);
+        self.visit_ordered(row_budget, |event| {
+            remaining = remaining.and_then(|bytes| bytes.checked_sub(event.raw_storage_bytes()));
+            if remaining.is_none() {
+                return;
+            }
+            match event {
+                RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
+                RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
+                RoomEvent::Gap(event) => records.gaps.push(names.share_gap(event)),
+            }
         })?;
+        if remaining.is_none() {
+            return Err(format!(
+                "captured raw events exceed replay byte budget {raw_event_budget}"
+            ));
+        }
         crate::records::sort_sent_events(&mut records.sent);
         Ok(())
     }

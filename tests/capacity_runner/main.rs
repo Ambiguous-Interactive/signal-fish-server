@@ -6577,7 +6577,7 @@ async fn room_spool_live_capture_preserves_reliable_replay() {
     assert!(reference.sent.is_empty() && reference.receipts.is_empty());
     room_spool::RoomReplay::open(&outcome.output_dir.join("rooms"), 2)
         .unwrap()
-        .restore_hot_records(&mut reference, 32_000)
+        .restore_hot_records(&mut reference, 32_000, u64::MAX)
         .unwrap();
     let expected = oracle::summarize(
         &plans,
