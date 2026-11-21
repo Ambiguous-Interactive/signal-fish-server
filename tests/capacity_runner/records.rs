@@ -485,6 +485,7 @@ pub struct EventLog {
 
 #[derive(Default)]
 struct EventState {
+    room_capture: Option<RoomCapture>,
     snapshot_names: ReceiptNames,
     receipt_timings: Option<ReceiptTimingSnapshot>,
     budget: Option<RecordBudget>,
@@ -507,6 +508,12 @@ struct EventState {
     registry: BTreeMap<String, (String, u32)>,
 }
 
+struct RoomCapture {
+    spool: crate::room_spool::RoomSpool,
+    rooms: BTreeMap<String, usize>,
+    completed_sends: u64,
+}
+
 /// Receive-side events can exceed the offered schedule. Keep one terminal
 /// event beyond these limits so the cause remains exact, then stop the run.
 /// Sends have their own finite schedule and are never discarded by this gate.
@@ -523,6 +530,10 @@ struct RecordBudget {
 const CONTROL_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const EXTRA_EVENTS: usize = 1024;
 const EXTRA_EVENTS_PER_PEER: usize = 128;
+
+pub(super) fn extra_inbound_events(peers: u32) -> u64 {
+    u64::from(peers) * (EXTRA_EVENTS_PER_PEER as u64) + (EXTRA_EVENTS as u64)
+}
 
 impl EventLog {
     pub fn new() -> Self {
@@ -543,6 +554,33 @@ impl EventLog {
     }
 
     pub fn for_plans(plans: &[SenderPlan], receipt_timings: bool) -> Result<Self, String> {
+        Self::for_plans_with_capture(plans, receipt_timings, None)
+    }
+
+    pub(super) fn for_partitioned_plans(
+        plans: &[SenderPlan],
+        spool: crate::room_spool::RoomSpool,
+    ) -> Result<Self, String> {
+        let rooms = plans
+            .iter()
+            .map(|plan| (plan.name.clone(), plan.room as usize))
+            .collect();
+        Self::for_plans_with_capture(
+            plans,
+            false,
+            Some(RoomCapture {
+                spool,
+                rooms,
+                completed_sends: 0,
+            }),
+        )
+    }
+
+    fn for_plans_with_capture(
+        plans: &[SenderPlan],
+        receipt_timings: bool,
+        room_capture: Option<RoomCapture>,
+    ) -> Result<Self, String> {
         let mut members_by_room = BTreeMap::<u32, usize>::new();
         for plan in plans {
             *members_by_room.entry(plan.room).or_default() += 1;
@@ -565,7 +603,14 @@ impl EventLog {
                             .ok_or_else(|| "planned receipt capacity overflows".to_string())?,
                     ))
                 })?;
-        let mut log = Self::with_planned_capacity(sent, receipts, receipt_timings)?;
+        let (resident_sent, resident_receipts) = if room_capture.is_some() {
+            (0, 0)
+        } else {
+            (sent, receipts)
+        };
+        let mut log =
+            Self::with_planned_capacity(resident_sent, resident_receipts, receipt_timings)?;
+        log.state.get_mut().expect("new event log").room_capture = room_capture;
         let allowance = plans
             .len()
             .checked_mul(EXTRA_EVENTS_PER_PEER)
@@ -758,17 +803,100 @@ impl EventLog {
     }
 
     pub fn push_sent(&self, event: SentEvent) {
+        let mut state = self.state.lock().expect("event log poisoned");
+        if let Some(capture) = &mut state.room_capture {
+            capture.completed_sends += 1;
+            self.capture_room_event(
+                &mut state,
+                "sent",
+                crate::room_spool::RoomEvent::Sent(event),
+            );
+        } else {
+            state.sent.push(event);
+        }
+    }
+
+    pub(super) fn completed_room_capture_sends(&self) -> u64 {
         self.state
             .lock()
             .expect("event log poisoned")
-            .sent
-            .push(event);
+            .room_capture
+            .as_ref()
+            .expect("active room capture")
+            .completed_sends
+    }
+
+    pub(super) fn room_capture_queue(&self) -> crate::room_spool::CaptureQueue {
+        self.state
+            .lock()
+            .expect("event log poisoned")
+            .room_capture
+            .as_ref()
+            .expect("active room capture")
+            .spool
+            .capture_queue()
+    }
+
+    /// Close the collector after every producer has stopped.
+    pub(super) fn finish_room_capture(&self) -> Result<(), String> {
+        let capture = self
+            .state
+            .lock()
+            .expect("event log poisoned")
+            .room_capture
+            .take();
+        capture
+            .ok_or_else(|| "room spool was not active".to_string())?
+            .spool
+            .finish()
+    }
+
+    fn capture_room_event(
+        &self,
+        state: &mut EventState,
+        kind: &'static str,
+        event: crate::room_spool::RoomEvent,
+    ) -> bool {
+        use crate::room_spool::RoomEvent;
+
+        let inbound = kind != "sent";
+        if inbound && !self.admit_event(state, kind, 0) {
+            return false;
+        }
+        let capture = state.room_capture.as_ref().expect("active room capture");
+        // Keep unknown names for the oracle. Route sends by their planned
+        // identity so a claimed room number cannot hide a malformed send.
+        let peer = match &event {
+            RoomEvent::Sent(event) => &event.sender,
+            RoomEvent::Receipt(event) => &event.recipient,
+            RoomEvent::Gap(event) => &event.recipient,
+        };
+        let room = capture.rooms.get(peer.as_str()).copied().unwrap_or(0);
+        let budget = state.budget.as_mut().expect("bounded room capture");
+        if let Err(error) = capture.spool.push(room, event) {
+            if inbound {
+                budget.retained_events -= 1;
+            }
+            budget.first_excess_kind = Some(kind);
+            budget.unretained_events = budget.unretained_events.saturating_add(1);
+            budget.allocation_failure = Some(error);
+            self.budget_changed.notify_waiters();
+            return false;
+        }
+        budget.first_excess_kind.is_none()
     }
 
     /// Record a receipt and report whether the budget remains active at this admission.
     pub fn push_receipt(&self, event: ReceiptEvent) -> bool {
         let Some(start) = self.receipt_timing_start else {
             let mut state = self.state.lock().expect("event log poisoned");
+            if state.room_capture.is_some() {
+                return self.capture_room_event(
+                    &mut state,
+                    "receipt",
+                    crate::room_spool::RoomEvent::Receipt(event),
+                );
+            }
             self.retain_event(&mut state, "receipt", 0, event, |state| &mut state.receipts);
             return state
                 .budget
@@ -866,7 +994,11 @@ impl EventLog {
     pub fn push_gap(&self, event: GapEvent) {
         let bytes = 0;
         let mut state = self.state.lock().expect("event log poisoned");
-        self.retain_event(&mut state, "gap", bytes, event, |state| &mut state.gaps);
+        if state.room_capture.is_some() {
+            self.capture_room_event(&mut state, "gap", crate::room_spool::RoomEvent::Gap(event));
+        } else {
+            self.retain_event(&mut state, "gap", bytes, event, |state| &mut state.gaps);
+        }
     }
 
     pub fn push_unsupported_notice(&self, event: UnsupportedNoticeEvent) {
@@ -1055,7 +1187,7 @@ fn release_unused_capacity_with_reservation<T>(
     }
 }
 
-fn sort_sent_events(events: &mut [SentEvent]) {
+pub(super) fn sort_sent_events(events: &mut [SentEvent]) {
     if events.is_sorted_by_key(|event| (event.sender.as_str(), event.seq)) {
         return;
     }

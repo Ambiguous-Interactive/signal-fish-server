@@ -60,6 +60,7 @@ use crate::schedule::build_run_shape;
 /// byte totals by phase and direction. Receipt timestamps precede decoding.
 /// Version 10 embeds host-declared external config and binary evidence.
 pub const SCHEMA_VERSION: u64 = 10;
+const ROOM_SPOOL_SCHEMA_VERSION: u64 = 11;
 
 pub const MANIFEST_FILE: &str = "manifest.json";
 pub const DELIVERIES_FILE: &str = "deliveries.jsonl";
@@ -461,6 +462,8 @@ pub struct Manifest {
     pub workload: WorkloadShape,
     pub server: ServerIdentity,
     pub build: BuildIdentity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_spool_budget_bytes: Option<u64>,
 }
 
 /// The derived workload shape (sanity anchor for replays).
@@ -481,9 +484,14 @@ pub fn write_manifest(
     workload: WorkloadShape,
     server: ServerIdentity,
     build: BuildIdentity,
+    room_spool_budget_bytes: Option<u64>,
 ) -> Result<(), String> {
     let manifest = Manifest {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if room_spool_budget_bytes.is_some() {
+            ROOM_SPOOL_SCHEMA_VERSION
+        } else {
+            SCHEMA_VERSION
+        },
         run_id: run_id.to_string(),
         created_at_rfc3339: jiff::Timestamp::now()
             .display_with_offset(jiff::tz::Offset::UTC)
@@ -492,6 +500,7 @@ pub fn write_manifest(
         workload,
         server,
         build,
+        room_spool_budget_bytes,
     };
     write_json(output_dir.join(MANIFEST_FILE), &manifest)
 }
@@ -545,13 +554,20 @@ pub fn write_intervals(output_dir: &Path, samples: &[IntervalSample]) -> Result<
 
 /// Write the HdrHistogram V2 artifact for the measured latency samples.
 pub fn write_histogram(output_dir: &Path, records: &RunRecords) -> Result<(), String> {
-    let path = output_dir.join(HISTOGRAM_FILE);
     let histogram = crate::oracle::latency_histogram(
         crate::oracle::latency_pairs(records).map(|(_recipient, sample)| sample),
     );
+    write_latency_histogram(output_dir, &histogram)
+}
+
+pub(super) fn write_latency_histogram(
+    output_dir: &Path,
+    histogram: &hdrhistogram::Histogram<u64>,
+) -> Result<(), String> {
+    let path = output_dir.join(HISTOGRAM_FILE);
     let mut encoded = Vec::new();
     hdrhistogram::serialization::V2Serializer::new()
-        .serialize(&histogram, &mut encoded)
+        .serialize(histogram, &mut encoded)
         .map_err(|error| format!("serialize latency histogram: {error:?}"))?;
     fs::write(&path, encoded).map_err(|error| format!("write {}: {error}", path.display()))
 }
@@ -584,6 +600,7 @@ fn read_manifest_with_limits(path: &Path, limits: ReplayLimits) -> Result<Manife
 struct ReplayLimits {
     records: u64,
     input_bytes: u64,
+    raw_event_bytes: u64,
     line_bytes: usize,
 }
 
@@ -613,6 +630,10 @@ impl ReplayLimits {
         Ok(Self {
             records: value("CAPACITY_RUNNER_REPLAY_MAX_RECORDS", defaults.records)?,
             input_bytes: value("CAPACITY_RUNNER_REPLAY_MAX_BYTES", defaults.input_bytes)?,
+            raw_event_bytes: value(
+                "CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES",
+                defaults.raw_event_bytes,
+            )?,
             line_bytes: usize::try_from(value(
                 "CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES",
                 u64::try_from(defaults.line_bytes).map_err(|_| "replay line budget exceeds u64")?,
@@ -627,6 +648,7 @@ impl Default for ReplayLimits {
         Self {
             records: 32_000_000,
             input_bytes: 4 * 1024 * 1024 * 1024,
+            raw_event_bytes: crate::config::default_raw_event_budget_bytes(),
             line_bytes: 16 * 1024 * 1024,
         }
     }
@@ -950,11 +972,14 @@ pub fn replay(output_dir: &Path) -> Result<OutcomeSummary, String> {
 
 fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<OutcomeSummary, String> {
     let manifest = read_manifest_with_limits(&output_dir.join(MANIFEST_FILE), limits)?;
-    if manifest.schema_version != SCHEMA_VERSION {
-        return Err(format!(
-            "unsupported artifact schema {} (expected {SCHEMA_VERSION})",
-            manifest.schema_version
-        ));
+    match (manifest.schema_version, manifest.room_spool_budget_bytes) {
+        (SCHEMA_VERSION, None) | (ROOM_SPOOL_SCHEMA_VERSION, Some(1..)) => {}
+        _ => {
+            return Err(format!(
+                "unsupported artifact schema {} (expected {SCHEMA_VERSION})",
+                manifest.schema_version
+            ))
+        }
     }
     validate_replay_shape(&manifest.config, limits)?;
     manifest.validate_config_provenance()?;
@@ -964,7 +989,45 @@ fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<Outcome
         .iter()
         .map(|plan| (plan.name.clone(), plan.room))
         .collect::<Vec<_>>();
-    let records = read_records_with_limits(output_dir, limits)?;
+    let mut records = read_records_with_limits(output_dir, limits)?;
+    if let Some(spool_budget) = manifest.room_spool_budget_bytes {
+        crate::partition_oracle::validate_profile(&manifest.config)?;
+        let mut admission = manifest.config.clone();
+        admission.planned_record_budget = limits.records;
+        admission.raw_event_budget_bytes = limits.raw_event_bytes;
+        admission
+            .validate_partitioned_room_budget()
+            .map_err(|error| {
+                format!(
+                    "room replay admission (CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES): {error}"
+                )
+            })?;
+        let spool = crate::room_spool::RoomReplay::open(
+            &output_dir.join("rooms"),
+            manifest.config.rooms as usize,
+        )?;
+        let control_bytes = fs::metadata(output_dir.join(DELIVERIES_FILE))
+            .map_err(|error| format!("inspect room capture controls: {error}"))?
+            .len();
+        let bytes = limits
+            .input_bytes
+            .checked_sub(control_bytes)
+            .ok_or_else(|| "room capture controls exceed replay byte budget".to_string())?;
+        let rows = limits
+            .records
+            .checked_sub(crate::config::count_u64(records.events().count()))
+            .ok_or_else(|| "room capture controls exceed replay record budget".to_string())?;
+        spool.validate_limits(rows, spool_budget.min(bytes))?;
+        if let Some(evaluation) =
+            crate::partition_oracle::evaluate_rooms(&spool, &manifest.config, &plans, &records)?
+        {
+            return Ok(evaluation.summary);
+        }
+        admission.validate_raw_event_budget().map_err(|error| {
+            format!("exact diagnostics exceed CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES: {error}")
+        })?;
+        spool.restore_hot_records(&mut records, rows)?;
+    }
     Ok(summarize(
         &plans,
         &roster,
@@ -1057,6 +1120,7 @@ mod tests {
                     records: 1,
                     input_bytes: 100,
                     line_bytes: 10,
+                    ..ReplayLimits::default()
                 },
                 "record budget",
                 1,
@@ -1067,6 +1131,7 @@ mod tests {
                     records: 10,
                     input_bytes: 4,
                     line_bytes: 10,
+                    ..ReplayLimits::default()
                 },
                 "byte budget",
                 1,
@@ -1077,6 +1142,7 @@ mod tests {
                     records: 10,
                     input_bytes: 100,
                     line_bytes: 3,
+                    ..ReplayLimits::default()
                 },
                 "line budget",
                 1,
@@ -1108,6 +1174,7 @@ mod tests {
             records: 2,
             input_bytes: crate::config::count_u64(raw.len()),
             line_bytes: raw.find('\r').unwrap(),
+            ..ReplayLimits::default()
         };
         for capacity in [1, 2, 7, 8192] {
             let mut rows = Vec::new();
@@ -1175,14 +1242,118 @@ mod tests {
     }
 
     #[test]
+    fn room_spool_fallback_obeys_replay_host_memory_without_editing_the_archive() {
+        use crate::config::{micros, Encoding};
+        use crate::records::EventLog;
+        use crate::room_spool::RoomSpool;
+
+        let output = tempfile::tempdir().unwrap();
+        let mut config = crate::scenario_config(Encoding::V3Json);
+        let one_room = config.validate_raw_event_budget().unwrap();
+        config.raw_event_budget_bytes = one_room;
+        config.rooms = 2;
+        config.endpoint = Some("ws://127.0.0.1:9".into());
+        let (plans, churn) = build_run_shape(&config).unwrap();
+        let mut expected = crate::complete_records(&plans);
+        let mut misroute = expected.receipts[0].clone();
+        misroute.recipient = plans
+            .iter()
+            .find(|plan| plan.room == 1)
+            .unwrap()
+            .name
+            .as_str()
+            .into();
+        misroute.encoded_frame_body_bytes = u64::MAX;
+        expected.receipts.push(misroute);
+        let byte_budget = 1024 * 1024;
+        let log = EventLog::for_partitioned_plans(
+            &plans,
+            RoomSpool::create(&output.path().join("rooms"), 2, 2048, byte_budget).unwrap(),
+        )
+        .unwrap();
+        for sent in &expected.sent {
+            log.push_sent(sent.clone());
+        }
+        for receipt in &expected.receipts {
+            assert!(log.push_receipt(receipt.clone()));
+        }
+        log.finish_room_capture().unwrap();
+        write_deliveries(output.path(), &log.take_records()).unwrap();
+        write_manifest(
+            output.path(),
+            "room-fallback",
+            &config,
+            WorkloadShape {
+                senders: plans.len() as u64,
+                recipients: plans.len() as u64,
+                scheduled_sends_per_sender: plans[0].sends.len() as u64,
+                warmup_sends_per_sender: config.warmup_sends_per_sender(),
+                measured_sends_per_sender: config.measured_sends_per_sender(),
+            },
+            ServerIdentity {
+                endpoint: config.endpoint.clone().unwrap(),
+                pid: None,
+                binary_sha256: None,
+                binary_bytes: None,
+                config_overlay_sha256: diagnostics::sha256_bytes(
+                    &serde_json::to_vec(&config.server_overlay).unwrap(),
+                ),
+                config_provenance: ConfigProvenance::UnknownExternal,
+            },
+            BuildIdentity::current(),
+            Some(byte_budget),
+        )
+        .unwrap();
+        let limits = ReplayLimits {
+            raw_event_bytes: one_room,
+            ..ReplayLimits::default()
+        };
+        let error = replay_with_limits(output.path(), limits).unwrap_err();
+        assert!(
+            error.contains("exact diagnostics exceed CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES"),
+            "{error}"
+        );
+
+        let actual = replay_with_limits(
+            output.path(),
+            ReplayLimits {
+                raw_event_bytes: one_room * 2,
+                ..limits
+            },
+        )
+        .unwrap();
+        let roster = plans
+            .iter()
+            .map(|plan| (plan.name.clone(), plan.room))
+            .collect::<Vec<_>>();
+        let expected = summarize(
+            &plans,
+            &roster,
+            &expected,
+            micros(config.generator_lag_bound),
+            96,
+            config.delivery_class,
+            &churn,
+            None,
+        );
+        assert!(!actual.valid);
+        assert_eq!(
+            serde_json::to_value(actual).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
+
+    #[test]
     fn replay_host_limits_parse_explicit_overrides_and_reject_invalid_values() {
         let defaults = ReplayLimits::from_lookup(|_| Ok(None)).unwrap();
         assert_eq!(defaults.records, 32_000_000);
         assert_eq!(defaults.input_bytes, 4 * 1024 * 1024 * 1024);
         assert_eq!(defaults.line_bytes, 16 * 1024 * 1024);
+        assert_eq!(defaults.raw_event_bytes, 1024 * 1024 * 1024);
         for name in [
             "CAPACITY_RUNNER_REPLAY_MAX_RECORDS",
             "CAPACITY_RUNNER_REPLAY_MAX_BYTES",
+            "CAPACITY_RUNNER_REPLAY_MAX_RAW_EVENT_BYTES",
             "CAPACITY_RUNNER_REPLAY_MAX_LINE_BYTES",
         ] {
             for value in ["", "0", "-1", "1.5", "18446744073709551616"] {
@@ -1198,9 +1369,10 @@ mod tests {
             (
                 overridden.records,
                 overridden.input_bytes,
+                overridden.raw_event_bytes,
                 overridden.line_bytes
             ),
-            (17, 17, 17)
+            (17, 17, 17, 17)
         );
         assert!(ReplayLimits::from_lookup(|_| Err("lookup failed".into())).is_err());
     }
@@ -1310,6 +1482,7 @@ mod tests {
                 clock: "fixture".into(),
                 generator: "fixture".into(),
             },
+            None,
         )
         .unwrap();
         let error = replay_with_limits(
@@ -1383,6 +1556,7 @@ mod tests {
                     .map(<[u8]>::len)
                     .max()
                     .unwrap(),
+                ..ReplayLimits::default()
             };
             let replay = read_records_with_limits(output.path(), limits).unwrap();
             assert_eq!(

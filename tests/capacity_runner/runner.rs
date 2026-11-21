@@ -322,7 +322,17 @@ pub struct RunOutcome {
 
 /// Run one configured capacity experiment end to end and write its
 /// artifacts. Returns the exact outcome summary the run recorded.
-pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
+pub async fn run(config: RunConfig) -> Result<RunOutcome, String> {
+    run_with_capture(config, None).await
+}
+
+pub(super) async fn run_with_capture(
+    mut config: RunConfig,
+    spool_budget: Option<u64>,
+) -> Result<RunOutcome, String> {
+    if spool_budget.is_some() {
+        crate::partition_oracle::validate_profile(&config)?;
+    }
     if let Some(evidence) = &config.external_host_evidence {
         evidence.validate(config.endpoint.as_deref())?;
     }
@@ -496,7 +506,11 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
 
     config.validate_planned_record_budget()?;
     config.validate_sender_payload_budget()?;
-    config.validate_raw_event_budget()?;
+    if spool_budget.is_some() {
+        config.validate_partitioned_room_budget()?;
+    } else {
+        config.validate_raw_event_budget()?;
+    }
     let run_id = uuid::Uuid::new_v4().to_string();
     // Room codes are scoped to this run so two concurrent runs against one
     // shared external server start from distinct room namespaces (12 bits —
@@ -566,9 +580,26 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             config.output_dir.display()
         ));
     }
-    let log = Arc::new(EventLog::for_plans(&plans, config.receipt_timings)?);
-    std::fs::create_dir_all(&config.output_dir)
-        .map_err(|error| format!("create output dir {}: {error}", config.output_dir.display()))?;
+    let log = if let Some(byte_budget) = spool_budget {
+        crate::room_spool::preflight(&config, byte_budget)?;
+        std::fs::create_dir_all(&config.output_dir).map_err(|error| {
+            format!("create output dir {}: {error}", config.output_dir.display())
+        })?;
+        let spool = crate::room_spool::RoomSpool::create(
+            &config.output_dir.join("rooms"),
+            config.rooms as usize,
+            16_384,
+            byte_budget,
+        )?;
+        EventLog::for_partitioned_plans(&plans, spool)?
+    } else {
+        let log = EventLog::for_plans(&plans, config.receipt_timings)?;
+        std::fs::create_dir_all(&config.output_dir).map_err(|error| {
+            format!("create output dir {}: {error}", config.output_dir.display())
+        })?;
+        log
+    };
+    let log = Arc::new(log);
 
     // Server: spawn the compiled binary or connect to an external endpoint.
     let server_slot: Arc<tokio::sync::Mutex<Option<ServerProcess>>> =
@@ -647,6 +678,7 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         workload,
         identity,
         BuildIdentity::current(),
+        spool_budget,
     )?;
 
     let preparation_started = Instant::now();
@@ -996,27 +1028,111 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
             .map(|(id, (name, epoch))| (id.to_string(), (name.to_string(), *epoch)))
             .collect(),
     );
-    let records = log.take_records();
     let evidence_finished_us = micros(epoch.elapsed());
-    let bound_us = micros(config.generator_lag_bound);
-    let summary = oracle::summarize(
-        &plans,
-        &roster,
-        &records,
-        bound_us,
-        config.payload_bytes,
-        config.delivery_class,
-        &churn_plan,
-        config.experiment,
-    );
+    let mut records = log.take_records();
+    let bounded = if spool_budget.is_some() {
+        let completed_sends = log.completed_room_capture_sends();
+        let capture_queue = log.room_capture_queue();
+        let scheduled_sends = plans
+            .iter()
+            .map(|plan| plan.sends.len() as u64)
+            .sum::<u64>();
+        if let Err(error) = log.finish_room_capture() {
+            let status = json!({
+                "status": "generator_invalidated",
+                "capture_queue": capture_queue,
+                "detail": error,
+                "reasons": records.faults,
+                "scheduled_sends": scheduled_sends,
+                "completed_sends": completed_sends,
+                "unsent": scheduled_sends.saturating_sub(completed_sends),
+            });
+            for evidence in [
+                artifacts::write_json(config.output_dir.join("room-capture-status.json"), &status),
+                artifacts::write_json(
+                    config.output_dir.join("peer-progress.json"),
+                    &peer_progress_snapshot(&peer_progress),
+                ),
+                artifacts::write_intervals(&config.output_dir, &interval_samples),
+                artifacts::write_deliveries(&config.output_dir, &records),
+            ] {
+                if let Err(evidence_error) = evidence {
+                    eprintln!("capture invalidation evidence: {evidence_error}");
+                }
+            }
+            return Err(error);
+        }
+        let replay = crate::room_spool::RoomReplay::open(
+            &config.output_dir.join("rooms"),
+            config.rooms as usize,
+        )?;
+        artifacts::write_deliveries(&config.output_dir, &records)?;
+        let evaluation =
+            crate::partition_oracle::evaluate_rooms(&replay, &config, &plans, &records)?;
+        if evaluation.is_none() {
+            // Exact diagnostics for invalid captures still use the admitted
+            // legacy memory budget.
+            if let Err(error) = config.validate_raw_event_budget() {
+                artifacts::write_json(
+                    config.output_dir.join("room-capture-status.json"),
+                    &json!({
+                        "status": "exact_fallback_exceeds_memory_budget",
+                        "detail": error,
+                        "scheduled_sends": scheduled_sends,
+                        "completed_sends": completed_sends,
+                        "unsent": scheduled_sends.saturating_sub(completed_sends),
+                    }),
+                )?;
+                return Err(format!(
+                    "exact diagnostics require the legacy memory budget: {error}"
+                ));
+            }
+            replay.restore_hot_records(&mut records, config.planned_record_budget)?;
+        }
+        evaluation
+    } else {
+        None
+    };
+    let (summary, histogram) = match bounded {
+        Some(evaluation) => (evaluation.summary, Some(evaluation.histogram)),
+        None => (
+            oracle::summarize(
+                &plans,
+                &roster,
+                &records,
+                micros(config.generator_lag_bound),
+                config.payload_bytes,
+                config.delivery_class,
+                &churn_plan,
+                config.experiment,
+            ),
+            None,
+        ),
+    };
 
     let lifecycle = peer_progress_snapshot(&peer_progress);
     artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle)?;
     if !summary.valid {
-        let mut evidence = invalid_run_diagnostics(
+        let mut progress = SenderProgress::planned(&plans);
+        if histogram.is_some() {
+            let replay = crate::room_spool::RoomReplay::open(
+                &config.output_dir.join("rooms"),
+                config.rooms as usize,
+            )?;
+            replay.visit_ordered(config.planned_record_budget, |event| {
+                if let crate::room_spool::RoomEvent::Sent(sent) = event {
+                    SenderProgress::record(&mut progress, &sent, sent.sender.as_str());
+                }
+            })?;
+        } else {
+            for sent in &records.sent {
+                SenderProgress::record(&mut progress, sent, sent.sender.as_str());
+            }
+        }
+        let mut evidence = invalid_run_diagnostics_from_progress(
             &run_id,
             &config,
-            &plans,
+            progress,
             &records,
             &interval_samples,
             &summary,
@@ -1031,9 +1147,15 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
         eprintln!("capacity invalid run: {evidence}");
     }
 
-    artifacts::write_deliveries(&config.output_dir, &records)?;
+    if spool_budget.is_none() {
+        artifacts::write_deliveries(&config.output_dir, &records)?;
+    }
     artifacts::write_intervals(&config.output_dir, &interval_samples)?;
-    artifacts::write_histogram(&config.output_dir, &records)?;
+    if let Some(histogram) = histogram {
+        artifacts::write_latency_histogram(&config.output_dir, &histogram)?;
+    } else {
+        artifacts::write_histogram(&config.output_dir, &records)?;
+    }
     artifacts::write_json(config.output_dir.join(artifacts::SUMMARY_FILE), &summary)?;
     interruption_artifact?;
     if config.receipt_timings {
@@ -1058,18 +1180,55 @@ pub async fn run(mut config: RunConfig) -> Result<RunOutcome, String> {
     })
 }
 
-#[derive(Default)]
-struct SenderProgress<'a> {
-    completed: u64,
-    first: Option<&'a SentEvent>,
-    last: Option<&'a SentEvent>,
-    worst: Option<&'a SentEvent>,
+#[derive(Clone, Copy, serde::Serialize)]
+struct CompletedSend {
+    seq: u64,
+    phase: crate::schedule::Phase,
+    intended_us: u64,
+    sent_us: u64,
+    lag_us: u64,
 }
 
-fn completed_send_evidence(send: &SentEvent) -> serde_json::Value {
-    json!({"seq": send.seq, "phase": send.phase,
-        "intended_us": send.intended_us, "sent_us": send.sent_us,
-        "lag_us": send.sent_us.saturating_sub(send.intended_us)})
+#[derive(Default)]
+struct SenderProgress {
+    completed: u64,
+    first: Option<CompletedSend>,
+    last: Option<CompletedSend>,
+    worst: Option<CompletedSend>,
+}
+
+impl SenderProgress {
+    fn planned(plans: &[SenderPlan]) -> BTreeMap<String, Self> {
+        plans
+            .iter()
+            .map(|plan| (plan.name.clone(), Self::default()))
+            .collect()
+    }
+
+    fn record<Name>(progress: &mut BTreeMap<String, Self>, sent: &SentEvent<Name>, sender: &str) {
+        let peer = match progress.get_mut(sender) {
+            Some(peer) => peer,
+            None => progress.entry(sender.to_owned()).or_default(),
+        };
+        peer.completed += 1;
+        let sample = CompletedSend {
+            seq: sent.seq,
+            phase: sent.phase,
+            intended_us: sent.intended_us,
+            sent_us: sent.sent_us,
+            lag_us: sent.sent_us.saturating_sub(sent.intended_us),
+        };
+        let key = |sample: CompletedSend| (sample.sent_us, sample.seq);
+        if peer.first.is_none_or(|first| key(sample) < key(first)) {
+            peer.first = Some(sample);
+        }
+        if peer.last.is_none_or(|last| key(sample) > key(last)) {
+            peer.last = Some(sample);
+        }
+        if peer.worst.is_none_or(|worst| sample.lag_us > worst.lag_us) {
+            peer.worst = Some(sample);
+        }
+    }
 }
 
 /// Transfer stopped sampler evidence into artifact processing.
@@ -1121,6 +1280,7 @@ fn reason_evidence(reason: &InvalidReason) -> serde_json::Value {
 /// Failure-only context retains three send observations per peer and a
 /// constant sampler context. It does not infer a cause from timing gaps.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn invalid_run_diagnostics(
     run_id: &str,
     config: &RunConfig,
@@ -1131,40 +1291,41 @@ fn invalid_run_diagnostics(
     finished_us: u64,
     runtime_workers: usize,
 ) -> serde_json::Value {
-    let mut progress: BTreeMap<&str, SenderProgress<'_>> = plans
-        .iter()
-        .map(|plan| (plan.name.as_str(), SenderProgress::default()))
-        .collect();
+    let mut progress = SenderProgress::planned(plans);
     for sent in &records.sent {
-        let peer = progress.entry(sent.sender.as_str()).or_default();
-        peer.completed += 1;
-        if peer
-            .first
-            .is_none_or(|first| (sent.sent_us, sent.seq) < (first.sent_us, first.seq))
-        {
-            peer.first = Some(sent);
-        }
-        if peer
-            .last
-            .is_none_or(|last| (sent.sent_us, sent.seq) > (last.sent_us, last.seq))
-        {
-            peer.last = Some(sent);
-        }
-        if peer.worst.is_none_or(|worst| {
-            sent.sent_us.saturating_sub(sent.intended_us)
-                > worst.sent_us.saturating_sub(worst.intended_us)
-        }) {
-            peer.worst = Some(sent);
-        }
+        SenderProgress::record(&mut progress, sent, sent.sender.as_str());
     }
+    invalid_run_diagnostics_from_progress(
+        run_id,
+        config,
+        progress,
+        records,
+        samples,
+        summary,
+        finished_us,
+        runtime_workers,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invalid_run_diagnostics_from_progress(
+    run_id: &str,
+    config: &RunConfig,
+    progress: BTreeMap<String, SenderProgress>,
+    records: &RunRecords,
+    samples: &[IntervalSample],
+    summary: &OutcomeSummary,
+    finished_us: u64,
+    runtime_workers: usize,
+) -> serde_json::Value {
     let peers: Vec<_> = progress
         .into_iter()
         .map(|(sender, peer)| {
             json!({
                 "sender": sender, "completed": peer.completed,
-                "first": peer.first.map(completed_send_evidence),
-                "last": peer.last.map(completed_send_evidence),
-                "worst": peer.worst.map(completed_send_evidence),
+                "first": peer.first,
+                "last": peer.last,
+                "worst": peer.worst,
             })
         })
         .collect();

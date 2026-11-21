@@ -1,0 +1,559 @@
+//! Bounded append-only storage for the capacity runner's room evidence.
+
+use std::collections::BTreeMap;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use serde::{Deserialize, Serialize};
+
+use crate::records::{GapEvent, ReceiptEvent, SentEvent};
+
+const FRAME_LIMIT: usize = 4096;
+const HEADER_BYTES: u64 = 10;
+const WRITER_BUFFER: usize = 16 * 1024;
+const FORMAT: u32 = 1;
+const INDEX: &str = "rooms.json";
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum RoomEvent<Name = crate::records::ReceiptName> {
+    Sent(SentEvent<Name>),
+    Receipt(ReceiptEvent<Name>),
+    Gap(GapEvent<Name>),
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize)]
+struct RoomFile {
+    bytes: u64,
+    rows: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Index {
+    version: u32,
+    rooms: Vec<RoomFile>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture_queue: Option<CaptureQueue>,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(super) struct CaptureQueue {
+    capacity_frames: usize,
+    /// Includes a frame reserved for submission. The writer's active frame
+    /// leaves the count when it is dequeued.
+    pending_high_water_frames: usize,
+}
+
+struct QueueDepth {
+    capacity_frames: usize,
+    pending: AtomicUsize,
+    high_water: AtomicUsize,
+}
+
+impl QueueDepth {
+    fn new(capacity_frames: usize) -> Self {
+        Self {
+            capacity_frames,
+            pending: AtomicUsize::new(0),
+            high_water: AtomicUsize::new(0),
+        }
+    }
+
+    fn reserve(&self) {
+        let count = self.pending.fetch_add(1, Ordering::Relaxed) + 1;
+        if count > self.high_water.load(Ordering::Relaxed) {
+            self.high_water.fetch_max(count, Ordering::Relaxed);
+        }
+    }
+
+    fn release(&self) {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> CaptureQueue {
+        CaptureQueue {
+            capacity_frames: self.capacity_frames,
+            pending_high_water_frames: self.high_water.load(Ordering::Relaxed),
+        }
+    }
+}
+
+struct Frame {
+    room: usize,
+    event: RoomEvent,
+}
+
+pub(super) struct RoomSpool {
+    root: PathBuf,
+    sender: SyncSender<Frame>,
+    writer: JoinHandle<Result<Index, String>>,
+    rejected: AtomicBool,
+    queue: Arc<QueueDepth>,
+}
+
+impl RoomSpool {
+    pub(super) fn create(
+        root: &Path,
+        rooms: usize,
+        queue_frames: usize,
+        byte_budget: u64,
+    ) -> Result<Self, String> {
+        if rooms == 0
+            || rooms > 999
+            || queue_frames == 0
+            || queue_frames > 16_384
+            || byte_budget == 0
+        {
+            return Err("invalid room spool limits".into());
+        }
+        fs::create_dir(root).map_err(|error| format!("create room spool: {error}"))?;
+        let (sender, receiver) = mpsc::sync_channel(queue_frames);
+        let path = root.to_path_buf();
+        let queue = Arc::new(QueueDepth::new(queue_frames));
+        let writer_queue = Arc::clone(&queue);
+        let writer = thread::Builder::new()
+            .name("capacity-room-spool".into())
+            .spawn(move || {
+                let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+                write_rooms(&path, rooms, byte_budget, frames)
+            })
+            .map_err(|error| format!("start room spool writer: {error}"))?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            sender,
+            writer,
+            rejected: AtomicBool::new(false),
+            queue,
+        })
+    }
+
+    /// The producer retains at most one frame if the writer cannot keep up.
+    pub(super) fn push(&self, room: usize, event: RoomEvent) -> Result<(), String> {
+        let result = self.send(room, event);
+        if result.is_err() {
+            self.rejected.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+
+    fn send(&self, room: usize, event: RoomEvent) -> Result<(), String> {
+        if self.rejected.load(Ordering::Relaxed) {
+            return Err("room spool already rejected evidence".into());
+        }
+        // Sender and recipient names are the only variable-length fields.
+        // Leave headroom for the tag, integers, and string prefixes.
+        let name_bytes = match &event {
+            RoomEvent::Sent(event) => event.sender.len(),
+            RoomEvent::Receipt(event) => event.sender.len().saturating_add(event.recipient.len()),
+            RoomEvent::Gap(event) => event.sender.len().saturating_add(event.recipient.len()),
+        };
+        if name_bytes > FRAME_LIMIT - 256 {
+            return Err("room event identity exceeds frame budget".into());
+        }
+        self.queue.reserve();
+        self.sender
+            .try_send(Frame { room, event })
+            .map_err(|error| {
+                self.queue.release();
+                match error {
+                    TrySendError::Full(_) => "room spool queue exhausted".into(),
+                    TrySendError::Disconnected(_) => "room spool writer unavailable".into(),
+                }
+            })
+    }
+
+    pub(super) fn capture_queue(&self) -> CaptureQueue {
+        self.queue.snapshot()
+    }
+
+    pub(super) fn finish(self) -> Result<(), String> {
+        drop(self.sender);
+        let mut index = self
+            .writer
+            .join()
+            .map_err(|_| "room spool writer panicked".to_string())??;
+        if self.rejected.into_inner() {
+            return Err("room spool producer rejected evidence".into());
+        }
+        index.capture_queue = Some(self.queue.snapshot());
+        crate::artifacts::write_json(self.root.join("rooms.pending"), &index)?;
+        fs::rename(self.root.join("rooms.pending"), self.root.join(INDEX))
+            .map_err(|error| format!("commit room spool index: {error}"))
+    }
+}
+
+/// Measure the smallest frames that can account for the offered schedule.
+/// Roster names have at least four bytes. MessagePack integer widths grow
+/// monotonically from zero, so these sentinel encodings give a storage floor.
+pub(super) fn planned_disk_floor(config: &crate::config::RunConfig) -> Result<u64, String> {
+    use crate::schedule::Phase;
+
+    let records = config.validate_planned_record_budget()?;
+    let sends = records
+        .checked_div(u64::from(config.players_per_room))
+        .ok_or_else(|| "room spool needs at least one player".to_string())?;
+    let name = crate::records::ReceiptName::from("r0p0");
+    let sent = |phase| {
+        RoomEvent::Sent(SentEvent {
+            sender: name.clone(),
+            room: 0,
+            seq: 0,
+            epoch: 0,
+            intended_us: 0,
+            sent_us: 0,
+            application_bytes: 0,
+            encoded_frame_body_bytes: 0,
+            phase,
+        })
+    };
+    let received = RoomEvent::Receipt(ReceiptEvent {
+        recipient: name.clone(),
+        sender: name.clone(),
+        seq: 0,
+        epoch: 0,
+        server_seq: 0,
+        received_us: 0,
+        application_bytes: 0,
+        encoded_frame_body_bytes: 0,
+    });
+    let frame_bytes = |event: RoomEvent| {
+        rmp_serde::to_vec(&event)
+            .map(|bytes| HEADER_BYTES + bytes.len() as u64)
+            .map_err(|error| format!("size room spool frame: {error}"))
+    };
+    let send_bytes = frame_bytes(sent(Phase::Warmup))?.min(frame_bytes(sent(Phase::Measured))?);
+    let receipt_bytes = frame_bytes(received)?;
+    sends
+        .checked_mul(send_bytes)
+        .and_then(|bytes| {
+            (records - sends)
+                .checked_mul(receipt_bytes)?
+                .checked_add(bytes)
+        })
+        .ok_or_else(|| "minimum room spool bytes overflow".to_string())
+}
+
+/// Refuse an obviously unprovisioned capture before creating files or sockets.
+pub(super) fn preflight(config: &crate::config::RunConfig, byte_budget: u64) -> Result<(), String> {
+    let minimum = planned_disk_floor(config)?;
+    if minimum > byte_budget {
+        return Err(format!(
+            "full offered workload needs at least {minimum} spool bytes, budget is {byte_budget}"
+        ));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let path = std::path::absolute(&config.output_dir)
+            .map_err(|error| format!("resolve room spool path: {error}"))?;
+        let parent = path
+            .ancestors()
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| "cannot find room spool filesystem".to_string())?;
+        let disk = std::process::Command::new("df")
+            .args(["--output=avail", "-B1", "--"])
+            .arg(parent)
+            .env("LC_ALL", "C")
+            .output()
+            .map_err(|error| format!("read room spool free space: {error}"))?;
+        if !disk.status.success() {
+            return Err(format!(
+                "read room spool free space: {}",
+                String::from_utf8_lossy(&disk.stderr)
+            ));
+        }
+        let available = String::from_utf8_lossy(&disk.stdout)
+            .split_whitespace()
+            .last()
+            .and_then(|bytes| bytes.parse::<u64>().ok())
+            .ok_or_else(|| "room spool free-space report is invalid".to_string())?;
+        if byte_budget > available {
+            return Err(format!(
+                "room spool byte budget {byte_budget} exceeds available disk bytes {available}"
+            ));
+        }
+
+        let limits = fs::read_to_string("/proc/self/limits")
+            .map_err(|error| format!("read room capture file descriptor limit: {error}"))?;
+        let soft = limits
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("Max open files")?
+                    .split_whitespace()
+                    .next()
+            })
+            .ok_or_else(|| "room capture file descriptor limit is absent".to_string())?;
+        let required = u64::from(config.rooms) * (u64::from(config.players_per_room) + 1) + 64;
+        if let Ok(limit) = soft.parse::<u64>() {
+            if required > limit {
+                return Err(format!(
+                    "room capture needs {required} file descriptors, soft limit is {limit}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn room_path(root: &Path, room: usize) -> PathBuf {
+    root.join(format!("{room:03}.msgpack"))
+}
+
+fn open_writer(root: &Path, room: usize) -> Result<BufWriter<File>, String> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(room_path(root, room))
+        .map(|file| BufWriter::with_capacity(WRITER_BUFFER, file))
+        .map_err(|error| format!("open room {room} spool: {error}"))
+}
+
+fn write_rooms(
+    root: &Path,
+    rooms: usize,
+    byte_budget: u64,
+    frames: impl IntoIterator<Item = Frame>,
+) -> Result<Index, String> {
+    let mut writers: Vec<Option<BufWriter<File>>> = (0..rooms).map(|_| None).collect();
+    let mut index = Index {
+        version: FORMAT,
+        rooms: vec![RoomFile::default(); rooms],
+        capture_queue: None,
+    };
+    let mut remaining = byte_budget;
+    let mut buffer = [0; FRAME_LIMIT];
+    for (ordinal, Frame { room, event }) in frames.into_iter().enumerate() {
+        let file = index
+            .rooms
+            .get_mut(room)
+            .ok_or_else(|| format!("room {room} is outside the spool"))?;
+        let mut output = std::io::Cursor::new(buffer.as_mut_slice());
+        rmp_serde::encode::write(&mut output, &event)
+            .map_err(|error| format!("encode room {room} event: {error}"))?;
+        let size = u16::try_from(output.position()).expect("cursor sits within the frame");
+        let bytes = &buffer[..usize::from(size)];
+        let framed = u64::from(size) + HEADER_BYTES;
+        remaining = remaining
+            .checked_sub(framed)
+            .ok_or_else(|| format!("room spool byte budget {byte_budget} exhausted"))?;
+        let slot = &mut writers[room];
+        if slot.is_none() {
+            *slot = Some(open_writer(root, room)?);
+        }
+        let writer = slot.as_mut().expect("open room spool writer");
+        writer
+            .write_all(&size.to_le_bytes())
+            .and_then(|()| writer.write_all(&(ordinal as u64).to_le_bytes()))
+            .and_then(|()| writer.write_all(bytes))
+            .map_err(|error| format!("write room {room} spool: {error}"))?;
+        file.bytes += framed;
+        file.rows += 1;
+    }
+    for (room, writer) in writers.iter_mut().enumerate() {
+        if let Some(writer) = writer {
+            writer
+                .flush()
+                .map_err(|error| format!("flush room {room} spool: {error}"))?;
+        }
+    }
+    Ok(index)
+}
+
+pub(super) struct RoomReplay {
+    root: PathBuf,
+    index: Index,
+}
+
+impl RoomReplay {
+    pub(super) fn open(root: &Path, rooms: usize) -> Result<Self, String> {
+        let file = File::open(root.join(INDEX))
+            .map_err(|error| format!("read complete room spool index: {error}"))?;
+        let bytes = file.metadata().map_err(|error| error.to_string())?.len();
+        if bytes > 128 * 1024 {
+            return Err("room spool index exceeds byte limit".into());
+        }
+        let index: Index = serde_json::from_reader(BufReader::new(file))
+            .map_err(|error| format!("decode room spool index: {error}"))?;
+        if index.version != FORMAT || index.rooms.len() != rooms || !(1..=999).contains(&rooms) {
+            return Err(
+                "room spool index does not match the supported format and room count".into(),
+            );
+        }
+        Ok(Self {
+            root: root.to_path_buf(),
+            index,
+        })
+    }
+
+    pub(super) fn visit(
+        &self,
+        room: usize,
+        row_budget: u64,
+        mut visit: impl FnMut(u64, RoomEvent<String>),
+    ) -> Result<(), String> {
+        let mut reader = self.reader(room, row_budget)?;
+        while let Some((ordinal, event)) = reader.next()? {
+            visit(ordinal, event);
+        }
+        Ok(())
+    }
+
+    /// Merge the room streams in capture order with one pending event per room.
+    pub(super) fn visit_ordered(
+        &self,
+        row_budget: u64,
+        mut visit: impl FnMut(RoomEvent<String>),
+    ) -> Result<(), String> {
+        let mut rooms = Vec::with_capacity(self.index.rooms.len());
+        let mut pending = BTreeMap::new();
+        let mut remaining = row_budget;
+        for (room, file) in self.index.rooms.iter().enumerate() {
+            remaining = remaining
+                .checked_sub(file.rows)
+                .ok_or_else(|| format!("room spool exceeds replay row budget {row_budget}"))?;
+            let mut reader = self.reader(room, file.rows)?;
+            if let Some((ordinal, event)) = reader.next()? {
+                if pending.insert(ordinal, (room, event)).is_some() {
+                    return Err(format!("room spool repeats ordinal {ordinal}"));
+                }
+            }
+            rooms.push(reader);
+        }
+        let mut expected = 0;
+        while let Some((ordinal, (room, event))) = pending.pop_first() {
+            if ordinal != expected {
+                return Err(format!(
+                    "room spool expected ordinal {expected}, found {ordinal}"
+                ));
+            }
+            visit(event);
+            expected += 1;
+            if let Some((ordinal, event)) = rooms[room].next()? {
+                if pending.insert(ordinal, (room, event)).is_some() {
+                    return Err(format!("room spool repeats ordinal {ordinal}"));
+                }
+            }
+        }
+        if expected != row_budget - remaining {
+            return Err("room spool is missing capture ordinals".into());
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_limits(&self, mut rows: u64, mut bytes: u64) -> Result<(), String> {
+        for file in &self.index.rooms {
+            rows = rows
+                .checked_sub(file.rows)
+                .ok_or_else(|| "room spool exceeds replay record budget".to_string())?;
+            bytes = bytes
+                .checked_sub(file.bytes)
+                .ok_or_else(|| "room spool exceeds replay byte budget".to_string())?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn restore_hot_records(
+        &self,
+        records: &mut crate::records::RunRecords,
+        row_budget: u64,
+    ) -> Result<(), String> {
+        let mut names = crate::records::ReceiptNames::default();
+        self.visit_ordered(row_budget, |event| match event {
+            RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
+            RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
+            RoomEvent::Gap(event) => records.gaps.push(names.share_gap(event)),
+        })?;
+        crate::records::sort_sent_events(&mut records.sent);
+        Ok(())
+    }
+
+    fn reader(&self, room: usize, row_budget: u64) -> Result<ReplayRoom, String> {
+        let RoomFile { bytes, rows } = *self
+            .index
+            .rooms
+            .get(room)
+            .ok_or_else(|| format!("room {room} is outside the spool"))?;
+        if rows > row_budget {
+            return Err(format!(
+                "room {room} exceeds replay row budget {row_budget}"
+            ));
+        }
+        let path = room_path(&self.root, room);
+        let input = if rows == 0 && bytes == 0 && !path.exists() {
+            None
+        } else {
+            let file =
+                File::open(path).map_err(|error| format!("read room {room} spool: {error}"))?;
+            if file.metadata().map_err(|error| error.to_string())?.len() != bytes {
+                return Err(format!("room {room} spool byte count differs from index"));
+            }
+            Some(BufReader::new(file))
+        };
+        Ok(ReplayRoom {
+            input,
+            remaining: rows,
+            previous: None,
+        })
+    }
+}
+
+struct ReplayRoom {
+    input: Option<BufReader<File>>,
+    remaining: u64,
+    previous: Option<u64>,
+}
+
+impl ReplayRoom {
+    fn next(&mut self) -> Result<Option<(u64, RoomEvent<String>)>, String> {
+        let Some(reader) = &mut self.input else {
+            return Ok(None);
+        };
+        let mut frame = [0; FRAME_LIMIT];
+        if self.remaining == 0 {
+            if reader
+                .read(&mut frame[..1])
+                .map_err(|error| error.to_string())?
+                != 0
+            {
+                return Err("trailing rows in room spool".into());
+            }
+            self.input = None;
+            return Ok(None);
+        }
+        let mut header = [0; 2];
+        reader
+            .read_exact(&mut header)
+            .map_err(|error| error.to_string())?;
+        let mut ordinal = [0; 8];
+        reader
+            .read_exact(&mut ordinal)
+            .map_err(|error| error.to_string())?;
+        let ordinal = u64::from_le_bytes(ordinal);
+        if self.previous.is_some_and(|last| ordinal <= last) {
+            return Err("room event ordinals are out of order".into());
+        }
+        self.previous = Some(ordinal);
+        let size = usize::from(u16::from_le_bytes(header));
+        let bytes = frame
+            .get_mut(..size)
+            .ok_or_else(|| format!("frame exceeds {FRAME_LIMIT} bytes"))?;
+        reader
+            .read_exact(bytes)
+            .map_err(|error| error.to_string())?;
+        let mut deserializer = rmp_serde::Deserializer::new(std::io::Cursor::new(&*bytes));
+        deserializer.set_max_depth(8);
+        let event = RoomEvent::deserialize(&mut deserializer)
+            .map_err(|error| format!("invalid frame: {error}"))?;
+        if deserializer.position() != size as u64 {
+            return Err("trailing bytes in room event frame".into());
+        }
+        self.remaining -= 1;
+        Ok(Some((ordinal, event)))
+    }
+}
+
+#[cfg(test)]
+mod tests;

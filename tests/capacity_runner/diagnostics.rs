@@ -75,7 +75,7 @@ pub fn sha256_bytes(bytes: &[u8]) -> String {
     finish_sha256(hasher)
 }
 
-fn finish_sha256(hasher: Sha256) -> String {
+pub(super) fn finish_sha256(hasher: Sha256) -> String {
     hasher
         .finalize()
         .iter()

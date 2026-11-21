@@ -593,6 +593,17 @@ impl RunConfig {
         Ok(planned)
     }
 
+    /// Keep the full schedule limit and charge resident event storage for one room.
+    pub(super) fn validate_partitioned_room_budget(&self) -> Result<u64, String> {
+        if !(1..=999).contains(&self.rooms) {
+            return Err("partitioned collection requires 1 to 999 rooms".into());
+        }
+        self.validate_planned_record_budget()?;
+        let mut room = self.clone();
+        room.rooms = 1;
+        room.validate_raw_event_budget()
+    }
+
     /// Check planned raw rows against the host byte budget before allocation.
     pub fn validate_raw_event_budget(&self) -> Result<u64, String> {
         let records = self.validate_planned_record_budget()?;
