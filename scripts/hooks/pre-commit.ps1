@@ -26,6 +26,7 @@ $script:RustPanicPolicyLoaded = $false
 $script:StagedChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeUntrackedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$script:WorktreeHasStructuralChanges = $false
 $script:HookBudgetMs = 1000
 $script:CheckTimings = [System.Collections.Generic.List[object]]::new()
 $script:HookPolicyFiles = @(
@@ -352,6 +353,7 @@ function Get-WorktreeChangedFiles {
     $script:StagedChangedFileSet.Clear()
     $script:WorktreeChangedFileSet.Clear()
     $script:WorktreeUntrackedFileSet.Clear()
+    $script:WorktreeHasStructuralChanges = $false
 
     # Two concurrent queries replace one full status walk: the tracked
     # porcelain query skips the untracked scan entirely
@@ -421,6 +423,9 @@ function Get-WorktreeChangedFiles {
             [void]$script:WorktreeChangedFileSet.Add($path)
         }
 
+        if ($indexStatus -cnotin @(" ", "M") -or $worktreeStatus -cnotin @(" ", "M")) {
+            $script:WorktreeHasStructuralChanges = $true
+        }
         $skipRenameSource = $indexStatus -in @("R", "C") -or $worktreeStatus -in @("R", "C")
     }
 
@@ -778,7 +783,7 @@ function Get-IndexBlobTexts {
 }
 
 function Add-IndexTextCache {
-    param([AllowEmptyCollection()][string[]]$Pathspecs)
+    param([AllowEmptyCollection()][string[]]$Pathspecs, [switch]$AllowBudgetMiss)
 
     if ($Pathspecs.Count -eq 0) {
         return
@@ -790,7 +795,10 @@ function Add-IndexTextCache {
     }
 
     $paths = [string[]]@($objectIdsByPath.Keys)
-    $blobTextsByObjectId = Get-IndexBlobTexts -ObjectIds ([string[]]@($paths | ForEach-Object { $objectIdsByPath[$_] }))
+    $blobTextsByObjectId = Get-IndexBlobTexts -ObjectIds ([string[]]@($paths | ForEach-Object { $objectIdsByPath[$_] })) -AllowBudgetMiss:$AllowBudgetMiss
+    if ($null -eq $blobTextsByObjectId) {
+        return
+    }
     foreach ($path in $paths) {
         $objectId = $objectIdsByPath[$path]
         if ($blobTextsByObjectId.ContainsKey($objectId)) {
@@ -977,10 +985,6 @@ function Test-RustPanicPolicyRelevantDiff {
         return $false
     }
 
-    $hasUntrackedProductionRust = $script:InspectWorktree -and @($Pathspecs | Where-Object {
-                $script:WorktreeUntrackedFileSet.Contains($_)
-            }).Count -gt 0
-
     $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
     if ($null -eq $script:PendingWorktreeRustDiff) {
         $result = Invoke-Native -FileName "git" -Arguments (@(
@@ -1003,10 +1007,22 @@ function Test-RustPanicPolicyRelevantDiff {
             $pending.Process.Dispose()
         }
     }
-    # `git diff HEAD` cannot see untracked files, so keep their full scanner
-    # fail-closed after consuming the already-started query above.
-    if ($hasUntrackedProductionRust) {
-        return $true
+    if ($script:InspectWorktree) {
+        # Git cannot see untracked files. A file without any of these names
+        # cannot introduce a panic macro. Let the full scanner handle all
+        # other untracked files and keep its fallback if the diff failed.
+        foreach ($path in $Pathspecs) {
+            if (-not $script:WorktreeUntrackedFileSet.Contains($path)) {
+                continue
+            }
+            if ($result.ExitCode -ne 0) {
+                return $true
+            }
+            $content = Get-WorktreeText -Path $path
+            if ($null -eq $content -or $content -cmatch 'panic|todo|unimplemented|unreachable') {
+                return $true
+            }
+        }
     }
     if ($result.ExitCode -ne 0 -and $script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
         return $true
@@ -2231,11 +2247,15 @@ try {
     $changedFilesTimer.Stop()
     $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
     if ($script:InspectWorktree -and $changedProductionRustFiles.Count -gt 0) {
-        # Keep all changed paths under src, including the two sides of a rename
-        # reported as add/delete by discovery, so the patch matches the src diff.
-        $changedSourcePaths = @($allChangedFiles | Where-Object {
-            $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
-        })
+        # A modified test-only file cannot change another file's panic context.
+        # Keep all source paths for structural changes so Git sees both sides
+        # of renames and copies, including moves between test and runtime files.
+        $changedSourcePaths = $changedProductionRustFiles
+        if ($script:WorktreeHasStructuralChanges) {
+            $changedSourcePaths = @($allChangedFiles | Where-Object {
+                $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
+            })
+        }
         # Keep capacity for Git options and native argument quoting on Windows.
         if (($changedSourcePaths -join ' ').Length -gt 4096) {
             $changedSourcePaths = @('src')

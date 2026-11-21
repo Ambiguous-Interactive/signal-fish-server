@@ -560,6 +560,7 @@ function Get-RustExecutablePanicMacroLineSet {
     $inString = $false
     $inChar = $false
     $escape = $false
+    $contextStart = [regex]::new('/[/*]|b?r#*"|b?"|''')
 
     for ($index = 0; $index -lt $lineLimit; $index++) {
         $lineNumber = $index + 1
@@ -629,6 +630,12 @@ function Get-RustExecutablePanicMacroLineSet {
                 continue
             }
 
+            # Only these tokens can change lexical state outside a literal or comment.
+            $nextContext = $contextStart.Match($line, $charIndex)
+            if (-not $nextContext.Success) {
+                break
+            }
+            $charIndex = $nextContext.Index
             if ($charIndex + 1 -lt $line.Length -and $line[$charIndex] -eq [char]"/" -and $line[$charIndex + 1] -eq [char]"/") {
                 break
             }
@@ -684,12 +691,14 @@ function Get-RustExecutablePanicMacroLineSet {
 function Get-RustLineBraceDelta {
     param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Line)
 
-    $withoutLineComment = $Line.Split([string[]]@("//"), 2, [System.StringSplitOptions]::None)[0]
     $delta = 0
-    foreach ($char in $withoutLineComment.ToCharArray()) {
-        if ($char -eq [char]"{") {
+    foreach ($token in [regex]::Matches($Line, '//|[{}]')) {
+        if ($token.Value -eq "//") {
+            break
+        }
+        if ($token.Value -eq "{") {
             $delta++
-        } elseif ($char -eq [char]"}") {
+        } else {
             $delta--
         }
     }
@@ -723,9 +732,17 @@ function Get-RustCandidateTestLineSet {
     $pendingTestAttribute = $false
     $pendingTestItemDepth = $null
     $testRegionDepths = [System.Collections.Generic.List[int]]::new()
+    $braces = [char[]]'{}'
+    $testContextCharacters = [char[]]'#{}'
 
     for ($index = 0; $index -lt $lineLimit; $index++) {
         $line = $lines[$index]
+        $lineNumber = $index + 1
+        $isCandidate = $candidateLineSet.Contains($lineNumber)
+        if (-not $isCandidate -and -not $pendingTestAttribute -and
+            $null -eq $pendingTestItemDepth -and $line.IndexOfAny($testContextCharacters) -lt 0) {
+            continue
+        }
         $trimmed = $line.Trim()
 
         for ($regionIndex = $testRegionDepths.Count - 1; $regionIndex -ge 0; $regionIndex--) {
@@ -734,8 +751,7 @@ function Get-RustCandidateTestLineSet {
             }
         }
 
-        $lineNumber = $index + 1
-        if ($candidateLineSet.Contains($lineNumber)) {
+        if ($isCandidate) {
             foreach ($regionDepth in $testRegionDepths) {
                 if ($depth -ge $regionDepth) {
                     [void]$testCandidateLines.Add($lineNumber)
@@ -759,7 +775,10 @@ function Get-RustCandidateTestLineSet {
             $pendingTestAttribute = $false
         }
 
-        $newDepth = $depth + (Get-RustLineBraceDelta -Line $line)
+        $newDepth = $depth
+        if ($line.IndexOfAny($braces) -ge 0) {
+            $newDepth += Get-RustLineBraceDelta -Line $line
+        }
         if ($null -ne $pendingTestItemDepth) {
             if ($newDepth -gt $pendingTestItemDepth) {
                 [void]$testRegionDepths.Add($pendingTestItemDepth + 1)
@@ -1076,16 +1095,13 @@ function Select-ProductionRustPanicMacroCandidates {
         }
 
         $lineNumbers = [int[]]@($fileCandidates | ForEach-Object { [int]$_.Line })
-        $executableMacroLines = Get-RustExecutablePanicMacroLineSet -Content $content -CandidateLines $lineNumbers
         $testCandidateLines = Get-RustCandidateTestLineSet -Content $content -CandidateLines $lineNumbers
+        $productionLines = [int[]]@($lineNumbers | Where-Object { -not $testCandidateLines.Contains($_) })
+        $executableMacroLines = Get-RustExecutablePanicMacroLineSet -Content $content -CandidateLines $productionLines
         foreach ($candidate in $fileCandidates) {
             if (-not $executableMacroLines.Contains($candidate.Line)) {
                 continue
             }
-            if ($testCandidateLines.Contains($candidate.Line)) {
-                continue
-            }
-
             [void]$productionCandidates.Add($candidate)
         }
     }
@@ -1110,25 +1126,14 @@ function Get-NewRustPanicMacroCandidates {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$CandidateFiles,
-        [Nullable[bool]]$TestContextMarkersChanged = $null
+        [switch]$TestContextMarkersChanged
     )
 
     if ($Candidates.Count -eq 0) {
         return @()
     }
 
-    $contextMarkersChanged = if ($null -eq $TestContextMarkersChanged) {
-        Test-RustTestContextMarkersChanged -CandidateFiles $CandidateFiles
-    } else {
-        [bool]$TestContextMarkersChanged
-    }
-
-    if ($contextMarkersChanged) {
-        $productionCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $Candidates)
-        if ($productionCandidates.Count -eq 0) {
-            return @()
-        }
-
+    if ($TestContextMarkersChanged) {
         $headCandidates = @(Get-HeadRustPanicMacroCandidates -Pathspecs $CandidateFiles)
         $productionHeadCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $headCandidates -Head)
         $headProductionCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::Ordinal)
@@ -1142,7 +1147,7 @@ function Get-NewRustPanicMacroCandidates {
         }
 
         $newProductionCandidates = [System.Collections.Generic.List[object]]::new()
-        foreach ($candidate in @($productionCandidates | Sort-Object -Property File, Line)) {
+        foreach ($candidate in @($Candidates | Sort-Object -Property File, Line)) {
             $key = Get-RustPanicCandidateKey -Candidate $candidate
             if ($headProductionCounts.ContainsKey($key) -and $headProductionCounts[$key] -gt 0) {
                 $headProductionCounts[$key]--
@@ -1221,9 +1226,7 @@ function Test-RustAddedPanicPatterns {
         return
     }
 
-    $violations = [System.Collections.Generic.List[string]]::new()
     $candidates = @()
-    $candidatesPreFilteredToProduction = $false
 
     if ($script:InspectWorktree) {
         $scannableFiles = [string[]]@($changedProductionRustFiles | Where-Object {
@@ -1246,6 +1249,16 @@ function Test-RustAddedPanicPatterns {
 
     $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
     try {
+        if (-not $script:InspectWorktree -and $candidateFiles.Count -gt 2) {
+            Add-IndexTextCache -Pathspecs $candidateFiles -AllowBudgetMiss
+        }
+        # Both comparison branches ultimately require a current production
+        # candidate. Keep the original file set for the context comparison.
+        $candidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $candidates)
+        if ($candidates.Count -eq 0) {
+            Pass "Rust panic patterns"
+            return
+        }
         $testContextMarkersChanged = Test-RustTestContextMarkersChanged -CandidateFiles $candidateFiles
         if (-not $testContextMarkersChanged) {
             $panicMacroDiffChanged = Test-RustPanicMacroDiffChanged -CandidateFiles $candidateFiles
@@ -1256,7 +1269,6 @@ function Test-RustAddedPanicPatterns {
         }
 
         $candidates = @(Get-NewRustPanicMacroCandidates -Candidates $candidates -CandidateFiles $candidateFiles -TestContextMarkersChanged:$testContextMarkersChanged)
-        $candidatesPreFilteredToProduction = $testContextMarkersChanged
     } catch {
         Fail "Rust panic patterns" $_.Exception.Message
         return
@@ -1265,65 +1277,8 @@ function Test-RustAddedPanicPatterns {
         Pass "Rust panic patterns"
         return
     }
-    $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
-
-    if (-not $script:InspectWorktree -and $candidateFiles.Count -gt 2) {
-        try {
-            Add-IndexTextCache -Pathspecs $candidateFiles
-        } catch {
-            Fail "Rust panic patterns" $_.Exception.Message
-            return
-        }
+    $violations = foreach ($candidate in ($candidates | Select-Object -First 5)) {
+        "$($candidate.File):$($candidate.Line): $($candidate.Text)"
     }
-
-    foreach ($file in @($candidateFiles | Sort-Object)) {
-        $fileCandidates = @($candidates | Where-Object { $_.File -eq $file } | Sort-Object -Property Line)
-        if ($fileCandidates.Count -eq 0) {
-            continue
-        }
-
-        if ($candidatesPreFilteredToProduction) {
-            foreach ($candidate in $fileCandidates) {
-                [void]$violations.Add("$($candidate.File):$($candidate.Line): $($candidate.Text)")
-                if ($violations.Count -ge 5) {
-                    break
-                }
-            }
-            if ($violations.Count -ge 5) {
-                break
-            }
-            continue
-        }
-
-        $content = Get-PolicyText -Path $file
-        if ($null -eq $content) {
-            continue
-        }
-
-        $lineNumbers = [int[]]@($fileCandidates | ForEach-Object { [int]$_.Line })
-        $executableMacroLines = Get-RustExecutablePanicMacroLineSet -Content $content -CandidateLines $lineNumbers
-        $testCandidateLines = Get-RustCandidateTestLineSet -Content $content -CandidateLines $lineNumbers
-        foreach ($candidate in $fileCandidates) {
-            if (-not $executableMacroLines.Contains($candidate.Line)) {
-                continue
-            }
-            if ($testCandidateLines.Contains($candidate.Line)) {
-                continue
-            }
-
-            [void]$violations.Add("$($candidate.File):$($candidate.Line): $($candidate.Text)")
-            if ($violations.Count -ge 5) {
-                break
-            }
-        }
-        if ($violations.Count -ge 5) {
-            break
-        }
-    }
-
-    if ($violations.Count -gt 0) {
-        Fail "Rust panic patterns" "Changed production Rust files contain explicit panic macros. Replace panic!/todo!/unimplemented!/unreachable! with typed errors or move test-only macros behind #[cfg(test)]. Full .expect/.unwrap policy runs in local CI and CI.`n$($violations -join "`n")"
-    } else {
-        Pass "Rust panic patterns"
-    }
+    Fail "Rust panic patterns" "Changed production Rust files contain explicit panic macros. Replace panic!/todo!/unimplemented!/unreachable! with typed errors or move test-only macros behind #[cfg(test)]. Full .expect/.unwrap policy runs in local CI and CI.`n$($violations -join "`n")"
 }
