@@ -26,6 +26,7 @@ $script:RustPanicPolicyLoaded = $false
 $script:StagedChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeUntrackedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$script:WorktreeHasStructuralChanges = $false
 $script:HookBudgetMs = 1000
 $script:CheckTimings = [System.Collections.Generic.List[object]]::new()
 $script:HookPolicyFiles = @(
@@ -352,6 +353,7 @@ function Get-WorktreeChangedFiles {
     $script:StagedChangedFileSet.Clear()
     $script:WorktreeChangedFileSet.Clear()
     $script:WorktreeUntrackedFileSet.Clear()
+    $script:WorktreeHasStructuralChanges = $false
 
     # Two concurrent queries replace one full status walk: the tracked
     # porcelain query skips the untracked scan entirely
@@ -421,6 +423,9 @@ function Get-WorktreeChangedFiles {
             [void]$script:WorktreeChangedFileSet.Add($path)
         }
 
+        if ($indexStatus -cnotin @(" ", "M") -or $worktreeStatus -cnotin @(" ", "M")) {
+            $script:WorktreeHasStructuralChanges = $true
+        }
         $skipRenameSource = $indexStatus -in @("R", "C") -or $worktreeStatus -in @("R", "C")
     }
 
@@ -2239,11 +2244,15 @@ try {
     $changedFilesTimer.Stop()
     $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
     if ($script:InspectWorktree -and $changedProductionRustFiles.Count -gt 0) {
-        # Keep all changed paths under src, including the two sides of a rename
-        # reported as add/delete by discovery, so the patch matches the src diff.
-        $changedSourcePaths = @($allChangedFiles | Where-Object {
-            $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
-        })
+        # A modified test-only file cannot change another file's panic context.
+        # Keep all source paths for structural changes so Git sees both sides
+        # of renames and copies, including moves between test and runtime files.
+        $changedSourcePaths = $changedProductionRustFiles
+        if ($script:WorktreeHasStructuralChanges) {
+            $changedSourcePaths = @($allChangedFiles | Where-Object {
+                $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
+            })
+        }
         # Keep capacity for Git options and native argument quoting on Windows.
         if (($changedSourcePaths -join ' ').Length -gt 4096) {
             $changedSourcePaths = @('src')

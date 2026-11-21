@@ -26332,10 +26332,8 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     // valid revision, exactly like any real repository.
     write_file(&dir.join("README.md"), "# profile probe\n");
     write_file(&dir.join("src/lib.rs"), "fn probe() {}\n");
-    assert!(git(&["add", "README.md", "src/lib.rs"])
-        .unwrap()
-        .status
-        .success());
+    write_file(&dir.join("src/probe_tests.rs"), "fn probe_test() {}\n");
+    assert!(git(&["add", "README.md", "src"]).unwrap().status.success());
     assert!(git(&["commit", "-q", "-m", "init", "--no-verify"])
         .unwrap()
         .status
@@ -26343,23 +26341,22 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
 
     let trace_dir = dir.join("git-trace");
     fs::create_dir(&trace_dir).unwrap();
-    let rust_diff_count = || {
-        fs::read_dir(&trace_dir)
-            .unwrap()
-            .map(|entry| {
-                read_file(&entry.unwrap().path())
-                    .lines()
-                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-                    .filter(|event| {
-                        event["event"] == "start"
-                            && event["argv"].as_array().is_some_and(|args| {
-                                args.iter().any(|arg| arg == "-G")
-                                    && args.iter().any(|arg| arg == "--unified=0")
-                            })
+    let rust_diffs = || {
+        let mut commands = Vec::new();
+        for entry in fs::read_dir(&trace_dir).unwrap() {
+            for line in read_file(&entry.unwrap().path()).lines() {
+                let event = serde_json::from_str::<serde_json::Value>(line).unwrap();
+                if event["event"] == "start"
+                    && event["argv"].as_array().is_some_and(|args| {
+                        args.iter().any(|arg| arg == "-G")
+                            && args.iter().any(|arg| arg == "--unified=0")
                     })
-                    .count()
-            })
-            .sum::<usize>()
+                {
+                    commands.push(event["argv"].as_array().unwrap().clone());
+                }
+            }
+        }
+        commands
     };
     let run_hook = |profile: bool| -> std::io::Result<std::process::Output> {
         for entry in fs::read_dir(&trace_dir)? {
@@ -26424,7 +26421,10 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         "the preflight must report its total runtime.\nstdout: {stdout}"
     );
     assert_profile_timing_coverage(&stdout, "clean worktree preflight", &[], &[]);
-    assert_eq!(rust_diff_count(), 0, "clean worktree started a Rust diff");
+    assert!(
+        rust_diffs().is_empty(),
+        "clean worktree started a Rust diff"
+    );
 
     // 3) A metadata commit exercises the PASS path and the staged-content
     //    preload emitter, which runs outside Invoke-Check. README.md is
@@ -26462,11 +26462,41 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
         &["Staged content preload"],
         &["Staged content preload"],
     );
-    assert_eq!(
-        rust_diff_count(),
-        0,
+    assert!(
+        rust_diffs().is_empty(),
         "metadata preflight started a Rust diff"
     );
+
+    write_file(&dir.join("src/lib.rs"), "fn probe() { let _ = 1; }\n");
+    write_file(
+        &dir.join("src/probe_tests.rs"),
+        "fn probe_test() { panic!(\"test probe\"); }\n",
+    );
+    assert!(run_hook(true).unwrap().status.success());
+    let modified_diffs = rust_diffs();
+    assert_eq!(modified_diffs.len(), 1);
+    assert!(modified_diffs[0].iter().any(|arg| arg == "src/lib.rs"));
+    assert!(modified_diffs[0]
+        .iter()
+        .all(|arg| arg != "src/probe_tests.rs"));
+
+    assert!(git(&["mv", "src/probe_tests.rs", "src/moved_tests.rs"])
+        .unwrap()
+        .status
+        .success());
+    assert!(git(&["add", "src/moved_tests.rs"])
+        .unwrap()
+        .status
+        .success());
+    assert!(run_hook(true).unwrap().status.success());
+    let structural_diffs = rust_diffs();
+    assert_eq!(structural_diffs.len(), 1);
+    assert!(structural_diffs[0]
+        .iter()
+        .any(|arg| arg == "src/probe_tests.rs"));
+    assert!(structural_diffs[0]
+        .iter()
+        .any(|arg| arg == "src/moved_tests.rs"));
 
     write_file(
         &dir.join("src/lib.rs"),
@@ -26476,7 +26506,7 @@ fn test_pre_commit_profile_diagnostics_contract_when_pwsh_available() {
     assert!(!rust.status.success());
     assert!(String::from_utf8_lossy(&rust.stdout).contains("FAIL: Rust panic patterns"));
     assert_eq!(
-        rust_diff_count(),
+        rust_diffs().len(),
         1,
         "production Rust must run one pickaxe diff"
     );
