@@ -531,8 +531,11 @@ const CONTROL_BYTE_LIMIT: usize = 16 * 1024 * 1024;
 const EXTRA_EVENTS: usize = 1024;
 const EXTRA_EVENTS_PER_PEER: usize = 128;
 
-pub(super) fn extra_inbound_events(peers: u32) -> u64 {
-    u64::from(peers) * (EXTRA_EVENTS_PER_PEER as u64) + (EXTRA_EVENTS as u64)
+pub(super) fn extra_inbound_events(peers: u64) -> Result<u64, String> {
+    peers
+        .checked_mul(EXTRA_EVENTS_PER_PEER as u64)
+        .and_then(|count| count.checked_add(EXTRA_EVENTS as u64))
+        .ok_or_else(|| "retained event allowance overflows".to_string())
 }
 
 impl EventLog {
@@ -611,11 +614,10 @@ impl EventLog {
         let mut log =
             Self::with_planned_capacity(resident_sent, resident_receipts, receipt_timings)?;
         log.state.get_mut().expect("new event log").room_capture = room_capture;
-        let allowance = plans
-            .len()
-            .checked_mul(EXTRA_EVENTS_PER_PEER)
-            .and_then(|count| count.checked_add(EXTRA_EVENTS))
-            .and_then(|count| count.checked_add(receipts))
+        let extra = extra_inbound_events(crate::config::count_u64(plans.len()))?;
+        let allowance = usize::try_from(extra)
+            .ok()
+            .and_then(|extra| receipts.checked_add(extra))
             .ok_or_else(|| "retained event budget overflows".to_string())?;
         log.state.get_mut().expect("new event log").budget = Some(RecordBudget {
             event_limit: allowance,

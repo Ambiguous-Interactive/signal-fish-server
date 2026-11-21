@@ -1017,9 +1017,11 @@ fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<Outcome
             .records
             .checked_sub(crate::config::count_u64(records.events().count()))
             .ok_or_else(|| "room capture controls exceed replay record budget".to_string())?;
+        let (capture_rows, _) = crate::room_spool::row_limits(&admission)?;
+        let rows = rows.min(capture_rows);
         spool.validate_limits(rows, spool_budget.min(bytes))?;
         if let Some(evaluation) =
-            crate::partition_oracle::evaluate_rooms(&spool, &manifest.config, &plans, &records)?
+            crate::partition_oracle::evaluate_rooms(&spool, &admission, &plans, &records)?
         {
             return Ok(evaluation.summary);
         }
@@ -1252,7 +1254,7 @@ mod tests {
         let one_room = config.validate_raw_event_budget().unwrap();
         config.raw_event_budget_bytes = one_room;
         config.rooms = 2;
-        config.endpoint = Some("ws://127.0.0.1:9".into());
+        config.endpoint = Some(crate::host_evidence_fixture().endpoint);
         let (plans, churn) = build_run_shape(&config).unwrap();
         let mut expected = crate::complete_records(&plans);
         let mut misroute = expected.receipts[0].clone();

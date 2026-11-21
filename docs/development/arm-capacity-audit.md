@@ -8186,6 +8186,11 @@ also retain their exact counts and first keys. A differential control with
 evaluator includes unidentified GameData bytes and honors slow-reader
 exemptions without losing outstanding counts.
 
+One room can receive the full run-wide inbound allowance. The evaluator
+also retains the first event that crossed the collector's limit. If more
+than one room's planned receipts concentrate in the same shard beyond that
+allowance, exact replay uses the separately admitted whole-run evaluator.
+
 Replay can use the whole-run evaluator for exceptional archive evidence
 such as byte-total overflow, unexpected churn records, or misplaced shards.
 When fallback exceeds the live memory budget, the runner retains the spool

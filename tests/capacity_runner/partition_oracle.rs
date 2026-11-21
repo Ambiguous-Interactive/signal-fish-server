@@ -51,6 +51,12 @@ pub(super) fn evaluate_rooms(
     if !control.churn.is_empty() {
         return Ok(None);
     }
+    let (_, room_rows) = crate::room_spool::row_limits(config)?;
+    if !replay.fits_room_row_limit(room_rows) {
+        // More than one room's expected receipts landed in a shard. Give
+        // exact fallback its separate whole-run memory admission check.
+        return Ok(None);
+    }
     let exempt: BTreeSet<&str> = control
         .faults
         .iter()
@@ -79,7 +85,6 @@ pub(super) fn evaluate_rooms(
     };
     let mut histogram = oracle::latency_histogram([]);
     let mut lags = BTreeMap::<u64, u64>::new();
-    let mut row_budgets = Vec::new();
     let mut faults = BTreeMap::new();
     let mut raw_faults = RawFaults::default();
     let room_of: BTreeMap<_, _> = plans
@@ -119,20 +124,6 @@ pub(super) fn evaluate_rooms(
             });
         }
         let mut names = ReceiptNames::default();
-        // Every expected send and receipt plus the existing receive allowance
-        // for this topology. Refuse before decoding if this room exceeds it.
-        let room_rows = room_plans
-            .iter()
-            .map(|plan| plan.sends.len() as u64)
-            .sum::<u64>()
-            .checked_mul(u64::from(config.players_per_room))
-            .and_then(|rows| {
-                rows.checked_add(crate::records::extra_inbound_events(
-                    config.players_per_room,
-                ))
-            })
-            .ok_or_else(|| "room replay row count overflows".to_string())?;
-        row_budgets.push(room_rows);
         replay.visit(room as usize, room_rows, |ordinal, event| match event {
             RoomEvent::Sent(event) => records.sent.push(names.share_sent(event)),
             RoomEvent::Receipt(event) => records.receipts.push(names.share(event)),
@@ -247,8 +238,8 @@ pub(super) fn evaluate_rooms(
             summary.totals.sent,
             summary.generator_lag_us.max_us,
             |scan| {
-                for (room, rows) in row_budgets.iter().copied().enumerate() {
-                    replay.visit(room, rows, |_, event| {
+                for room in 0..config.rooms as usize {
+                    replay.visit(room, room_rows, |_, event| {
                         if let RoomEvent::Sent(event) = event {
                             scan(event.sent_us.saturating_sub(event.intended_us));
                         }

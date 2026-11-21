@@ -1066,6 +1066,7 @@ pub(super) async fn run_with_capture(
             &config.output_dir.join("rooms"),
             config.rooms as usize,
         )?;
+        let (capture_rows, _) = crate::room_spool::row_limits(&config)?;
         artifacts::write_deliveries(&config.output_dir, &records)?;
         let evaluation =
             crate::partition_oracle::evaluate_rooms(&replay, &config, &plans, &records)?;
@@ -1087,7 +1088,7 @@ pub(super) async fn run_with_capture(
                     "exact diagnostics require the legacy memory budget: {error}"
                 ));
             }
-            replay.restore_hot_records(&mut records, config.planned_record_budget)?;
+            replay.restore_hot_records(&mut records, capture_rows)?;
         }
         evaluation
     } else {
@@ -1119,7 +1120,8 @@ pub(super) async fn run_with_capture(
                 &config.output_dir.join("rooms"),
                 config.rooms as usize,
             )?;
-            replay.visit_ordered(config.planned_record_budget, |event| {
+            let (capture_rows, _) = crate::room_spool::row_limits(&config)?;
+            replay.visit_ordered(capture_rows, |event| {
                 if let crate::room_spool::RoomEvent::Sent(sent) = event {
                     SenderProgress::record(&mut progress, &sent, sent.sender.as_str());
                 }

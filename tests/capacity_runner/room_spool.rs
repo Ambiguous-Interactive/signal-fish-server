@@ -237,6 +237,24 @@ pub(super) fn planned_disk_floor(config: &crate::config::RunConfig) -> Result<u6
         .ok_or_else(|| "minimum room spool bytes overflow".to_string())
 }
 
+/// Maximum replay rows for the entire capture and for bounded room evaluation.
+/// The run-wide receive allowance can all land in a single room. The collector
+/// also retains the first row that crosses its receive budget.
+pub(super) fn row_limits(config: &crate::config::RunConfig) -> Result<(u64, u64), String> {
+    let rooms = u64::from(config.rooms);
+    let planned = config.validate_planned_record_budget()?;
+    let per_room = planned
+        .checked_div(rooms)
+        .ok_or_else(|| "room capture needs at least one room".to_string())?;
+    let extra = crate::records::extra_inbound_events(rooms * u64::from(config.players_per_room))?;
+    let with_headroom = |rows: u64| {
+        rows.checked_add(extra)
+            .and_then(|rows| rows.checked_add(1))
+            .ok_or_else(|| "room replay row count overflows".to_string())
+    };
+    Ok((with_headroom(planned)?, with_headroom(per_room)?))
+}
+
 /// Refuse an obviously unprovisioned capture before creating files or sockets.
 pub(super) fn preflight(config: &crate::config::RunConfig, byte_budget: u64) -> Result<(), String> {
     let minimum = planned_disk_floor(config)?;
@@ -441,6 +459,10 @@ impl RoomReplay {
             return Err("room spool is missing capture ordinals".into());
         }
         Ok(())
+    }
+
+    pub(super) fn fits_room_row_limit(&self, limit: u64) -> bool {
+        self.index.rooms.iter().all(|room| room.rows <= limit)
     }
 
     pub(super) fn validate_limits(&self, mut rows: u64, mut bytes: u64) -> Result<(), String> {

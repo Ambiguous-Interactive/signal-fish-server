@@ -6,6 +6,79 @@ use crate::records::{
 use crate::room_spool::RoomSpool;
 
 #[test]
+fn bounded_room_replay_keeps_the_run_wide_duplicate_allowance_in_one_room() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = crate::scenario_config(Encoding::V3Json);
+    config.rooms = 2;
+    config.planned_record_budget = config.validate_planned_record_budget().unwrap();
+    let (plans, churn) = crate::schedule::build_run_shape(&config).unwrap();
+    let roster = plans
+        .iter()
+        .map(|plan| (plan.name.clone(), plan.room))
+        .collect::<Vec<_>>();
+    let mut expected = crate::complete_records(&plans);
+    let duplicate = expected.receipts[0].clone();
+    // Concentrate the receive allowance and the retained crossing row in
+    // the first room, after collecting the full offered schedule.
+    let peers = u64::from(config.rooms) * u64::from(config.players_per_room);
+    let duplicates = 1 + crate::records::extra_inbound_events(peers).unwrap();
+    for _ in 0..duplicates {
+        expected.receipts.push(duplicate.clone());
+    }
+    let root = temp.path().join("rooms");
+    let log = EventLog::for_partitioned_plans(
+        &plans,
+        RoomSpool::create(&root, config.rooms as usize, 16_384, 1024 * 1024).unwrap(),
+    )
+    .unwrap();
+    for sent in &expected.sent {
+        log.push_sent(sent.clone());
+    }
+    for (index, receipt) in expected.receipts.iter().enumerate() {
+        assert_eq!(
+            log.push_receipt(receipt.clone()),
+            index + 1 < expected.receipts.len(),
+            "the final receipt crosses the budget and is retained"
+        );
+    }
+    log.finish_room_capture().unwrap();
+    let replay = RoomReplay::open(&root, config.rooms as usize).unwrap();
+    let control = log.take_records();
+    assert!(!control.faults.is_empty());
+    expected.faults.clone_from(&control.faults);
+    let actual = evaluate_rooms(&replay, &config, &plans, &control)
+        .unwrap()
+        .expect("duplicates within the accepted allowance admit bounded replay");
+    assert!(replay
+        .restore_hot_records(&mut RunRecords::default(), config.planned_record_budget)
+        .is_err());
+    let (capture_rows, _) = crate::room_spool::row_limits(&config).unwrap();
+    let mut restored = control;
+    replay
+        .restore_hot_records(&mut restored, capture_rows)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(restored.receipts).unwrap(),
+        serde_json::to_value(&expected.receipts).unwrap(),
+    );
+    let expected = oracle::summarize(
+        &plans,
+        &roster,
+        &expected,
+        micros(config.generator_lag_bound),
+        config.payload_bytes,
+        config.delivery_class,
+        &churn,
+        None,
+    );
+    assert!(!expected.valid);
+    assert_eq!(
+        serde_json::to_value(actual.summary).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+    );
+}
+
+#[test]
 fn bounded_room_replay_matches_mixed_faults_across_capture_orders() {
     let temp = tempfile::tempdir().unwrap();
     for seed in 0..24 {
