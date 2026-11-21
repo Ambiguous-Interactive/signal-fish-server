@@ -1020,6 +1020,7 @@ fn replay_with_limits(output_dir: &Path, limits: ReplayLimits) -> Result<Outcome
         let (capture_rows, _) = crate::room_spool::row_limits(&admission)?;
         let rows = rows.min(capture_rows);
         spool.validate_limits(rows, spool_budget.min(bytes))?;
+        spool.validate_ordinals(rows)?;
         if let Some(evaluation) =
             crate::partition_oracle::evaluate_rooms(&spool, &admission, &plans, &records)?
         {

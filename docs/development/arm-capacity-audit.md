@@ -8175,10 +8175,10 @@ Set `CAPACITY_RUNNER_ROOM_SPOOL_BYTES` on the standalone capacity runner to
 select room capture and cap disk use. The raw memory budget applies per room.
 The evaluator preserves exact missing, duplicate, out-of-order, misrouted,
 gap, and disconnect diagnostics for the supported fault cases. A foreign
-receipt can read the relevant source room's send ledger for payload and
-latency accounting. The first reliable-gap diagnostic follows capture
-order. Per-sender diagnostic samples are derived from the spool when the
-room-wise result is invalid.
+receipt can scan the source shard for the requested send keys and retain
+only timing matches for payload and latency accounting. Archive replay
+checks global capture order before applying the same order to its first
+reliable-gap diagnostic. Invalid runs retain per-sender diagnostic samples.
 
 Raw payload size, encoded body, receipt time, and send-ledger violations
 also retain their exact counts and first keys. A differential control with

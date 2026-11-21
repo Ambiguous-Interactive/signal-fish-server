@@ -423,7 +423,29 @@ impl RoomReplay {
     pub(super) fn visit_ordered(
         &self,
         row_budget: u64,
-        mut visit: impl FnMut(RoomEvent<String>),
+        visit: impl FnMut(RoomEvent<String>),
+    ) -> Result<(), String> {
+        self.visit_ordered_with(row_budget, ReplayRoom::next, visit)
+    }
+
+    pub(super) fn validate_ordinals(&self, row_budget: u64) -> Result<(), String> {
+        let mut frame = [0; FRAME_LIMIT];
+        self.visit_ordered_with(
+            row_budget,
+            |reader| {
+                Ok(reader
+                    .next_frame(&mut frame)?
+                    .map(|(ordinal, _)| (ordinal, ())))
+            },
+            |()| {},
+        )
+    }
+
+    fn visit_ordered_with<T>(
+        &self,
+        row_budget: u64,
+        mut next: impl FnMut(&mut ReplayRoom) -> Result<Option<(u64, T)>, String>,
+        mut visit: impl FnMut(T),
     ) -> Result<(), String> {
         let mut rooms = Vec::with_capacity(self.index.rooms.len());
         let mut pending = BTreeMap::new();
@@ -433,7 +455,7 @@ impl RoomReplay {
                 .checked_sub(file.rows)
                 .ok_or_else(|| format!("room spool exceeds replay row budget {row_budget}"))?;
             let mut reader = self.reader(room, file.rows)?;
-            if let Some((ordinal, event)) = reader.next()? {
+            if let Some((ordinal, event)) = next(&mut reader)? {
                 if pending.insert(ordinal, (room, event)).is_some() {
                     return Err(format!("room spool repeats ordinal {ordinal}"));
                 }
@@ -449,7 +471,7 @@ impl RoomReplay {
             }
             visit(event);
             expected += 1;
-            if let Some((ordinal, event)) = rooms[room].next()? {
+            if let Some((ordinal, event)) = next(&mut rooms[room])? {
                 if pending.insert(ordinal, (room, event)).is_some() {
                     return Err(format!("room spool repeats ordinal {ordinal}"));
                 }
@@ -530,10 +552,27 @@ struct ReplayRoom {
 
 impl ReplayRoom {
     fn next(&mut self) -> Result<Option<(u64, RoomEvent<String>)>, String> {
+        let mut frame = [0; FRAME_LIMIT];
+        let Some((ordinal, bytes)) = self.next_frame(&mut frame)? else {
+            return Ok(None);
+        };
+        let mut deserializer = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
+        deserializer.set_max_depth(8);
+        let event = RoomEvent::deserialize(&mut deserializer)
+            .map_err(|error| format!("invalid frame: {error}"))?;
+        if deserializer.position() != bytes.len() as u64 {
+            return Err("trailing bytes in room event frame".into());
+        }
+        Ok(Some((ordinal, event)))
+    }
+
+    fn next_frame<'a>(
+        &mut self,
+        frame: &'a mut [u8; FRAME_LIMIT],
+    ) -> Result<Option<(u64, &'a [u8])>, String> {
         let Some(reader) = &mut self.input else {
             return Ok(None);
         };
-        let mut frame = [0; FRAME_LIMIT];
         if self.remaining == 0 {
             if reader
                 .read(&mut frame[..1])
@@ -565,15 +604,8 @@ impl ReplayRoom {
         reader
             .read_exact(bytes)
             .map_err(|error| error.to_string())?;
-        let mut deserializer = rmp_serde::Deserializer::new(std::io::Cursor::new(&*bytes));
-        deserializer.set_max_depth(8);
-        let event = RoomEvent::deserialize(&mut deserializer)
-            .map_err(|error| format!("invalid frame: {error}"))?;
-        if deserializer.position() != size as u64 {
-            return Err("trailing bytes in room event frame".into());
-        }
         self.remaining -= 1;
-        Ok(Some((ordinal, event)))
+        Ok(Some((ordinal, bytes)))
     }
 }
 

@@ -1030,6 +1030,7 @@ pub(super) async fn run_with_capture(
     );
     let evidence_finished_us = micros(epoch.elapsed());
     let mut records = log.take_records();
+    let lifecycle = peer_progress_snapshot(&peer_progress);
     let bounded = if spool_budget.is_some() {
         let completed_sends = log.completed_room_capture_sends();
         let capture_queue = log.room_capture_queue();
@@ -1037,7 +1038,13 @@ pub(super) async fn run_with_capture(
             .iter()
             .map(|plan| plan.sends.len() as u64)
             .sum::<u64>();
-        if let Err(error) = log.finish_room_capture() {
+        let finished = log.finish_room_capture();
+        let evidence = [
+            artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle),
+            artifacts::write_intervals(&config.output_dir, &interval_samples),
+            artifacts::write_deliveries(&config.output_dir, &records),
+        ];
+        if let Err(error) = finished {
             let status = json!({
                 "status": "generator_invalidated",
                 "capture_queue": capture_queue,
@@ -1047,50 +1054,49 @@ pub(super) async fn run_with_capture(
                 "completed_sends": completed_sends,
                 "unsent": scheduled_sends.saturating_sub(completed_sends),
             });
-            for evidence in [
-                artifacts::write_json(config.output_dir.join("room-capture-status.json"), &status),
-                artifacts::write_json(
-                    config.output_dir.join("peer-progress.json"),
-                    &peer_progress_snapshot(&peer_progress),
-                ),
-                artifacts::write_intervals(&config.output_dir, &interval_samples),
-                artifacts::write_deliveries(&config.output_dir, &records),
-            ] {
+            let status =
+                artifacts::write_json(config.output_dir.join("room-capture-status.json"), &status);
+            for evidence in evidence.into_iter().chain([status]) {
                 if let Err(evidence_error) = evidence {
                     eprintln!("capture invalidation evidence: {evidence_error}");
                 }
             }
             return Err(error);
         }
-        let replay = crate::room_spool::RoomReplay::open(
-            &config.output_dir.join("rooms"),
-            config.rooms as usize,
-        )?;
-        let (capture_rows, _) = crate::room_spool::row_limits(&config)?;
-        artifacts::write_deliveries(&config.output_dir, &records)?;
-        let evaluation =
-            crate::partition_oracle::evaluate_rooms(&replay, &config, &plans, &records)?;
-        if evaluation.is_none() {
-            // Exact diagnostics for invalid captures still use the admitted
-            // legacy memory budget.
-            if let Err(error) = config.validate_raw_event_budget() {
-                artifacts::write_json(
-                    config.output_dir.join("room-capture-status.json"),
-                    &json!({
-                        "status": "exact_fallback_exceeds_memory_budget",
-                        "detail": error,
-                        "scheduled_sends": scheduled_sends,
-                        "completed_sends": completed_sends,
-                        "unsent": scheduled_sends.saturating_sub(completed_sends),
-                    }),
-                )?;
-                return Err(format!(
-                    "exact diagnostics require the legacy memory budget: {error}"
-                ));
+        let evaluation = (|| {
+            for result in evidence {
+                result?;
             }
-            replay.restore_hot_records(&mut records, capture_rows)?;
+            let replay = crate::room_spool::RoomReplay::open(
+                &config.output_dir.join("rooms"),
+                config.rooms as usize,
+            )?;
+            let (capture_rows, _) = crate::room_spool::row_limits(&config)?;
+            let evaluation =
+                crate::partition_oracle::evaluate_rooms(&replay, &config, &plans, &records)?;
+            if evaluation.is_none() {
+                config.validate_raw_event_budget().map_err(|error| {
+                    format!("exact diagnostics require the legacy memory budget: {error}")
+                })?;
+                replay.restore_hot_records(&mut records, capture_rows)?;
+            }
+            Ok::<_, String>(evaluation)
+        })();
+        if let Err(error) = &evaluation {
+            if let Err(status_error) = artifacts::write_json(
+                config.output_dir.join("room-capture-status.json"),
+                &json!({
+                    "status": "room_evaluation_failed",
+                    "detail": error,
+                    "scheduled_sends": scheduled_sends,
+                    "completed_sends": completed_sends,
+                    "unsent": scheduled_sends.saturating_sub(completed_sends),
+                }),
+            ) {
+                eprintln!("capture evaluation evidence: {status_error}");
+            }
         }
-        evaluation
+        evaluation?
     } else {
         None
     };
@@ -1111,8 +1117,9 @@ pub(super) async fn run_with_capture(
         ),
     };
 
-    let lifecycle = peer_progress_snapshot(&peer_progress);
-    artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle)?;
+    if spool_budget.is_none() {
+        artifacts::write_json(config.output_dir.join("peer-progress.json"), &lifecycle)?;
+    }
     if !summary.valid {
         let mut progress = SenderProgress::planned(&plans);
         if histogram.is_some() {
@@ -1151,8 +1158,8 @@ pub(super) async fn run_with_capture(
 
     if spool_budget.is_none() {
         artifacts::write_deliveries(&config.output_dir, &records)?;
+        artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     }
-    artifacts::write_intervals(&config.output_dir, &interval_samples)?;
     if let Some(histogram) = histogram {
         artifacts::write_latency_histogram(&config.output_dir, &histogram)?;
     } else {

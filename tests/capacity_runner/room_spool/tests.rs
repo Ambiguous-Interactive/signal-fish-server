@@ -123,6 +123,30 @@ fn room_spool_rejects_budget_and_write_failures_as_incomplete() {
 }
 
 #[test]
+fn room_spool_preserves_the_first_rejection_after_a_later_send() {
+    let temp = tempfile::tempdir().unwrap();
+    let config = crate::scenario_config(crate::config::Encoding::V3Json);
+    let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+    let mut records = crate::complete_records(&plans);
+    let spool = RoomSpool::create(&temp.path().join("rooms"), 1, 8, 4096).unwrap();
+    let log = crate::records::EventLog::for_partitioned_plans(&plans, spool).unwrap();
+    let mut receipt = records.receipts.remove(0);
+    receipt.sender = "a".repeat(FRAME_LIMIT).as_str().into();
+    assert!(!log.push_receipt(receipt));
+    log.push_sent(records.sent.remove(0));
+    assert!(matches!(
+        log.take_records().faults.as_slice(),
+        [crate::oracle::InvalidReason::GeneratorRecordBudgetExceeded {
+            first_excess_kind,
+            allocation_failure: Some(detail),
+            unretained_events: 2,
+            ..
+        }] if first_excess_kind == "receipt" && detail.contains("identity exceeds frame budget")
+    ));
+    assert!(log.finish_room_capture().is_err());
+}
+
+#[test]
 fn room_spool_queue_refusal_never_commits_an_incomplete_index() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();

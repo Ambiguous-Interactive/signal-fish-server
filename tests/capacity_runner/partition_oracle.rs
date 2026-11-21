@@ -348,15 +348,48 @@ fn read_foreign_timings(
 ) -> Result<oracle::ForeignReceiptTimings, String> {
     let mut timings = BTreeMap::new();
     for (source, receipts) in requests {
-        let mut sends = Vec::new();
-        let mut names = ReceiptNames::default();
+        #[derive(Default)]
+        struct Match {
+            latest: Option<(crate::schedule::Phase, u64)>,
+            epochs: BTreeMap<u32, Option<u64>>,
+        }
+        let mut wanted = BTreeMap::<&str, BTreeMap<u64, Match>>::new();
+        for (_, receipt) in &receipts {
+            wanted
+                .entry(receipt.sender.as_str())
+                .or_default()
+                .entry(receipt.seq)
+                .or_default()
+                .epochs
+                .entry(receipt.epoch)
+                .or_default();
+        }
+        // SendIndex chooses the last matching send in capture order for
+        // both lookup keys. Only retain matches for requested receipts.
         replay.visit(source as usize, row_budget, |_, event| {
             if let RoomEvent::Sent(event) = event {
-                sends.push(names.share_sent(event));
+                let Some(found) = wanted
+                    .get_mut(event.sender.as_str())
+                    .and_then(|sends| sends.get_mut(&event.seq))
+                else {
+                    return;
+                };
+                found.latest = Some((event.phase, event.intended_us));
+                if let Some(timing) = found.epochs.get_mut(&event.epoch) {
+                    *timing = Some(event.intended_us);
+                }
             }
         })?;
-        crate::records::sort_sent_events(&mut sends);
-        oracle::add_foreign_timings(&mut timings, &sends, receipts);
+        for (ordinal, receipt) in receipts {
+            let found = &wanted[receipt.sender.as_str()][&receipt.seq];
+            timings.insert(
+                ordinal,
+                oracle::ReceiptTiming {
+                    latest: found.latest,
+                    epoch_intended_us: found.epochs[&receipt.epoch],
+                },
+            );
+        }
     }
     Ok(timings)
 }

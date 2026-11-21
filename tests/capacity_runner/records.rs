@@ -862,6 +862,11 @@ impl EventLog {
         use crate::room_spool::RoomEvent;
 
         let inbound = kind != "sent";
+        let already_exceeded = !inbound
+            && state
+                .budget
+                .as_ref()
+                .is_some_and(|budget| budget.first_excess_kind.is_some());
         if inbound && !self.admit_event(state, kind, 0) {
             return false;
         }
@@ -879,9 +884,11 @@ impl EventLog {
             if inbound {
                 budget.retained_events -= 1;
             }
-            budget.first_excess_kind = Some(kind);
+            if !already_exceeded {
+                budget.first_excess_kind = Some(kind);
+                budget.allocation_failure = Some(error);
+            }
             budget.unretained_events = budget.unretained_events.saturating_add(1);
-            budget.allocation_failure = Some(error);
             self.budget_changed.notify_waiters();
             return false;
         }

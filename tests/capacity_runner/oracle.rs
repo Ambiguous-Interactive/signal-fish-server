@@ -1255,8 +1255,8 @@ fn sender_epoch_index<'a>(
 
 #[derive(Clone, Copy)]
 pub(super) struct ReceiptTiming {
-    latest: Option<(Phase, u64)>,
-    epoch_intended_us: Option<u64>,
+    pub(super) latest: Option<(Phase, u64)>,
+    pub(super) epoch_intended_us: Option<u64>,
 }
 
 pub(super) type ForeignReceiptTimings = BTreeMap<usize, ReceiptTiming>;
@@ -1270,17 +1270,6 @@ fn receipt_timing(receipt: &crate::records::ReceiptEvent, sent: &SendIndex<'_>) 
             .filter(|event| event.epoch == receipt.epoch)
             .or_else(|| sent.get_in_epoch(sender, receipt.epoch, receipt.seq))
             .map(|event| event.intended_us),
-    }
-}
-
-pub(super) fn add_foreign_timings<'a>(
-    timings: &mut ForeignReceiptTimings,
-    sends: &[SentEvent],
-    receipts: impl IntoIterator<Item = (usize, &'a crate::records::ReceiptEvent)>,
-) {
-    let index = SendIndex::new(sends);
-    for (ordinal, receipt) in receipts {
-        timings.insert(ordinal, receipt_timing(receipt, &index));
     }
 }
 

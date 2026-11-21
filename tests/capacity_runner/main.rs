@@ -6611,6 +6611,20 @@ async fn room_spool_live_capture_preserves_reliable_replay() {
         .deserialize(&mut artifact)
         .unwrap();
     assert_eq!(buckets(&actual_histogram), buckets(&expected_histogram));
+    let shards =
+        ["rooms/000.msgpack", "rooms/001.msgpack"].map(|name| outcome.output_dir.join(name));
+    let contents = shards.each_ref().map(|path| std::fs::read(path).unwrap());
+    let first = contents
+        .each_ref()
+        .map(|bytes| u64::from_le_bytes(bytes[2..10].try_into().unwrap()));
+    let later = usize::from(first[1] > first[0]);
+    let mut damaged = contents[later].clone();
+    damaged[2..10].copy_from_slice(&first[1 - later].to_le_bytes());
+    std::fs::write(&shards[later], damaged).unwrap();
+    assert!(artifacts::replay(&outcome.output_dir)
+        .unwrap_err()
+        .contains("repeats ordinal"));
+    std::fs::write(&shards[later], &contents[later]).unwrap();
     std::fs::remove_file(outcome.output_dir.join("rooms/001.msgpack")).unwrap();
     assert!(artifacts::replay(&outcome.output_dir)
         .unwrap_err()
