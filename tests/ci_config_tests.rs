@@ -26775,6 +26775,7 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                     $script:RepoRoot = (Get-Location).Path
                     $script:FixtureHeadTextByPath = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
                     $script:FixtureContextMarkersChanged = $false
+                    $script:FixtureContextWasRead = $false
                     $script:FixturePanicMacroDiffChanged = $true
                 }
                 function Assert($condition, $message) {
@@ -26817,6 +26818,7 @@ fn test_pre_commit_rust_panic_scanner_uses_staged_line_context_when_pwsh_availab
                     return $null
                 }
                 function Test-RustTestContextMarkersChanged {
+                    $script:FixtureContextWasRead = $true
                     return $script:FixtureContextMarkersChanged
                 }
                 function Test-RustPanicMacroDiffChanged {
@@ -27065,6 +27067,18 @@ pub fn docs() {
                     "}`n"
                 $rawLines = Get-RustExecutablePanicMacroLineSet -Content $multiLineRawString -CandidateLines ([int[]]@(3))
                 Assert (-not $rawLines.Contains(3)) "multi-line raw strings should not be executable candidates"
+
+                foreach ($worktree in @($false, $true)) {
+                    Reset-State
+                    $script:InspectWorktree = $worktree
+                    $script:StagedFiles = @("src/lib.rs")
+                    $script:IndexTextCache["src/lib.rs"] = $testContent
+                    $script:WorktreeTextCache["src/lib.rs"] = $testContent
+                    Set-Candidates -staged @((Candidate "src/lib.rs" 3 'panic!("test helper");'))
+                    Test-RustAddedPanicPatterns
+                    Assert ($script:Failed -eq 0) "test panic must pass the policy"
+                    Assert (-not $script:FixtureContextWasRead) "exempt candidates must skip Git context comparison"
+                }
 
                 $script:OriginalProductionSelector = ${function:Select-ProductionRustPanicMacroCandidates}
                 function Select-ProductionRustPanicMacroCandidates {
@@ -27318,7 +27332,7 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
             && content.contains("$candidateFiles.Count -gt 2")
             && content.contains("Get-RustPanicCandidateKey -Candidate $candidate -IncludeLine")
             && content.contains("Test-RustTestContextMarkersChanged")
-            && content.contains("$productionCandidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $Candidates)")
+            && content.contains("$candidates = @(Select-ProductionRustPanicMacroCandidates -Candidates $candidates)")
             && content.contains("-TestContextMarkersChanged:$testContextMarkersChanged")
             && content.contains("Contains($candidate.Line)"),
         "pre-commit panic-pattern scans must stay line-number aware, production \
@@ -27397,6 +27411,16 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 $script:Calls = 0
                 Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "worktree mode must retain the full scanner"
                 Assert ($script:Calls -eq 1) "worktree mode should classify tracked changes once before failing closed for untracked files"
+
+                $script:NextExitCode = 0
+                $script:NextStdout = ""
+                $script:WorktreeTextCache["src/lib.rs"] = 'pub fn quiet() {}'
+                Assert (-not (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs"))) "untracked files without macro names must not trigger the full scanner"
+                $script:NextStdout = '+panic!("tracked change");'
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs", "src/main.rs")) "an unrelated untracked file must not hide a tracked panic change"
+                $script:NextStdout = ""
+                $script:WorktreeTextCache["src/lib.rs"] = 'pub fn loud() { panic!("untracked"); }'
+                Assert (Test-RustPanicPolicyRelevantDiff -Pathspecs @("src/lib.rs")) "an untracked macro must trigger the full scanner"
 
                 $script:WorktreeUntrackedFileSet.Clear()
                 $script:NextExitCode = 0

@@ -977,10 +977,6 @@ function Test-RustPanicPolicyRelevantDiff {
         return $false
     }
 
-    $hasUntrackedProductionRust = $script:InspectWorktree -and @($Pathspecs | Where-Object {
-                $script:WorktreeUntrackedFileSet.Contains($_)
-            }).Count -gt 0
-
     $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
     if ($null -eq $script:PendingWorktreeRustDiff) {
         $result = Invoke-Native -FileName "git" -Arguments (@(
@@ -1003,10 +999,22 @@ function Test-RustPanicPolicyRelevantDiff {
             $pending.Process.Dispose()
         }
     }
-    # `git diff HEAD` cannot see untracked files, so keep their full scanner
-    # fail-closed after consuming the already-started query above.
-    if ($hasUntrackedProductionRust) {
-        return $true
+    if ($script:InspectWorktree) {
+        # Git cannot see untracked files. A file without any of these names
+        # cannot introduce a panic macro. Let the full scanner handle all
+        # other untracked files and keep its fallback if the diff failed.
+        foreach ($path in $Pathspecs) {
+            if (-not $script:WorktreeUntrackedFileSet.Contains($path)) {
+                continue
+            }
+            if ($result.ExitCode -ne 0) {
+                return $true
+            }
+            $content = Get-WorktreeText -Path $path
+            if ($null -eq $content -or $content -cmatch 'panic|todo|unimplemented|unreachable') {
+                return $true
+            }
+        }
     }
     if ($result.ExitCode -ne 0 -and $script:InspectWorktree -and $result.Output -match "unknown revision|bad revision|ambiguous argument 'HEAD'|Not a valid object name HEAD") {
         return $true
