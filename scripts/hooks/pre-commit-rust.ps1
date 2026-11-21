@@ -1250,7 +1250,7 @@ function Test-RustAddedPanicPatterns {
     $candidateFiles = [string[]]@($candidates | ForEach-Object { $_.File } | Sort-Object -Unique)
     try {
         if (-not $script:InspectWorktree -and $candidateFiles.Count -gt 2) {
-            Add-IndexTextCache -Pathspecs $candidateFiles
+            Add-IndexTextCache -Pathspecs $candidateFiles -AllowBudgetMiss
         }
         # Both comparison branches ultimately require a current production
         # candidate. Keep the original file set for the context comparison.

@@ -783,7 +783,7 @@ function Get-IndexBlobTexts {
 }
 
 function Add-IndexTextCache {
-    param([AllowEmptyCollection()][string[]]$Pathspecs)
+    param([AllowEmptyCollection()][string[]]$Pathspecs, [switch]$AllowBudgetMiss)
 
     if ($Pathspecs.Count -eq 0) {
         return
@@ -795,7 +795,10 @@ function Add-IndexTextCache {
     }
 
     $paths = [string[]]@($objectIdsByPath.Keys)
-    $blobTextsByObjectId = Get-IndexBlobTexts -ObjectIds ([string[]]@($paths | ForEach-Object { $objectIdsByPath[$_] }))
+    $blobTextsByObjectId = Get-IndexBlobTexts -ObjectIds ([string[]]@($paths | ForEach-Object { $objectIdsByPath[$_] })) -AllowBudgetMiss:$AllowBudgetMiss
+    if ($null -eq $blobTextsByObjectId) {
+        return
+    }
     foreach ($path in $paths) {
         $objectId = $objectIdsByPath[$path]
         if ($blobTextsByObjectId.ContainsKey($objectId)) {

@@ -27110,6 +27110,24 @@ pub fn docs() {
                     Assert (-not $script:FixtureContextWasRead) "exempt candidates must skip Git context comparison"
                 }
 
+                Reset-State
+                $savedBudget = $script:MaxBatchedBlobBytes
+                try {
+                    $script:MaxBatchedBlobBytes = 8
+                    Add-IndexTextCache -Pathspecs @("src/lib.rs") -AllowBudgetMiss
+                    Assert (-not $script:IndexTextCache.ContainsKey("src/lib.rs")) "oversized optional preload must leave the cache empty"
+                    Assert ((Get-IndexText -Path "src/lib.rs").Length -gt 8) "per-file reads must remain available after a preload budget miss"
+                    $rejected = $false
+                    try {
+                        Add-IndexTextCache -Pathspecs @("src/lib.rs")
+                    } catch {
+                        $rejected = $_.Exception.Message -match "above the .*byte pre-commit limit"
+                    }
+                    Assert $rejected "mandatory preloads must still enforce the batch budget"
+                } finally {
+                    $script:MaxBatchedBlobBytes = $savedBudget
+                }
+
                 $script:OriginalProductionSelector = ${function:Select-ProductionRustPanicMacroCandidates}
                 function Select-ProductionRustPanicMacroCandidates {
                     param([object[]]$Candidates, [switch]$Head)
