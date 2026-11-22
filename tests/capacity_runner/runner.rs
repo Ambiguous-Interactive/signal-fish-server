@@ -4542,7 +4542,13 @@ mod session_poll_tests {
 
     #[test]
     fn reused_ledger_matches_canonical_frames_at_sequence_and_payload_boundaries() {
-        for sender in ["r0p0", "r998p15", "r\"鱼\\\n"] {
+        for sender in [
+            "r0p0",
+            "r998p15",
+            "r\"鱼\\\n",
+            r#"r"seq":0"#,
+            r#"r"padding":"""#,
+        ] {
             for payload_bytes in [96, 1024, 1069, 16_384, 65_536] {
                 let mut ledger = OutgoingLedger::new(sender, payload_bytes).unwrap();
                 let reliable = ReliableOutgoingLedger::new(sender, payload_bytes).unwrap();
