@@ -2100,6 +2100,17 @@ impl ReliableOutgoingLedger {
         })
     }
 
+    fn append_padding(frame: &mut String, len: usize) {
+        const PADDING: &str = match std::str::from_utf8(&[b'x'; 1024]) {
+            Ok(padding) => padding,
+            Err(_) => panic!("padding is ASCII"),
+        };
+        for _ in 0..len / PADDING.len() {
+            frame.push_str(PADDING);
+        }
+        frame.push_str(&PADDING[..len % PADDING.len()]);
+    }
+
     fn encode(&self, seq: u64) -> Result<(Message, u64), String> {
         use std::fmt::Write as _;
 
@@ -2120,7 +2131,7 @@ impl ReliableOutgoingLedger {
         let sequence_at = self.sequence_at;
         if padding_at < sequence_at {
             frame.push_str(&self.template[..padding_at]);
-            frame.extend(std::iter::repeat_n('x', padding));
+            Self::append_padding(&mut frame, padding);
             frame.push_str(&self.template[padding_at..sequence_at]);
             write!(frame, "{seq}").map_err(|error| format!("serialize sequence: {error}"))?;
             frame.push_str(&self.template[sequence_at + 1..]);
@@ -2128,7 +2139,7 @@ impl ReliableOutgoingLedger {
             frame.push_str(&self.template[..sequence_at]);
             write!(frame, "{seq}").map_err(|error| format!("serialize sequence: {error}"))?;
             frame.push_str(&self.template[sequence_at + 1..padding_at]);
-            frame.extend(std::iter::repeat_n('x', padding));
+            Self::append_padding(&mut frame, padding);
             frame.push_str(&self.template[padding_at..]);
         }
         let application_bytes = count_u64(frame.len() - self.envelope_bytes);
@@ -4532,7 +4543,7 @@ mod session_poll_tests {
     #[test]
     fn reused_ledger_matches_canonical_frames_at_sequence_and_payload_boundaries() {
         for sender in ["r0p0", "r998p15", "r\"鱼\\\n"] {
-            for payload_bytes in [96, 1024, 16_384] {
+            for payload_bytes in [96, 1024, 1069, 16_384, 65_536] {
                 let mut ledger = OutgoingLedger::new(sender, payload_bytes).unwrap();
                 let reliable = ReliableOutgoingLedger::new(sender, payload_bytes).unwrap();
                 for seq in [0, 9, 10, 99, 100, 43_201, u64::MAX, 0, u64::MAX] {
