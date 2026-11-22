@@ -267,6 +267,8 @@ async fn websocket_handler_with_default(
     // surviving connection); only grossly oversized frames die here.
     let transport_cap = server.config().max_message_size.saturating_mul(2);
     let ws = ws
+        // Reduce the initial read allocation for each connection.
+        .read_buffer_size(16 * 1024)
         .max_frame_size(transport_cap)
         .max_message_size(transport_cap);
 
