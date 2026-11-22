@@ -2224,6 +2224,7 @@ async fn peer_task(
         };
 
         let mut prefer_read = true;
+        let mut quiescence = std::pin::pin!(tokio::time::sleep_until(until));
         loop {
             // Keep one send future alive while handling any number of inbound
             // frames. Recreating SinkExt::send after a read could resend a frame.
@@ -2386,7 +2387,7 @@ async fn peer_task(
                     let event = next_session_event(
                         writer.as_mut(),
                         &mut rx,
-                        until,
+                        quiescence.as_mut(),
                         churn_instants
                             .get(churn_cursor)
                             .map(|cycle| epoch + Duration::from_micros(cycle.disconnect_us)),
@@ -2434,7 +2435,7 @@ async fn peer_task(
                         &mut rx,
                         &registry,
                         epoch,
-                        until,
+                        quiescence.as_mut(),
                         hold_reads_until,
                         never_read,
                         &log,
@@ -2510,7 +2511,7 @@ async fn drain_after_failed_write<R>(
     reader: &mut R,
     registry: &SenderRegistry,
     epoch: Instant,
-    until: Instant,
+    mut quiescence: std::pin::Pin<&mut tokio::time::Sleep>,
     hold_reads_until: Option<Instant>,
     never_read: bool,
     log: &Arc<EventLog>,
@@ -2524,7 +2525,7 @@ async fn drain_after_failed_write<R>(
         match next_session_event(
             writer.as_mut(),
             reader,
-            until,
+            quiescence.as_mut(),
             None,
             hold_reads_until,
             never_read,
@@ -3065,12 +3066,12 @@ enum SessionEvent {
 }
 
 // Alternate ready reads and writes, while lifecycle deadlines always win.
-// A pending write remains pinned by the caller across receive events.
+// The caller keeps the pending write and quiescence timer pinned across receive events.
 #[allow(clippy::too_many_arguments)]
 async fn next_session_event<W, R>(
     mut writer: std::pin::Pin<&mut W>,
     reader: &mut R,
-    until: Instant,
+    quiescence: std::pin::Pin<&mut tokio::time::Sleep>,
     churn_at: Option<Instant>,
     resume_at: Option<Instant>,
     never_read: bool,
@@ -3080,11 +3081,12 @@ where
     W: std::future::Future<Output = SendOutcome>,
     R: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
+    let until = quiescence.deadline();
     let reads_held = resume_at.is_some_and(|at| Instant::now() < at);
     let event = tokio::select! {
         biased;
         _ = tokio::time::sleep_until(churn_at.unwrap_or(until)), if churn_at.is_some() => SessionEvent::Churn,
-        _ = tokio::time::sleep_until(until) => SessionEvent::Quiescence,
+        _ = quiescence => SessionEvent::Quiescence,
         _ = tokio::time::sleep_until(resume_at.unwrap_or(until)), if reads_held => SessionEvent::Resume,
         event = async {
             if *prefer_read {
@@ -5367,14 +5369,14 @@ mod session_poll_tests {
             let mut reader = futures_util::stream::iter(frames).chain(tail);
             let epoch = Instant::now();
             tokio::time::advance(Duration::from_secs(1)).await;
-            let until = Instant::now() + Duration::from_secs(1);
+            let mut quiescence = std::pin::pin!(tokio::time::sleep(Duration::from_secs(1)));
             let mut writer = std::pin::pin!(std::future::ready(failure));
             let mut prefer_read = false;
             assert!(matches!(
                 next_session_event(
                     writer.as_mut(),
                     &mut reader,
-                    until,
+                    quiescence.as_mut(),
                     None,
                     None,
                     false,
@@ -5388,7 +5390,7 @@ mod session_poll_tests {
                 &mut reader,
                 &registry,
                 epoch,
-                until,
+                quiescence.as_mut(),
                 None,
                 false,
                 &log,
@@ -5896,12 +5898,13 @@ mod session_poll_tests {
     async fn pending_write_does_not_block_ready_inbound() {
         let mut writer = std::pin::pin!(std::future::pending::<SendOutcome>());
         let mut reader = futures_util::stream::iter([Ok(Message::Ping(vec![1].into()))]);
+        let quiescence = std::pin::pin!(tokio::time::sleep(Duration::from_secs(1)));
         let event = tokio::time::timeout(
             Duration::from_millis(50),
             next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                Instant::now() + Duration::from_secs(1),
+                quiescence,
                 None,
                 None,
                 false,
@@ -5958,13 +5961,14 @@ mod session_poll_tests {
             ))
         });
         let mut reader = futures_util::stream::iter(frames).chain(futures_util::stream::pending());
-        let until = epoch + Duration::from_secs(1);
+        let mut quiescence =
+            std::pin::pin!(tokio::time::sleep_until(epoch + Duration::from_secs(1)));
         let mut prefer_read = true;
         for _ in 0..2 {
             let event = next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                until,
+                quiescence.as_mut(),
                 None,
                 None,
                 false,
@@ -5998,7 +6002,7 @@ mod session_poll_tests {
             next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                until,
+                quiescence.as_mut(),
                 None,
                 None,
                 false,
@@ -6015,14 +6019,16 @@ mod session_poll_tests {
     async fn overdue_writes_and_continuous_inbound_alternate_without_starvation() {
         let mut reader = futures_util::stream::repeat_with(|| Ok(Message::Ping(vec![1].into())));
         let mut prefer_read = true;
-        let until = Instant::now() + Duration::from_secs(1);
+        let mut quiescence = std::pin::pin!(tokio::time::sleep_until(
+            Instant::now() + Duration::from_secs(1)
+        ));
         for _ in 0..4 {
             let mut writer = std::pin::pin!(std::future::ready(SendOutcome::Sent));
             assert!(matches!(
                 next_session_event(
                     writer.as_mut(),
                     &mut reader,
-                    until,
+                    quiescence.as_mut(),
                     None,
                     None,
                     false,
@@ -6035,7 +6041,7 @@ mod session_poll_tests {
                 next_session_event(
                     writer.as_mut(),
                     &mut reader,
-                    until,
+                    quiescence.as_mut(),
                     None,
                     None,
                     false,
@@ -6045,12 +6051,28 @@ mod session_poll_tests {
                 SessionEvent::Send(SendOutcome::Sent)
             ));
         }
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let mut writer = std::pin::pin!(std::future::ready(SendOutcome::Sent));
+        assert!(matches!(
+            next_session_event(
+                writer.as_mut(),
+                &mut reader,
+                quiescence.as_mut(),
+                None,
+                None,
+                false,
+                &mut prefer_read
+            )
+            .await,
+            SessionEvent::Quiescence
+        ));
     }
 
     #[tokio::test(start_paused = true)]
     async fn read_pause_resumes_with_a_pending_write_and_never_read_stays_held() {
         let epoch = Instant::now();
-        let until = epoch + Duration::from_secs(2);
+        let mut quiescence =
+            std::pin::pin!(tokio::time::sleep_until(epoch + Duration::from_secs(2)));
         let resume = epoch + Duration::from_millis(600);
         let mut writer = std::pin::pin!(std::future::pending::<SendOutcome>());
         let mut reader = futures_util::stream::repeat_with(|| Ok(Message::Ping(Vec::new().into())));
@@ -6059,7 +6081,7 @@ mod session_poll_tests {
             next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                until,
+                quiescence.as_mut(),
                 None,
                 Some(resume),
                 false,
@@ -6073,7 +6095,7 @@ mod session_poll_tests {
             next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                until,
+                quiescence.as_mut(),
                 None,
                 Some(resume),
                 false,
@@ -6086,7 +6108,7 @@ mod session_poll_tests {
             next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                until,
+                quiescence.as_mut(),
                 None,
                 Some(resume),
                 true,
@@ -6108,14 +6130,16 @@ mod session_poll_tests {
             });
             let mut reader = PendingReader(DropCount(Arc::clone(&dropped)));
             let now = Instant::now();
+            let until = if churn {
+                now + Duration::from_secs(1)
+            } else {
+                now
+            };
+            let quiescence = std::pin::pin!(tokio::time::sleep_until(until));
             let event = next_session_event(
                 writer.as_mut(),
                 &mut reader,
-                if churn {
-                    now + Duration::from_secs(1)
-                } else {
-                    now
-                },
+                quiescence,
                 churn.then_some(now),
                 None,
                 false,
