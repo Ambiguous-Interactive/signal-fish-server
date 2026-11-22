@@ -31,7 +31,7 @@ use signal_fish_server::protocol::{
 // the alias keeps the mapping at the one boundary where they meet.
 use signal_fish_server::protocol::DeliveryClass as WireDeliveryClass;
 use tokio::time::Instant;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 
 use crate::artifacts::{
     self, BuildIdentity, ConfigProvenance, IntervalSample, SamplerTiming, ServerIdentity,
@@ -57,6 +57,9 @@ use crate::websocket_test_helpers::WsStream;
 /// Timeout for one client connect or handshake step (saturation-tolerant
 /// ceiling, same rationale as the shared harness `CONNECT_TIMEOUT`).
 const STEP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// WebSocket read chunk carried by each capacity-runner peer.
+const PEER_READ_BUFFER_BYTES: usize = 16 * 1024;
 
 /// Receive-buffer clamp for the slow-reader control's designated peer (see
 /// `websocket_test_helpers::connect_with_small_recv_buffer`).
@@ -1632,7 +1635,12 @@ async fn service_prepared_socket(
     }
 }
 
-/// Connect to `ws://{url}` with default buffers.
+fn peer_websocket_config() -> WebSocketConfig {
+    // Each connection reserves and clears its read chunk before reading.
+    WebSocketConfig::default().read_buffer_size(PEER_READ_BUFFER_BYTES)
+}
+
+/// Connect to a capacity-runner peer's WebSocket.
 async fn connect_plain(url: &str, progress: Option<&PeerProgress>) -> Result<WsStream, String> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let request = url
@@ -1644,7 +1652,11 @@ async fn connect_plain(url: &str, progress: Option<&PeerProgress>) -> Result<WsS
         }
         return match tokio::time::timeout(
             STEP_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(request, None, true),
+            tokio_tungstenite::connect_async_with_config(
+                request,
+                Some(peer_websocket_config()),
+                true,
+            ),
         )
         .await
         {
@@ -1684,8 +1696,12 @@ async fn connect_plain_with_socket(
         if let Some(progress) = progress {
             progress.connection_stage("websocket_upgrade");
         }
-        tokio_tungstenite::client_async(request, tokio_tungstenite::MaybeTlsStream::Plain(socket))
-            .await
+        tokio_tungstenite::client_async_with_config(
+            request,
+            tokio_tungstenite::MaybeTlsStream::Plain(socket),
+            Some(peer_websocket_config()),
+        )
+        .await
     };
     match tokio::time::timeout(STEP_TIMEOUT, connect).await {
         Ok(Ok((stream, _response))) => Ok(stream),
@@ -1727,8 +1743,11 @@ async fn connect_clamped(
     stream
         .set_nodelay(true)
         .map_err(|error| format!("set TCP_NODELAY: {error}"))?;
-    let handshake =
-        tokio_tungstenite::client_async(url, tokio_tungstenite::MaybeTlsStream::Plain(stream));
+    let handshake = tokio_tungstenite::client_async_with_config(
+        url,
+        tokio_tungstenite::MaybeTlsStream::Plain(stream),
+        Some(peer_websocket_config()),
+    );
     if let Some(progress) = progress {
         progress.connection_stage("websocket_upgrade");
     }
@@ -3894,14 +3913,14 @@ mod session_poll_tests {
                 let (stream, _) = listener.accept().await.unwrap();
                 tokio_tungstenite::accept_async(stream).await.unwrap()
             });
-            let stream = if clamped {
+            let mut stream = if clamped {
                 connect_clamped(&url, SLOW_READER_RECV_BUFFER_BYTES, None)
                     .await
                     .unwrap()
             } else {
                 connect_plain(&url, None).await.unwrap()
             };
-            let peer = accepting.await.unwrap();
+            let mut peer = accepting.await.unwrap();
             let tokio_tungstenite::MaybeTlsStream::Plain(socket) = stream.get_ref() else {
                 panic!("the local fixture uses plain TCP");
             };
@@ -3909,7 +3928,11 @@ mod session_poll_tests {
                 socket.nodelay().unwrap(),
                 "clamped={clamped}: the runner must not add Nagle delays"
             );
-            drop(peer);
+            assert_eq!(stream.get_config().read_buffer_size, 16 * 1024);
+            let frame = Message::Binary(vec![0x37; 64 * 1024].into());
+            let (sent, received) = tokio::join!(peer.send(frame.clone()), stream.next());
+            sent.unwrap();
+            assert_eq!(received.unwrap().unwrap(), frame);
         }
     }
 
