@@ -361,6 +361,8 @@ pub struct BuildIdentity {
     pub features: Features,
     pub clock: String,
     pub generator: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_workers: Option<usize>,
 }
 
 impl BuildIdentity {
@@ -374,6 +376,9 @@ impl BuildIdentity {
             features: Features::current(),
             clock: "tokio::time::Instant (monotonic; one shared run epoch)".to_string(),
             generator: "capacity_runner (in-tree)".to_string(),
+            runtime_workers: tokio::runtime::Handle::try_current()
+                .ok()
+                .map(|handle| handle.metrics().num_workers()),
         }
     }
 }
@@ -1485,6 +1490,7 @@ mod tests {
                 features: Features::current(),
                 clock: "fixture".into(),
                 generator: "fixture".into(),
+                runtime_workers: None,
             },
             None,
         )

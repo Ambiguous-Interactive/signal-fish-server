@@ -4269,12 +4269,12 @@ async fn hook_and_class_mismatches_are_refused_before_any_spawn() {
 ///   a_standalone_env_configured_run_writes_artifacts_and_replays -- --ignored
 /// ```
 ///
-/// In CI the default configuration runs the same small scenario as the
-/// acceptance gate; on a capacity host the variables shape the real cells.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+/// Set `CAPACITY_RUNNER_WORKERS` to vary the generator's Tokio worker
+/// count. The default is four. The manifest records the actual count.
+#[test]
 #[serial_test::serial]
 #[ignore = "standalone capacity-host entry point: shape via CAPACITY_RUNNER_*"]
-async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
+fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
     let config = RunConfig::from_env().expect("CAPACITY_RUNNER_* env is valid");
     let spool_budget = match std::env::var("CAPACITY_RUNNER_ROOM_SPOOL_BYTES") {
         Ok(value) => Some(
@@ -4285,9 +4285,23 @@ async fn a_standalone_env_configured_run_writes_artifacts_and_replays() {
         Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("invalid CAPACITY_RUNNER_ROOM_SPOOL_BYTES: {error}"),
     };
-    let outcome = runner::run_with_capture(config, spool_budget)
-        .await
+    let workers = match std::env::var("CAPACITY_RUNNER_WORKERS") {
+        Ok(value) => value
+            .parse::<std::num::NonZeroUsize>()
+            .expect("CAPACITY_RUNNER_WORKERS is a positive integer")
+            .get(),
+        Err(std::env::VarError::NotPresent) => 4,
+        Err(error) => panic!("invalid CAPACITY_RUNNER_WORKERS: {error}"),
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .enable_all()
+        .build()
+        .expect("build standalone capacity runtime");
+    let outcome = runtime
+        .block_on(runner::run_with_capture(config, spool_budget))
         .expect("run completes");
+    drop(runtime);
     println!("run {} valid: {}", outcome.run_id, outcome.summary.valid);
     for reason in &outcome.summary.reasons {
         println!("reason: {reason:?}");
@@ -6568,6 +6582,7 @@ async fn room_spool_live_capture_preserves_reliable_replay() {
     assert!(outcome.output_dir.join("rooms/rooms.json").is_file());
     let replay = artifacts::replay(&outcome.output_dir).unwrap();
     let manifest = artifacts::read_manifest(&outcome.output_dir).unwrap();
+    assert_eq!(manifest.build.runtime_workers, Some(4));
     let (plans, churn) = build_run_shape(&manifest.config).unwrap();
     let roster = plans
         .iter()
