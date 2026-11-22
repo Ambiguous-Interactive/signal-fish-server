@@ -186,17 +186,35 @@ fn room_spool_preserves_the_first_rejection_after_a_later_send() {
 }
 
 #[test]
+fn room_spool_queue_depth_survives_position_wrap_and_cancel() {
+    let (queue, mut writer_progress) = QueueDepth::new(2);
+    queue.submitted.set(usize::MAX - 1);
+    writer_progress.count = usize::MAX - 1;
+    writer_progress
+        .dequeued
+        .store(usize::MAX - 1, Ordering::Relaxed);
+
+    assert_eq!(queue.reserve(), 1);
+    assert_eq!(queue.reserve(), 2);
+    writer_progress.release();
+    assert_eq!(queue.reserve(), 2);
+    queue.cancel_reservation();
+    writer_progress.release();
+    assert_eq!(queue.reserve(), 1);
+    assert_eq!(queue.snapshot().pending_high_water_frames, 2);
+}
+
+#[test]
 fn room_spool_queue_refusal_never_commits_an_incomplete_index() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().to_path_buf();
     let (sender, receiver) = mpsc::sync_channel(1);
     let (resume, wait) = mpsc::channel();
     let path = root.clone();
-    let queue = Arc::new(QueueDepth::new(1));
-    let writer_queue = Arc::clone(&queue);
+    let (queue, mut writer_progress) = QueueDepth::new(1);
     let writer = thread::spawn(move || {
         wait.recv().unwrap();
-        let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+        let frames = receiver.into_iter().inspect(|_| writer_progress.release());
         write_rooms(&path, vec![None], 1024, frames)
     });
     let spool = RoomSpool {
@@ -802,11 +820,10 @@ fn room_spool_replays_a_burst_while_the_writer_is_paused() {
     let (sender, receiver) = mpsc::sync_channel(MAX_CAPTURE_QUEUE_FRAMES);
     let (resume, paused) = mpsc::channel();
     let path = root.clone();
-    let queue = Arc::new(QueueDepth::new(MAX_CAPTURE_QUEUE_FRAMES));
-    let writer_queue = Arc::clone(&queue);
+    let (queue, mut writer_progress) = QueueDepth::new(MAX_CAPTURE_QUEUE_FRAMES);
     let writer = thread::spawn(move || {
         paused.recv().unwrap();
-        let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+        let frames = receiver.into_iter().inspect(|_| writer_progress.release());
         write_rooms(&path, vec![None], 4 * 1024 * 1024, frames)
     });
     let spool = RoomSpool {
