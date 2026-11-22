@@ -3076,11 +3076,12 @@ where
 {
     let until = quiescence.deadline();
     let reads_held = resume_at.is_some_and(|at| Instant::now() < at);
+    // Select constructs disabled futures too. Defer optional sleeps until polling.
     let event = tokio::select! {
         biased;
-        _ = tokio::time::sleep_until(churn_at.unwrap_or(until)), if churn_at.is_some() => SessionEvent::Churn,
+        _ = async { tokio::time::sleep_until(churn_at.unwrap_or(until)).await }, if churn_at.is_some() => SessionEvent::Churn,
         _ = quiescence => SessionEvent::Quiescence,
-        _ = tokio::time::sleep_until(resume_at.unwrap_or(until)), if reads_held => SessionEvent::Resume,
+        _ = async { tokio::time::sleep_until(resume_at.unwrap_or(until)).await }, if reads_held => SessionEvent::Resume,
         event = async {
             if *prefer_read {
                 tokio::select! {
