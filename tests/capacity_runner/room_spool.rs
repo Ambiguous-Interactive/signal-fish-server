@@ -1,5 +1,6 @@
 //! Bounded append-only storage for the capacity runner's room evidence.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -68,35 +69,68 @@ pub(super) struct CaptureQueue {
 
 struct QueueDepth {
     capacity_frames: usize,
-    pending: AtomicUsize,
-    high_water: AtomicUsize,
+    submitted: Cell<usize>,
+    high_water: Cell<usize>,
+    dequeued: Arc<AtomicUsize>,
+}
+
+struct WriterProgress {
+    dequeued: Arc<AtomicUsize>,
+    count: usize,
+}
+
+impl WriterProgress {
+    fn release(&mut self) {
+        self.count = self.count.wrapping_add(1);
+        self.dequeued.store(self.count, Ordering::Relaxed);
+    }
 }
 
 impl QueueDepth {
-    fn new(capacity_frames: usize) -> Self {
-        Self {
-            capacity_frames,
-            pending: AtomicUsize::new(0),
-            high_water: AtomicUsize::new(0),
-        }
+    fn new(capacity_frames: usize) -> (Self, WriterProgress) {
+        let dequeued = Arc::new(AtomicUsize::new(0));
+        let writer = WriterProgress {
+            dequeued: Arc::clone(&dequeued),
+            count: 0,
+        };
+        (
+            Self {
+                capacity_frames,
+                submitted: Cell::new(0),
+                high_water: Cell::new(0),
+                dequeued,
+            },
+            writer,
+        )
     }
 
     fn reserve(&self) -> usize {
-        let count = self.pending.fetch_add(1, Ordering::Relaxed) + 1;
-        if count > self.high_water.load(Ordering::Relaxed) {
-            self.high_water.fetch_max(count, Ordering::Relaxed);
-        }
-        count
+        let submitted = self.submitted.get().wrapping_add(1);
+        let estimated = submitted.wrapping_sub(self.dequeued.load(Ordering::Relaxed));
+        self.submitted.set(submitted);
+        self.record_pending_peak(submitted, estimated);
+        estimated
     }
 
-    fn release(&self) {
-        self.pending.fetch_sub(1, Ordering::Relaxed);
+    fn record_pending_peak(&self, submitted: usize, estimated: usize) {
+        // An older dequeue count can only raise the estimate.
+        let previous_peak = self.high_water.get();
+        if estimated > previous_peak {
+            // The RMW sees the latest published count in modification order.
+            let dequeued = self.dequeued.fetch_add(0, Ordering::Relaxed);
+            let pending = submitted.wrapping_sub(dequeued);
+            self.high_water.set(previous_peak.max(pending));
+        }
+    }
+
+    fn cancel_reservation(&self) {
+        self.submitted.set(self.submitted.get().wrapping_sub(1));
     }
 
     fn snapshot(&self) -> CaptureQueue {
         CaptureQueue {
             capacity_frames: self.capacity_frames,
-            pending_high_water_frames: self.high_water.load(Ordering::Relaxed),
+            pending_high_water_frames: self.high_water.get(),
         }
     }
 }
@@ -111,7 +145,7 @@ pub(super) struct RoomSpool {
     sender: SyncSender<Frame>,
     writer: JoinHandle<Result<Index, String>>,
     rejected: AtomicBool,
-    queue: Arc<QueueDepth>,
+    queue: QueueDepth,
 }
 
 impl RoomSpool {
@@ -135,8 +169,7 @@ impl RoomSpool {
         let writers = open_writers(root, rooms)?;
         let (sender, receiver) = mpsc::sync_channel(queue_frames);
         let path = root.to_path_buf();
-        let queue = Arc::new(QueueDepth::new(queue_frames));
-        let writer_queue = Arc::clone(&queue);
+        let (queue, mut writer_progress) = QueueDepth::new(queue_frames);
         let writer = thread::Builder::new()
             .name("capacity-room-spool".into())
             .spawn(move || {
@@ -145,7 +178,7 @@ impl RoomSpool {
                 let frames = std::iter::from_fn(|| loop {
                     match receiver.try_recv() {
                         Ok(frame) => {
-                            writer_queue.release();
+                            writer_progress.release();
                             return Some(frame);
                         }
                         Err(TryRecvError::Empty) => thread::park_timeout(WRITER_POLL_INTERVAL),
@@ -191,12 +224,13 @@ impl RoomSpool {
         self.sender
             .try_send(Frame { room, event })
             .map(|()| {
+                // Estimated depth gives a wake hint. The timed poll covers missed hints.
                 if pending == WRITER_WAKE_FRAMES.min(self.queue.capacity_frames) {
                     self.writer.thread().unpark();
                 }
             })
             .map_err(|error| {
-                self.queue.release();
+                self.queue.cancel_reservation();
                 match error {
                     TrySendError::Full(_) => "room spool queue exhausted".into(),
                     TrySendError::Disconnected(_) => "room spool writer unavailable".into(),
