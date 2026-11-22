@@ -401,6 +401,21 @@ fn open_writers(root: &Path, rooms: usize) -> Result<Vec<Option<BufWriter<File>>
     }
 }
 
+fn append_room_bytes(writer: &mut BufWriter<impl Write>, bytes: &[u8]) -> std::io::Result<()> {
+    debug_assert!(bytes.len() <= writer.capacity());
+    let available = writer.capacity() - writer.buffer().len();
+    if bytes.len() <= available {
+        return writer.write_all(bytes);
+    }
+
+    // Fill the block before flushing so the next append starts on a block
+    // boundary. Only a room's final buffer can flush short.
+    let (first, rest) = bytes.split_at(available);
+    writer.write_all(first)?;
+    writer.flush()?;
+    writer.write_all(rest)
+}
+
 fn write_rooms(
     root: &Path,
     mut writers: Vec<Option<BufWriter<File>>>,
@@ -433,10 +448,9 @@ fn write_rooms(
             *slot = Some(open_writer(root, room)?);
         }
         let writer = slot.as_mut().expect("open room spool writer");
-        writer
-            .write_all(&size.to_le_bytes())
-            .and_then(|()| writer.write_all(&(ordinal as u64).to_le_bytes()))
-            .and_then(|()| writer.write_all(bytes))
+        append_room_bytes(writer, &size.to_le_bytes())
+            .and_then(|()| append_room_bytes(writer, &(ordinal as u64).to_le_bytes()))
+            .and_then(|()| append_room_bytes(writer, bytes))
             .map_err(|error| format!("write room {room} spool: {error}"))?;
         file.bytes += framed;
         file.rows += 1;

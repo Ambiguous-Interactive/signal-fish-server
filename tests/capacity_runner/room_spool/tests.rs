@@ -793,3 +793,37 @@ fn room_spool_preserves_raw_fault_and_ledger_reason_precedence() {
         serde_json::to_value(expected).unwrap()
     );
 }
+#[test]
+fn room_spool_flushes_full_blocks_before_the_final_tail() {
+    #[derive(Default)]
+    struct RecordWrites(Vec<Vec<u8>>);
+
+    impl Write for RecordWrites {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0.push(data.to_vec());
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = BufWriter::with_capacity(WRITER_BUFFER, RecordWrites::default());
+    let data: Vec<u8> = (0..=u8::MAX).cycle().take(WRITER_BUFFER * 2 + 17).collect();
+    for frame in data.chunks(4_000) {
+        let (length, remainder) = frame.split_at(2);
+        let (ordinal, body) = remainder.split_at(8);
+        append_room_bytes(&mut writer, length).unwrap();
+        append_room_bytes(&mut writer, ordinal).unwrap();
+        append_room_bytes(&mut writer, body).unwrap();
+    }
+    writer.flush().unwrap();
+
+    let writes = &writer.get_ref().0;
+    assert_eq!(
+        writes.iter().map(Vec::len).collect::<Vec<_>>(),
+        [WRITER_BUFFER, WRITER_BUFFER, 17]
+    );
+    assert_eq!(writes.concat(), data);
+}
