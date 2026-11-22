@@ -793,37 +793,51 @@ fn room_spool_preserves_raw_fault_and_ledger_reason_precedence() {
         serde_json::to_value(expected).unwrap()
     );
 }
+
 #[test]
-fn room_spool_flushes_full_blocks_before_the_final_tail() {
-    #[derive(Default)]
-    struct RecordWrites(Vec<Vec<u8>>);
+fn room_spool_replays_a_burst_while_the_writer_is_paused() {
+    const BURST: u64 = 40_000;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let (sender, receiver) = mpsc::sync_channel(MAX_CAPTURE_QUEUE_FRAMES);
+    let (resume, paused) = mpsc::channel();
+    let path = root.clone();
+    let queue = Arc::new(QueueDepth::new(MAX_CAPTURE_QUEUE_FRAMES));
+    let writer_queue = Arc::clone(&queue);
+    let writer = thread::spawn(move || {
+        paused.recv().unwrap();
+        let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+        write_rooms(&path, vec![None], 4 * 1024 * 1024, frames)
+    });
+    let spool = RoomSpool {
+        root,
+        sender,
+        writer,
+        rejected: AtomicBool::new(false),
+        queue,
+    };
+    let config = crate::scenario_config(crate::config::Encoding::V3Json);
+    let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+    let mut event = crate::complete_records(&plans).sent.remove(0);
+    let enqueue = (0..BURST).try_for_each(|seq| {
+        event.seq = seq;
+        spool.push(0, RoomEvent::Sent(event.clone()))
+    });
 
-    impl Write for RecordWrites {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.0.push(data.to_vec());
-            Ok(data.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut writer = BufWriter::with_capacity(WRITER_BUFFER, RecordWrites::default());
-    let data: Vec<u8> = (0..=u8::MAX).cycle().take(WRITER_BUFFER * 2 + 17).collect();
-    for frame in data.chunks(4_000) {
-        let (length, remainder) = frame.split_at(2);
-        let (ordinal, body) = remainder.split_at(8);
-        append_room_bytes(&mut writer, length).unwrap();
-        append_room_bytes(&mut writer, ordinal).unwrap();
-        append_room_bytes(&mut writer, body).unwrap();
-    }
-    writer.flush().unwrap();
-
-    let writes = &writer.get_ref().0;
-    assert_eq!(
-        writes.iter().map(Vec::len).collect::<Vec<_>>(),
-        [WRITER_BUFFER, WRITER_BUFFER, 17]
-    );
-    assert_eq!(writes.concat(), data);
+    resume.send(()).unwrap();
+    let finished = spool.finish();
+    enqueue.unwrap();
+    finished.unwrap();
+    let replay = RoomReplay::open(temp.path(), 1).unwrap();
+    let mut seen = 0;
+    replay
+        .visit_ordered(BURST, |event| {
+            let RoomEvent::Sent(sent) = event else {
+                panic!("expected a send");
+            };
+            assert_eq!(sent.seq, seen);
+            seen += 1;
+        })
+        .unwrap();
+    assert_eq!(seen, BURST);
 }
