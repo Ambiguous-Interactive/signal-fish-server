@@ -705,70 +705,82 @@ pub(super) async fn run_with_capture(
     // One joined peer: its plan identity, the session halves, its PlayerId
     // (the registry key), and the join snapshot's `(id, seq tail)` stamps.
     struct JoinedPeer {
-        name: String,
-        room: u32,
+        plan: SenderPlan,
         sink: WsSink,
         rx: WsReceiver,
         player_id: PlayerId,
         tails: crate::snapshot_tails::SnapshotTails,
     }
-    let mut peers: Vec<JoinedPeer> = Vec::new();
+    let (release_joins, joined) = tokio::sync::watch::channel(false);
+    let mut prepared = tokio::task::JoinSet::new();
     for room in 0..config.rooms {
         let preparation_deadline = Instant::now() + STEP_TIMEOUT * 6;
-        let room_plans: Vec<&SenderPlan> = plans.iter().filter(|plan| plan.room == room).collect();
-        let joins = room_plans.into_iter().map(|plan| {
-            let config = &config;
-            let ws_url = &ws_url;
-            let log = &log;
-            let progress = peer_progress
-                .get(&plan.name)
-                .expect("planned peer progress");
-            let designated = slow_reader_name(config).as_deref()
-                == Some(RunConfig::peer_name(plan.room, plan.player).as_str())
-                || paused_reader_name(config).as_deref()
-                    == Some(RunConfig::peer_name(plan.room, plan.player).as_str());
-            // The experiment's opaque sender: peer 0 negotiates rkyv (the
-            // overlay enables it; the negotiation verifies the server
-            // advertised it).
-            let game_data_format = opaque_sender_format(config, plan.player);
-            async move {
-                let result = tokio::time::timeout_at(
-                    preparation_deadline,
-                    connect_and_join(
-                        ws_url,
-                        config.encoding,
-                        config.room_code(plan.room),
-                        config.players_per_room,
-                        plan,
-                        designated,
-                        game_data_format,
-                        Some(progress),
-                        false,
-                    ),
-                )
-                .await
-                .unwrap_or_else(|_| Err("initial preparation deadline exceeded".into()));
-                if result.is_ok() {
-                    progress.connection_stage("prepared");
-                } else {
-                    progress.returned();
-                    if let Err(failure) = &result {
-                        log.push_join_failure(format!("{}: {failure}", plan.name));
+        let mut joins = plans
+            .iter()
+            .filter(|plan| plan.room == room)
+            .map(|plan| {
+                let config = &config;
+                let ws_url = &ws_url;
+                let log = &log;
+                let progress = peer_progress
+                    .get(&plan.name)
+                    .expect("planned peer progress");
+                let designated = slow_reader_name(config).as_deref()
+                    == Some(RunConfig::peer_name(plan.room, plan.player).as_str())
+                    || paused_reader_name(config).as_deref()
+                        == Some(RunConfig::peer_name(plan.room, plan.player).as_str());
+                // The experiment's opaque sender: peer 0 negotiates rkyv (the
+                // overlay enables it; the negotiation verifies the server
+                // advertised it).
+                let game_data_format = opaque_sender_format(config, plan.player);
+                async move {
+                    let result = tokio::time::timeout_at(
+                        preparation_deadline,
+                        connect_and_join(
+                            ws_url,
+                            config.encoding,
+                            config.room_code(plan.room),
+                            config.players_per_room,
+                            plan,
+                            designated,
+                            game_data_format,
+                            Some(progress),
+                            false,
+                        ),
+                    )
+                    .await
+                    .unwrap_or_else(|_| Err("initial preparation deadline exceeded".into()));
+                    if result.is_ok() {
+                        progress.connection_stage("prepared");
+                    } else {
+                        progress.returned();
+                        if let Err(failure) = &result {
+                            log.push_join_failure(format!("{}: {failure}", plan.name));
+                        }
                     }
+                    (plan, progress, result)
                 }
-                result
-            }
-        });
-        let results = futures_util::future::join_all(joins).await;
-        for (plan, result) in plans.iter().filter(|p| p.room == room).zip(results) {
-            if let Ok((sink, rx, player_id, tails)) = result {
-                peers.push(JoinedPeer {
-                    name: plan.name.clone(),
-                    room: plan.room,
-                    sink,
-                    rx,
-                    player_id,
-                    tails,
+            })
+            .collect::<futures_util::stream::FuturesUnordered<_>>();
+        while let Some((plan, progress, result)) = joins.next().await {
+            if let Ok((sink, mut rx, player_id, tails)) = result {
+                let plan = plan.clone();
+                let progress = progress.clone();
+                let log = Arc::clone(&log);
+                let joined = joined.clone();
+                prepared.spawn(async move {
+                    if let Err(error) = service_prepared_socket(&mut rx, joined).await {
+                        progress.returned();
+                        log.push_join_failure(format!("{}: {error}", plan.name));
+                        return None;
+                    }
+                    Some(JoinedPeer {
+                        plan,
+                        sink,
+                        rx,
+                        player_id,
+                        tails,
+                    })
                 });
             }
         }
@@ -878,20 +890,24 @@ pub(super) async fn run_with_capture(
     // bounded kernel handoff and outbound queue fill), then drains.
     let paused_reader = paused_reader_name(&config);
     let mut handles = Vec::new();
+    release_joins.send_replace(true);
+    let mut peers = Vec::new();
+    while let Some(result) = prepared.join_next().await {
+        if let Some(peer) = result.map_err(|error| format!("capacity preparation task: {error}"))? {
+            peers.push(peer);
+        }
+    }
+    peers.sort_unstable_by_key(|peer| (peer.plan.room, peer.plan.player));
     for JoinedPeer {
-        name,
-        room,
+        plan,
         sink,
         rx,
         player_id,
         tails,
     } in peers
     {
-        let plan = plans
-            .iter()
-            .find(|plan| plan.name == name && plan.room == room)
-            .cloned()
-            .expect("peer has a schedule");
+        let name = plan.name.clone();
+        let room = plan.room;
         let hold_reads_for = paused_reader
             .as_deref()
             .filter(|designated| *designated == name.as_str())
@@ -1567,6 +1583,50 @@ fn paused_reader_name(config: &RunConfig) -> Option<String> {
         .pause_reads
         .is_some()
         .then(|| RunConfig::peer_name(0, 0))
+}
+
+/// Poll the read half so tungstenite flushes automatic Pong replies during setup.
+async fn service_prepared_socket(
+    rx: &mut WsReceiver,
+    mut release: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    loop {
+        let frame = tokio::select! {
+            biased;
+            released = release.wait_for(|released| *released) => {
+                return released.map(drop).map_err(|_| "join preparation cancelled".into());
+            }
+            frame = rx.next() => frame,
+        };
+        match frame {
+            Some(Ok(Message::Text(text))) => match serde_json::from_str::<ServerMessage>(&text) {
+                Ok(ServerMessage::GameData { .. } | ServerMessage::DeliveryReport(_)) => {
+                    return Err("delivery evidence arrived before workload start".into());
+                }
+                Ok(ServerMessage::Error {
+                    message,
+                    error_code,
+                }) => {
+                    return Err(format!(
+                        "server error during preparation: {message} ({error_code:?})"
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(format!("invalid server frame during preparation: {error}"))
+                }
+            },
+            Some(Ok(Message::Binary(_))) => {
+                return Err("binary evidence arrived before workload start".into())
+            }
+            Some(Ok(Message::Close(frame))) => {
+                return Err(format!("server closed during preparation: {frame:?}"))
+            }
+            Some(Ok(_)) => {}
+            Some(Err(error)) => return Err(format!("socket failed during preparation: {error}")),
+            None => return Err("socket ended during preparation".into()),
+        }
+    }
 }
 
 /// Connect to `ws://{url}` with default buffers.
@@ -3182,6 +3242,79 @@ mod session_poll_tests {
             );
             assert!(take_interval_samples(&retained).is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn prepared_peers_answer_pings_while_later_rooms_join() {
+        use signal_fish_server::protocol::{LobbyState, RoomJoinedPayload};
+
+        let output = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = crate::scenario_config(Encoding::V2Json);
+        config.rooms = 2;
+        config.players_per_room = 2;
+        config.endpoint = Some(format!("ws://{}", listener.local_addr().unwrap()));
+        config.output_dir = output.path().to_path_buf();
+        let run = tokio::spawn(run(config));
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut first_room = Vec::new();
+            for _ in 0..2 {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+                let Message::Text(request) = socket.next().await.unwrap().unwrap() else {
+                    panic!("expected room join");
+                };
+                let ClientMessage::JoinRoom {
+                    room_code: Some(room_code),
+                    ..
+                } = serde_json::from_str(&request).unwrap()
+                else {
+                    panic!("expected a join with a room code");
+                };
+                let joined = ServerMessage::RoomJoined(Box::new(RoomJoinedPayload {
+                    room_id: PlayerId::new_v4(),
+                    room_code,
+                    player_id: PlayerId::new_v4(),
+                    game_name: GAME_NAME.to_string(),
+                    max_players: 2,
+                    supports_authority: false,
+                    current_players: Vec::new(),
+                    is_authority: false,
+                    lobby_state: LobbyState::Lobby,
+                    ready_players: Vec::new(),
+                    relay_type: "WebSocket".to_string(),
+                    current_spectators: Vec::new(),
+                    ice_servers: Vec::new(),
+                    reconnection_token: None,
+                }));
+                socket
+                    .send(Message::Text(
+                        serde_json::to_string(&joined).unwrap().into(),
+                    ))
+                    .await
+                    .unwrap();
+                first_room.push(socket);
+            }
+
+            // Let the second room connect without completing its handshake.
+            let later_socket = listener.accept().await.unwrap().0;
+            for socket in &mut first_room {
+                for id in [b"preparation-1", b"preparation-2"] {
+                    let payload = bytes::Bytes::from_static(id);
+                    socket.send(Message::Ping(payload.clone())).await.unwrap();
+                    assert_eq!(
+                        socket.next().await.unwrap().unwrap(),
+                        Message::Pong(payload)
+                    );
+                }
+            }
+            drop(later_socket);
+        })
+        .await;
+        run.abort();
+        assert!(run.await.unwrap_err().is_cancelled());
+        result.expect("prepared peers must answer without waiting for the workload epoch");
+        assert!(!output.path().join(artifacts::SUMMARY_FILE).exists());
     }
 
     #[tokio::test]
