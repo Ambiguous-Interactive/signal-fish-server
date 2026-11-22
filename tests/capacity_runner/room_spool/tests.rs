@@ -793,3 +793,51 @@ fn room_spool_preserves_raw_fault_and_ledger_reason_precedence() {
         serde_json::to_value(expected).unwrap()
     );
 }
+
+#[test]
+fn room_spool_replays_a_burst_while_the_writer_is_paused() {
+    const BURST: u64 = 40_000;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_path_buf();
+    let (sender, receiver) = mpsc::sync_channel(MAX_CAPTURE_QUEUE_FRAMES);
+    let (resume, paused) = mpsc::channel();
+    let path = root.clone();
+    let queue = Arc::new(QueueDepth::new(MAX_CAPTURE_QUEUE_FRAMES));
+    let writer_queue = Arc::clone(&queue);
+    let writer = thread::spawn(move || {
+        paused.recv().unwrap();
+        let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+        write_rooms(&path, vec![None], 4 * 1024 * 1024, frames)
+    });
+    let spool = RoomSpool {
+        root,
+        sender,
+        writer,
+        rejected: AtomicBool::new(false),
+        queue,
+    };
+    let config = crate::scenario_config(crate::config::Encoding::V3Json);
+    let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+    let mut event = crate::complete_records(&plans).sent.remove(0);
+    let enqueue = (0..BURST).try_for_each(|seq| {
+        event.seq = seq;
+        spool.push(0, RoomEvent::Sent(event.clone()))
+    });
+
+    resume.send(()).unwrap();
+    let finished = spool.finish();
+    enqueue.unwrap();
+    finished.unwrap();
+    let replay = RoomReplay::open(temp.path(), 1).unwrap();
+    let mut seen = 0;
+    replay
+        .visit_ordered(BURST, |event| {
+            let RoomEvent::Sent(sent) = event else {
+                panic!("expected a send");
+            };
+            assert_eq!(sent.seq, seen);
+            seen += 1;
+        })
+        .unwrap();
+    assert_eq!(seen, BURST);
+}

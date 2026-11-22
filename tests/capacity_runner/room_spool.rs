@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::records::{GapEvent, ReceiptEvent, SentEvent};
 
+// A 16-room capture offers about 246,000 frames/s. This bound can hold a
+// measured 161 ms writer stall at that rate.
+pub(super) const MAX_CAPTURE_QUEUE_FRAMES: usize = 65_536;
 const FRAME_LIMIT: usize = 4096;
 const HEADER_BYTES: u64 = 10;
 const WRITER_BUFFER: usize = 16 * 1024;
@@ -121,7 +124,7 @@ impl RoomSpool {
         if rooms == 0
             || rooms > 999
             || queue_frames == 0
-            || queue_frames > 16_384
+            || queue_frames > MAX_CAPTURE_QUEUE_FRAMES
             || byte_budget == 0
         {
             return Err("invalid room spool limits".into());

@@ -607,7 +607,7 @@ pub(super) async fn run_with_capture(
         let spool = crate::room_spool::RoomSpool::create(
             &config.output_dir.join("rooms"),
             config.rooms as usize,
-            16_384,
+            crate::room_spool::MAX_CAPTURE_QUEUE_FRAMES,
             byte_budget,
         )?;
         EventLog::for_partitioned_plans(&plans, spool)?
