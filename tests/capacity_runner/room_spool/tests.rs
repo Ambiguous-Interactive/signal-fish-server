@@ -110,7 +110,9 @@ fn room_spool_rejects_budget_and_write_failures_as_incomplete() {
         room: 0,
         event: sent.clone(),
     }];
-    let error = write_rooms(vec![writer], 1024, frames).err().unwrap();
+    let error = write_rooms(&blocked, vec![Some(writer)], 1024, frames)
+        .err()
+        .unwrap();
     assert!(error.contains("flush room 0"), "{error}");
     assert!(RoomReplay::open(&blocked, 1).is_err());
 
@@ -128,6 +130,7 @@ fn room_spool_rejects_budget_and_write_failures_as_incomplete() {
     assert!(RoomReplay::open(&rejected, 1).is_err());
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn room_spool_opens_empty_room_files_before_capture() {
     let temp = tempfile::tempdir().unwrap();
@@ -140,6 +143,22 @@ fn room_spool_opens_empty_room_files_before_capture() {
     spool.finish().unwrap();
     let replay = RoomReplay::open(&root, 3).unwrap();
     replay.validate_ordinals(0).unwrap();
+}
+
+#[test]
+fn room_spool_can_finish_sparse_capture_with_limited_descriptors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("rooms");
+    let rooms = 96;
+    let spool = RoomSpool::create(&root, rooms, 1, 1024).unwrap();
+    let config = crate::scenario_config(crate::config::Encoding::V3Json);
+    let (plans, _) = crate::schedule::build_run_shape(&config).unwrap();
+    let sent = RoomEvent::Sent(crate::complete_records(&plans).sent.remove(0));
+    spool.push(rooms - 1, sent).unwrap();
+    spool.finish().unwrap();
+
+    let replay = RoomReplay::open(&root, rooms).unwrap();
+    replay.validate_ordinals(1).unwrap();
 }
 
 #[test]
@@ -172,13 +191,13 @@ fn room_spool_queue_refusal_never_commits_an_incomplete_index() {
     let root = temp.path().to_path_buf();
     let (sender, receiver) = mpsc::sync_channel(1);
     let (resume, wait) = mpsc::channel();
-    let room_writer = open_writer(&root, 0).unwrap();
+    let path = root.clone();
     let queue = Arc::new(QueueDepth::new(1));
     let writer_queue = Arc::clone(&queue);
     let writer = thread::spawn(move || {
         wait.recv().unwrap();
         let frames = receiver.into_iter().inspect(|_| writer_queue.release());
-        write_rooms(vec![room_writer], 1024, frames)
+        write_rooms(&path, vec![None], 1024, frames)
     });
     let spool = RoomSpool {
         root,
@@ -262,8 +281,13 @@ fn room_spool_replay_memory_profile() {
                             .map(frame),
                     )
             });
-            let index =
-                write_rooms(open_writers(&spool, rooms).unwrap(), u64::MAX, frames).unwrap();
+            let index = write_rooms(
+                &spool,
+                open_writers(&spool, rooms).unwrap(),
+                u64::MAX,
+                frames,
+            )
+            .unwrap();
             crate::artifacts::write_json(spool.join(INDEX), &index).unwrap();
             crate::artifacts::write_deliveries(&root, &crate::complete_records(&plans)).unwrap();
             println!(
