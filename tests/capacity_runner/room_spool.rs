@@ -5,9 +5,10 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, SyncSender, TryRecvError, TrySendError};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,8 @@ use crate::records::{GapEvent, ReceiptEvent, SentEvent};
 const FRAME_LIMIT: usize = 4096;
 const HEADER_BYTES: u64 = 10;
 const WRITER_BUFFER: usize = 16 * 1024;
+const WRITER_WAKE_FRAMES: usize = 64;
+const WRITER_POLL_INTERVAL: Duration = Duration::from_micros(500);
 const FORMAT: u32 = 1;
 const INDEX: &str = "rooms.json";
 
@@ -73,11 +76,12 @@ impl QueueDepth {
         }
     }
 
-    fn reserve(&self) {
+    fn reserve(&self) -> usize {
         let count = self.pending.fetch_add(1, Ordering::Relaxed) + 1;
         if count > self.high_water.load(Ordering::Relaxed) {
             self.high_water.fetch_max(count, Ordering::Relaxed);
         }
+        count
     }
 
     fn release(&self) {
@@ -128,7 +132,18 @@ impl RoomSpool {
         let writer = thread::Builder::new()
             .name("capacity-room-spool".into())
             .spawn(move || {
-                let frames = receiver.into_iter().inspect(|_| writer_queue.release());
+                // A blocking channel receive wakes the writer on isolated
+                // frames. Wait for a group or a short interval instead.
+                let frames = std::iter::from_fn(|| loop {
+                    match receiver.try_recv() {
+                        Ok(frame) => {
+                            writer_queue.release();
+                            return Some(frame);
+                        }
+                        Err(TryRecvError::Empty) => thread::park_timeout(WRITER_POLL_INTERVAL),
+                        Err(TryRecvError::Disconnected) => return None,
+                    }
+                });
                 write_rooms(&path, rooms, byte_budget, frames)
             })
             .map_err(|error| format!("start room spool writer: {error}"))?;
@@ -164,9 +179,14 @@ impl RoomSpool {
         if name_bytes > FRAME_LIMIT - 256 {
             return Err("room event identity exceeds frame budget".into());
         }
-        self.queue.reserve();
+        let pending = self.queue.reserve();
         self.sender
             .try_send(Frame { room, event })
+            .map(|()| {
+                if pending == WRITER_WAKE_FRAMES.min(self.queue.capacity_frames) {
+                    self.writer.thread().unpark();
+                }
+            })
             .map_err(|error| {
                 self.queue.release();
                 match error {
@@ -182,6 +202,7 @@ impl RoomSpool {
 
     pub(super) fn finish(self) -> Result<(), String> {
         drop(self.sender);
+        self.writer.thread().unpark();
         let mut index = self
             .writer
             .join()
