@@ -521,7 +521,8 @@ impl RoomReplay {
         mut visit: impl FnMut(u64, RoomEvent<String>),
     ) -> Result<(), String> {
         let mut reader = self.reader(room, row_budget)?;
-        while let Some((ordinal, event)) = reader.next()? {
+        let mut frame = [0; FRAME_LIMIT];
+        while let Some((ordinal, event)) = reader.next(&mut frame)? {
             visit(ordinal, event);
         }
         Ok(())
@@ -533,7 +534,8 @@ impl RoomReplay {
         row_budget: u64,
         visit: impl FnMut(RoomEvent<String>),
     ) -> Result<(), String> {
-        self.visit_ordered_with(row_budget, ReplayRoom::next, visit)
+        let mut frame = [0; FRAME_LIMIT];
+        self.visit_ordered_with(row_budget, |reader| reader.next(&mut frame), visit)
     }
 
     pub(super) fn validate_ordinals(&self, row_budget: u64) -> Result<(), String> {
@@ -672,9 +674,11 @@ struct ReplayRoom {
 }
 
 impl ReplayRoom {
-    fn next(&mut self) -> Result<Option<(u64, RoomEvent<String>)>, String> {
-        let mut frame = [0; FRAME_LIMIT];
-        let Some((ordinal, bytes)) = self.next_frame(&mut frame)? else {
+    fn next(
+        &mut self,
+        frame: &mut [u8; FRAME_LIMIT],
+    ) -> Result<Option<(u64, RoomEvent<String>)>, String> {
+        let Some((ordinal, bytes)) = self.next_frame(frame)? else {
             return Ok(None);
         };
         let mut deserializer = rmp_serde::Deserializer::new(std::io::Cursor::new(bytes));
