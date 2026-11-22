@@ -2052,6 +2052,101 @@ impl OutgoingLedger {
     }
 }
 
+/// A canonical reliable wire frame with gaps for padding and the sequence.
+struct ReliableOutgoingLedger {
+    template: String,
+    padding_at: usize,
+    sequence_at: usize,
+    initial_padding: usize,
+    envelope_bytes: usize,
+}
+
+impl ReliableOutgoingLedger {
+    fn new(sender: &str, payload_bytes: u32) -> Result<Self, String> {
+        let data = json!({"ledger_sender": sender, "seq": 0, "padding": ""});
+        let metadata_bytes = json_byte_count(&data)
+            .map_err(|error| format!("serialize ledger metadata: {error}"))?;
+        let initial_padding = count_usize(payload_bytes).checked_sub(metadata_bytes).ok_or_else(|| {
+            format!("payload_bytes ({payload_bytes}) is below ledger metadata size ({metadata_bytes}) for {sender} seq 0")
+        })?;
+        let template = serde_json::to_string(&ClientMessage::GameData {
+            data,
+            class: None,
+            key: None,
+        })
+        .map_err(|error| format!("serialize: {error}"))?;
+        // Locate the unescaped field names in the canonical serialization.
+        // Quoted text inside the sender is escaped and cannot match these literals.
+        const PADDING: &str = r#""padding":"""#;
+        const SEQUENCE: &str = r#""seq":0"#;
+        let padding_at = template
+            .find(PADDING)
+            .map(|offset| offset + PADDING.len() - 1)
+            .ok_or_else(|| "canonical GameData has no empty ledger padding".to_string())?;
+        let sequence_at = template
+            .find(SEQUENCE)
+            .map(|offset| offset + SEQUENCE.len() - 1)
+            .ok_or_else(|| "canonical GameData has no zero ledger sequence".to_string())?;
+        let envelope_bytes = template
+            .len()
+            .checked_sub(metadata_bytes)
+            .ok_or_else(|| "serialized GameData frame is smaller than its ledger".to_string())?;
+        Ok(Self {
+            template,
+            padding_at,
+            sequence_at,
+            initial_padding,
+            envelope_bytes,
+        })
+    }
+
+    fn append_padding(frame: &mut String, len: usize) {
+        const PADDING: &str = match std::str::from_utf8(&[b'x'; 1024]) {
+            Ok(padding) => padding,
+            Err(_) => panic!("padding is ASCII"),
+        };
+        for _ in 0..len / PADDING.len() {
+            frame.push_str(PADDING);
+        }
+        frame.push_str(&PADDING[..len % PADDING.len()]);
+    }
+
+    fn encode(&self, seq: u64) -> Result<(Message, u64), String> {
+        use std::fmt::Write as _;
+
+        let extra_digits = seq.checked_ilog10().unwrap_or(0) as usize;
+        let padding = self
+            .initial_padding
+            .checked_sub(extra_digits)
+            .ok_or_else(|| {
+                let metadata_bytes = self.template.len() - self.envelope_bytes;
+                let payload_bytes = metadata_bytes + self.initial_padding;
+                format!(
+                    "payload_bytes ({payload_bytes}) is below ledger metadata size ({})",
+                    metadata_bytes + extra_digits
+                )
+            })?;
+        let mut frame = String::with_capacity(self.template.len() + self.initial_padding);
+        let padding_at = self.padding_at;
+        let sequence_at = self.sequence_at;
+        if padding_at < sequence_at {
+            frame.push_str(&self.template[..padding_at]);
+            Self::append_padding(&mut frame, padding);
+            frame.push_str(&self.template[padding_at..sequence_at]);
+            write!(frame, "{seq}").map_err(|error| format!("serialize sequence: {error}"))?;
+            frame.push_str(&self.template[sequence_at + 1..]);
+        } else {
+            frame.push_str(&self.template[..sequence_at]);
+            write!(frame, "{seq}").map_err(|error| format!("serialize sequence: {error}"))?;
+            frame.push_str(&self.template[sequence_at + 1..padding_at]);
+            Self::append_padding(&mut frame, padding);
+            frame.push_str(&self.template[padding_at..]);
+        }
+        let application_bytes = count_u64(frame.len() - self.envelope_bytes);
+        Ok((Message::Text(frame.into()), application_bytes))
+    }
+}
+
 /// Reject an undersized target for any scheduled sequence before run effects.
 pub(crate) fn validate_payload_size(
     plans: &[SenderPlan],
@@ -2169,6 +2264,10 @@ async fn peer_task(
     // Generator failure stops sends for every later incarnation. Keep the
     // socket and its inbound evidence alive through the normal lifecycle.
     let mut outbound_stopped = false;
+    let reliable_ledger = (!plan.sends.is_empty()
+        && facts.delivery_class == DeliveryClass::Reliable
+        && !facts.experiment.opaque_sender)
+        .then(|| ReliableOutgoingLedger::new(&plan.name, facts.payload_bytes));
     let mut outgoing_ledger = None;
     let epoch = match ready_for_epoch(ready, &mut start).await {
         Ok(epoch) => epoch,
@@ -2331,14 +2430,18 @@ async fn peer_task(
                             DeliveryClass::Volatile => (Some(WireDeliveryClass::Volatile), None),
                         }
                     };
-                    let ledger = outgoing_ledger.get_or_insert_with(|| {
-                        OutgoingLedger::new(&plan.name, facts.payload_bytes)
-                    });
-                    let encoded = match ledger {
-                        Ok(ledger) => {
-                            ledger.encode(send.seq, class, key, facts.experiment.opaque_sender)
-                        }
-                        Err(detail) => Err(detail.clone()),
+
+                    let encoded = match &reliable_ledger {
+                        Some(Ok(ledger)) => ledger.encode(send.seq),
+                        Some(Err(detail)) => Err(detail.clone()),
+                        None => match outgoing_ledger.get_or_insert_with(|| {
+                            OutgoingLedger::new(&plan.name, facts.payload_bytes)
+                        }) {
+                            Ok(ledger) => {
+                                ledger.encode(send.seq, class, key, facts.experiment.opaque_sender)
+                            }
+                            Err(detail) => Err(detail.clone()),
+                        },
                     };
                     let (frame, application_bytes) = match encoded {
                         Ok(encoded) => encoded,
@@ -4439,10 +4542,19 @@ mod session_poll_tests {
 
     #[test]
     fn reused_ledger_matches_canonical_frames_at_sequence_and_payload_boundaries() {
-        for sender in ["r0p0", "r998p15", "r\"鱼\\\n"] {
-            for payload_bytes in [96, 1024, 16_384] {
+        for sender in [
+            "r0p0",
+            "r998p15",
+            "r\"鱼\\\n",
+            r#"r"seq":0"#,
+            r#"r"padding":"""#,
+        ] {
+            for payload_bytes in [96, 1024, 1069, 16_384, 65_536] {
                 let mut ledger = OutgoingLedger::new(sender, payload_bytes).unwrap();
+                let reliable = ReliableOutgoingLedger::new(sender, payload_bytes).unwrap();
                 for seq in [0, 9, 10, 99, 100, 43_201, u64::MAX, 0, u64::MAX] {
+                    let expected = ledger.encode(seq, None, None, false);
+                    assert_eq!(reliable.encode(seq), expected);
                     for (class, key) in [
                         (None, None),
                         (Some(WireDeliveryClass::Reliable), None),
@@ -4464,6 +4576,11 @@ mod session_poll_tests {
                 }
             }
         }
+        assert!(ReliableOutgoingLedger::new("r0p0", 0).is_err());
+        let reliable = ReliableOutgoingLedger::new("r0p0", 45).unwrap();
+        assert!(reliable.encode(10).is_err());
+        assert!(reliable.encode(0).is_ok());
+
         assert!(OutgoingLedger::new("r0p0", 0).is_err());
         let mut ledger = OutgoingLedger::new("r0p0", 45).unwrap();
         assert!(ledger.encode(10, None, None, false).is_err());
