@@ -17,6 +17,8 @@ use crate::records::{GapEvent, ReceiptEvent, SentEvent};
 const FRAME_LIMIT: usize = 4096;
 const HEADER_BYTES: u64 = 10;
 const WRITER_BUFFER: usize = 16 * 1024;
+#[cfg(target_os = "linux")]
+const FILE_DESCRIPTOR_HEADROOM: u64 = 64;
 const WRITER_WAKE_FRAMES: usize = 64;
 const WRITER_POLL_INTERVAL: Duration = Duration::from_micros(500);
 const FORMAT: u32 = 1;
@@ -125,6 +127,9 @@ impl RoomSpool {
             return Err("invalid room spool limits".into());
         }
         fs::create_dir(root).map_err(|error| format!("create room spool: {error}"))?;
+        // Opening all the bounded room files here keeps the first room-wide
+        // burst from competing with file creation on the single writer.
+        let writers = open_writers(root, rooms)?;
         let (sender, receiver) = mpsc::sync_channel(queue_frames);
         let path = root.to_path_buf();
         let queue = Arc::new(QueueDepth::new(queue_frames));
@@ -144,7 +149,7 @@ impl RoomSpool {
                         Err(TryRecvError::Disconnected) => return None,
                     }
                 });
-                write_rooms(&path, rooms, byte_budget, frames)
+                write_rooms(&path, writers, byte_budget, frames)
             })
             .map_err(|error| format!("start room spool writer: {error}"))?;
         Ok(Self {
@@ -325,18 +330,9 @@ pub(super) fn preflight(config: &crate::config::RunConfig, byte_budget: u64) -> 
             ));
         }
 
-        let limits = fs::read_to_string("/proc/self/limits")
-            .map_err(|error| format!("read room capture file descriptor limit: {error}"))?;
-        let soft = limits
-            .lines()
-            .find_map(|line| {
-                line.strip_prefix("Max open files")?
-                    .split_whitespace()
-                    .next()
-            })
-            .ok_or_else(|| "room capture file descriptor limit is absent".to_string())?;
-        let required = u64::from(config.rooms) * (u64::from(config.players_per_room) + 1) + 64;
-        if let Ok(limit) = soft.parse::<u64>() {
+        let required = u64::from(config.rooms) * (u64::from(config.players_per_room) + 1)
+            + FILE_DESCRIPTOR_HEADROOM;
+        if let Some(limit) = linux_file_descriptor_limit()? {
             if required > limit {
                 return Err(format!(
                     "room capture needs {required} file descriptors, soft limit is {limit}"
@@ -360,16 +356,60 @@ fn open_writer(root: &Path, room: usize) -> Result<BufWriter<File>, String> {
         .map_err(|error| format!("open room {room} spool: {error}"))
 }
 
+#[cfg(target_os = "linux")]
+fn linux_file_descriptor_limit() -> Result<Option<u64>, String> {
+    let limits = fs::read_to_string("/proc/self/limits")
+        .map_err(|error| format!("read room capture file descriptor limit: {error}"))?;
+    let soft = limits
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Max open files")?
+                .split_whitespace()
+                .next()
+        })
+        .ok_or_else(|| "room capture file descriptor limit is absent".to_string())?;
+    if soft == "unlimited" {
+        Ok(None)
+    } else {
+        soft.parse()
+            .map(Some)
+            .map_err(|_| format!("room capture file descriptor soft limit is invalid: {soft}"))
+    }
+}
+
+fn open_writers(root: &Path, rooms: usize) -> Result<Vec<Option<BufWriter<File>>>, String> {
+    // Keep lazy opening available for sparse captures when the limit or
+    // current usage cannot be established. The Linux runner preflight
+    // separately checks the much larger sockets-plus-shards requirement.
+    #[cfg(target_os = "linux")]
+    let prepare = linux_file_descriptor_limit().is_ok_and(|limit| {
+        limit.is_none_or(|limit| {
+            fs::read_dir("/proc/self/fd").is_ok_and(|open| {
+                open.count() as u64 + rooms as u64 + FILE_DESCRIPTOR_HEADROOM <= limit
+            })
+        })
+    });
+    #[cfg(not(target_os = "linux"))]
+    let prepare = false;
+
+    if prepare {
+        (0..rooms)
+            .map(|room| open_writer(root, room).map(Some))
+            .collect()
+    } else {
+        Ok((0..rooms).map(|_| None).collect())
+    }
+}
+
 fn write_rooms(
     root: &Path,
-    rooms: usize,
+    mut writers: Vec<Option<BufWriter<File>>>,
     byte_budget: u64,
     frames: impl IntoIterator<Item = Frame>,
 ) -> Result<Index, String> {
-    let mut writers: Vec<Option<BufWriter<File>>> = (0..rooms).map(|_| None).collect();
     let mut index = Index {
         version: FORMAT,
-        rooms: vec![RoomFile::default(); rooms],
+        rooms: vec![RoomFile::default(); writers.len()],
         capture_queue: None,
     };
     let mut remaining = byte_budget;
