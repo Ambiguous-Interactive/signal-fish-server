@@ -2560,6 +2560,141 @@ async fn drain_after_failed_write<R>(
     }
 }
 
+fn deserialize_json_object<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    struct Object<T>(std::marker::PhantomData<T>);
+
+    impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for Object<T> {
+        type Value = T;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a JSON object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+            T::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+        }
+    }
+
+    deserializer.deserialize_map(Object(std::marker::PhantomData))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerEnvelope<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    #[serde(borrow, deserialize_with = "deserialize_json_object")]
+    data: LedgerGameData<'a>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerGameData<'a> {
+    from_player: PlayerId,
+    #[serde(borrow, deserialize_with = "deserialize_json_object")]
+    data: LedgerFields<'a>,
+    seq: Option<u64>,
+    #[serde(rename = "epoch")]
+    _epoch: Option<u32>,
+    #[serde(rename = "class")]
+    _class: Option<WireDeliveryClass>,
+    #[serde(rename = "key")]
+    _key: Option<u32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LedgerFields<'a> {
+    ledger_sender: &'a str,
+    padding: &'a str,
+    seq: u64,
+}
+
+impl LedgerFields<'_> {
+    fn application_bytes(&self) -> u64 {
+        // Deserializing borrowed strings requires unescaped wire strings.
+        const STRUCTURE_BYTES: usize = br#"{"ledger_sender":"","padding":"","seq":0}"#.len() - 1;
+        let digits = self.seq.checked_ilog10().unwrap_or(0) as usize + 1;
+        count_u64(STRUCTURE_BYTES + self.ledger_sender.len() + self.padding.len() + digits)
+    }
+}
+
+fn borrow_ledger_frame(text: &str) -> Option<LedgerGameData<'_>> {
+    if !text.starts_with('{') {
+        return None;
+    }
+    let envelope: LedgerEnvelope<'_> = serde_json::from_str(text).ok()?;
+    (envelope.kind == "GameData").then_some(envelope.data)
+}
+
+struct GameDataReceipt<'a> {
+    from_player: PlayerId,
+    ledger: Option<(&'a str, u64)>,
+    server_seq: Option<u64>,
+    received_us: u64,
+    application_bytes: u64,
+    encoded_frame_body_bytes: u64,
+}
+
+impl GameDataReceipt<'_> {
+    fn record(self, recipient: &ReceiptName, registry: &SenderRegistry, log: &EventLog) -> bool {
+        let Self {
+            from_player,
+            ledger,
+            server_seq,
+            received_us,
+            application_bytes,
+            encoded_frame_body_bytes,
+        } = self;
+        let resolve = || {
+            let (ledger_sender, seq) = ledger
+                .ok_or_else(|| "application data has no valid ledger identity".to_string())?;
+            // The registry resolves the runner's incarnation index for both wire versions.
+            let (sender, epoch) = registry
+                .lock()
+                .expect("sender registry")
+                .get(&from_player)
+                .cloned()
+                .ok_or_else(|| {
+                    format!("player {from_player} is absent from the sender registry")
+                })?;
+            if sender != ledger_sender {
+                return Err("ledger sender disagrees with the registered player".to_string());
+            }
+            let server_seq = server_seq
+                .or_else(|| seq.checked_add(1))
+                .ok_or_else(|| "ledger sequence cannot produce a v2 stream sequence".to_string())?;
+            Ok(ReceiptEvent {
+                recipient: recipient.clone(),
+                sender,
+                seq,
+                epoch,
+                server_seq,
+                received_us,
+                application_bytes,
+                encoded_frame_body_bytes,
+            })
+        };
+        match resolve() {
+            Ok(receipt) => log.push_receipt(receipt),
+            Err(detail) => {
+                log.push_fault(InvalidReason::UnidentifiedGameData {
+                    recipient: recipient.to_string(),
+                    received_us,
+                    application_bytes,
+                    encoded_frame_body_bytes,
+                    detail,
+                });
+                !log.record_budget_exhausted()
+            }
+        }
+    }
+}
+
 /// Handle one inbound server frame: record the delivery with its same-clock
 /// receipt time and the sending incarnation resolved through the registry,
 /// resolve gap reports the same way, and account server rejections. Under
@@ -2577,6 +2712,19 @@ pub(crate) async fn handle_inbound(
     experiment: ExperimentContext,
 ) -> bool {
     let received_us = micros(epoch.elapsed());
+    if let Ok(Message::Text(text)) = &frame {
+        if let Some(frame) = borrow_ledger_frame(text) {
+            return GameDataReceipt {
+                from_player: frame.from_player,
+                ledger: Some((frame.data.ledger_sender, frame.data.seq)),
+                server_seq: frame.seq,
+                received_us,
+                application_bytes: frame.data.application_bytes(),
+                encoded_frame_body_bytes: count_u64(text.len()),
+            }
+            .record(recipient, registry, log);
+        }
+    }
     match frame {
         Ok(Message::Text(text)) => match serde_json::from_str::<ServerMessage>(&text) {
             Ok(ServerMessage::GameData {
@@ -2585,78 +2733,17 @@ pub(crate) async fn handle_inbound(
                 seq,
                 ..
             }) => {
-                let application_bytes =
-                    count_u64(json_byte_count(&data).expect("received JSON value serializes"));
-                let encoded_frame_body_bytes = count_u64(text.len());
-                if let Some((ledger_sender, ledger_seq)) =
-                    websocket_test_helpers::delivery_ledger::extract_borrowed(&data)
-                {
-                    // The sending incarnation comes from the registry (the
-                    // sender's own join registration), keyed by the exact
-                    // `PlayerId` the server stamped on the frame — a rejoin
-                    // storm therefore classifies every delivery exactly.
-                    // The stream sequence is the v3 wire's per-connection
-                    // stamp; the frozen v2 wire carries none, and its
-                    // single-epoch, send-ordered stream maps
-                    // `server_seq = ledger_seq + 1`.
-                    let resolved = registry
-                        .lock()
-                        .expect("sender registry")
-                        .get(&from_player)
-                        .cloned();
-                    if let Some((sender, sender_incarnation)) = resolved {
-                        if sender != ledger_sender {
-                            log.push_fault(InvalidReason::UnidentifiedGameData {
-                                recipient: recipient.to_string(),
-                                received_us,
-                                application_bytes,
-                                encoded_frame_body_bytes,
-                                detail: "ledger sender disagrees with the registered player"
-                                    .to_string(),
-                            });
-                            return !log.record_budget_exhausted();
-                        }
-                        let Some(server_seq) = seq.or_else(|| ledger_seq.checked_add(1)) else {
-                            log.push_fault(InvalidReason::UnidentifiedGameData {
-                                recipient: recipient.to_string(),
-                                received_us,
-                                application_bytes,
-                                encoded_frame_body_bytes,
-                                detail: "ledger sequence cannot produce a v2 stream sequence"
-                                    .to_string(),
-                            });
-                            return !log.record_budget_exhausted();
-                        };
-                        return log.push_receipt(ReceiptEvent {
-                            recipient: recipient.clone(),
-                            sender,
-                            seq: ledger_seq,
-                            epoch: sender_incarnation,
-                            server_seq,
-                            received_us,
-                            application_bytes,
-                            encoded_frame_body_bytes,
-                        });
-                    } else {
-                        log.push_fault(InvalidReason::UnidentifiedGameData {
-                            recipient: recipient.to_string(),
-                            received_us,
-                            application_bytes,
-                            encoded_frame_body_bytes,
-                            detail: format!(
-                                "player {from_player} is absent from the sender registry"
-                            ),
-                        });
-                    }
-                } else {
-                    log.push_fault(InvalidReason::UnidentifiedGameData {
-                        recipient: recipient.to_string(),
-                        received_us,
-                        application_bytes,
-                        encoded_frame_body_bytes,
-                        detail: "application data has no valid ledger identity".to_string(),
-                    });
+                return GameDataReceipt {
+                    from_player,
+                    ledger: websocket_test_helpers::delivery_ledger::extract_borrowed(&data),
+                    server_seq: seq,
+                    received_us,
+                    application_bytes: count_u64(
+                        json_byte_count(&data).expect("received JSON value serializes"),
+                    ),
+                    encoded_frame_body_bytes: count_u64(text.len()),
                 }
+                .record(recipient, registry, log);
             }
             Ok(ServerMessage::PlayerJoined { .. }) | Ok(ServerMessage::PlayerLeft { .. }) => {}
             Ok(ServerMessage::DeliveryReport(report)) => {
@@ -4498,6 +4585,55 @@ mod session_poll_tests {
         let identity = &registry[&PlayerId::nil()].0;
         for event in &records.sent {
             assert_eq!(event.sender.as_ptr(), identity.as_ptr());
+        }
+    }
+
+    #[test]
+    fn borrowed_ledger_counts_canonical_bytes_and_defers_unusual_inputs() {
+        let encode = |data, seq| {
+            serde_json::to_string(&ServerMessage::GameData {
+                from_player: PlayerId::nil(),
+                data,
+                seq,
+                epoch: seq.map(|_| 1),
+                class: None,
+                key: None,
+            })
+            .unwrap()
+        };
+        for (sender, padding) in [("r999p15", "xxxx"), ("日本語", "é/💡"), ("", "")] {
+            for seq in [0, 9, 10, 99, 100, u64::MAX] {
+                let data = json!({"ledger_sender": sender, "padding": padding, "seq": seq});
+                let bytes = json_byte_count(&data).unwrap();
+                for wire_seq in [None, Some(seq)] {
+                    let text = encode(data.clone(), wire_seq);
+                    let frame = borrow_ledger_frame(&text).expect("borrow unescaped ledger");
+                    assert_eq!(frame.from_player, PlayerId::nil());
+                    assert_eq!(frame.seq, wire_seq);
+                    assert_eq!(frame.data.ledger_sender, sender);
+                    assert_eq!(frame.data.seq, seq);
+                    assert_eq!(frame.data.application_bytes(), count_u64(bytes));
+                }
+            }
+        }
+        let standard = encode(
+            json!({"ledger_sender":"r0p0","padding":"x","seq":1}),
+            Some(2),
+        );
+        for text in [
+            standard.replace("\"padding\":\"x\"", "\"padding\":\"x\\n\""),
+            standard.replace("\"padding\":\"x\"", "\"padding\":\"x\",\"extra\":0"),
+            standard.replace("\"padding\":\"x\"", "\"padding\":\"x\",\"padding\":\"y\""),
+            standard.replace("\"epoch\":1", "\"epoch\":-1"),
+            standard.replace("\"type\":\"GameData\"", "\"type\":\"RoomLeft\""),
+            encode(json!(["r0p0", "x", 1]), Some(2)),
+            json!([
+                "GameData",
+                [PlayerId::nil(), ["r0p0", "x", 1], 2, 1, null, null]
+            ])
+            .to_string(),
+        ] {
+            assert!(borrow_ledger_frame(&text).is_none(), "{text}");
         }
     }
 
