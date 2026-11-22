@@ -186,6 +186,24 @@ fn room_spool_preserves_the_first_rejection_after_a_later_send() {
 }
 
 #[test]
+fn room_spool_queue_depth_confirms_a_potential_new_peak() {
+    let (queue, mut writer_progress) = QueueDepth::new(8);
+    assert_eq!(queue.reserve(), 1);
+    assert_eq!(queue.reserve(), 2);
+    writer_progress.release();
+    writer_progress.release();
+
+    // A stale observation missed both dequeues. The actual pending count
+    // for the third reservation is one, so the peak stays at two.
+    queue.record_pending_peak(3, 3);
+    assert_eq!(queue.snapshot().pending_high_water_frames, 2);
+
+    // A later reservation raises the peak even if its estimate is higher still.
+    queue.record_pending_peak(5, 5);
+    assert_eq!(queue.snapshot().pending_high_water_frames, 3);
+}
+
+#[test]
 fn room_spool_queue_depth_survives_position_wrap_and_cancel() {
     let (queue, mut writer_progress) = QueueDepth::new(2);
     queue.submitted.set(usize::MAX - 1);

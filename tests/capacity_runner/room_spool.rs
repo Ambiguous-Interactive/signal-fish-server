@@ -105,13 +105,22 @@ impl QueueDepth {
     }
 
     fn reserve(&self) -> usize {
-        // EventLog serializes submissions. Sample the writer's position
-        // without a read-modify-write shared with the consumer.
         let submitted = self.submitted.get().wrapping_add(1);
-        let count = submitted.wrapping_sub(self.dequeued.load(Ordering::Relaxed));
+        let estimated = submitted.wrapping_sub(self.dequeued.load(Ordering::Relaxed));
         self.submitted.set(submitted);
-        self.high_water.set(self.high_water.get().max(count));
-        count
+        self.record_pending_peak(submitted, estimated);
+        estimated
+    }
+
+    fn record_pending_peak(&self, submitted: usize, estimated: usize) {
+        // An older dequeue count can only raise the estimate.
+        let previous_peak = self.high_water.get();
+        if estimated > previous_peak {
+            // The RMW sees the latest published count in modification order.
+            let dequeued = self.dequeued.fetch_add(0, Ordering::Relaxed);
+            let pending = submitted.wrapping_sub(dequeued);
+            self.high_water.set(previous_peak.max(pending));
+        }
     }
 
     fn cancel_reservation(&self) {
@@ -215,6 +224,7 @@ impl RoomSpool {
         self.sender
             .try_send(Frame { room, event })
             .map(|()| {
+                // Estimated depth gives a wake hint. The timed poll covers missed hints.
                 if pending == WRITER_WAKE_FRAMES.min(self.queue.capacity_frames) {
                     self.writer.thread().unpark();
                 }
