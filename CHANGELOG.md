@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Reduce server memory used by WebSocket connections (#775).
 - Publish new Signal Fish Server versions weekly when unreleased changes are ready (#1676).
 - **Breaking:** Require custom coordination locks to leave no lease behind when a pending `try_acquire` is canceled.
 - **Breaking:** Use Jiff timestamps and signed durations in the Rust server API.
