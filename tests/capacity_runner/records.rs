@@ -7,7 +7,7 @@
 //! delivery class, so "replay the artifacts" and "summarize the run" are
 //! literally the same code path.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(test)]
@@ -510,7 +510,7 @@ struct EventState {
 
 struct RoomCapture {
     spool: crate::room_spool::RoomSpool,
-    rooms: BTreeMap<String, usize>,
+    rooms: HashMap<String, usize>,
     completed_sends: u64,
 }
 
