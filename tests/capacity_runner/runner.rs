@@ -191,6 +191,17 @@ impl PeerProgress {
 
     fn send_stage(&self, stage: &'static str, seq: u64, incarnation: u32, intended_us: u64) {
         let at_us = micros(self.epoch.get().expect("workload epoch").elapsed());
+        self.send_stage_at(stage, seq, incarnation, intended_us, at_us);
+    }
+
+    fn send_stage_at(
+        &self,
+        stage: &'static str,
+        seq: u64,
+        incarnation: u32,
+        intended_us: u64,
+        at_us: u64,
+    ) {
         self.state.lock().expect("peer progress").send = Some(PeerSendProgress {
             seq,
             incarnation,
@@ -216,13 +227,15 @@ impl PeerProgress {
         let mut future = std::pin::pin!(future);
         std::future::poll_fn(|context| {
             let started = Instant::now();
+            let started_us = micros(started.saturating_duration_since(self.preparation_started));
             {
                 let mut state = self.state.lock().expect("peer progress");
                 state.polls.started = state.polls.started.saturating_add(1);
-                state.polls.last_started_preparation_us =
-                    Some(micros(self.preparation_started.elapsed()));
+                state.polls.last_started_preparation_us = Some(started_us);
             }
             let result = future.as_mut().poll(context);
+            let finished = Instant::now();
+            let finished_us = micros(finished.saturating_duration_since(self.preparation_started));
             {
                 let mut state = self.state.lock().expect("peer progress");
                 state.polls.completed = state.polls.completed.saturating_add(1);
@@ -230,10 +243,11 @@ impl PeerProgress {
                     .polls
                     .pending_returns
                     .saturating_add(u64::from(result.is_pending()));
-                state.polls.last_finished_preparation_us =
-                    Some(micros(self.preparation_started.elapsed()));
-                state.polls.longest_poll_us =
-                    state.polls.longest_poll_us.max(micros(started.elapsed()));
+                state.polls.last_finished_preparation_us = Some(finished_us);
+                state.polls.longest_poll_us = state
+                    .polls
+                    .longest_poll_us
+                    .max(micros(finished.saturating_duration_since(started)));
             }
             result
         })
@@ -2404,7 +2418,15 @@ async fn peer_task(
                         mark_send_stage("lag_rejected");
                         return SendOutcome::Stopped;
                     }
-                    mark_send_stage("frame_preparation");
+                    if let Some(progress) = &facts.progress {
+                        progress.send_stage_at(
+                            "frame_preparation",
+                            send.seq,
+                            incarnation,
+                            send.intended_us,
+                            wake_us,
+                        );
+                    }
                     let (class, key) = if facts.experiment.opaque_sender {
                         (None, None)
                     } else {
@@ -2463,6 +2485,7 @@ async fn peer_task(
                         send.seq,
                         incarnation,
                         send.intended_us,
+                        write_start_us,
                     )
                     .await
                     {
@@ -2597,12 +2620,19 @@ async fn send_gameplay_frame<S>(
     seq: u64,
     incarnation: u32,
     intended_us: u64,
+    write_start_us: u64,
 ) -> Result<(), S::Error>
 where
     S: futures_util::Sink<Message> + Unpin,
 {
     if let Some(progress) = progress {
-        progress.send_stage("socket_write", seq, incarnation, intended_us);
+        progress.send_stage_at(
+            "socket_write",
+            seq,
+            incarnation,
+            intended_us,
+            write_start_us,
+        );
     }
     let result = sink.send(frame).await;
     if result.is_err() {
@@ -3897,6 +3927,7 @@ mod session_poll_tests {
             15,
             3,
             5_000,
+            micros(epoch.elapsed()),
         ));
         assert!(futures_util::poll!(&mut write).is_pending());
         tokio::time::advance(Duration::from_secs(20)).await;
@@ -3920,6 +3951,7 @@ mod session_poll_tests {
             16,
             4,
             10_000,
+            micros(epoch.elapsed()),
         )
         .await
         .unwrap();
