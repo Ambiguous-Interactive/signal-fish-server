@@ -125,8 +125,10 @@ impl RoomSpool {
             return Err("invalid room spool limits".into());
         }
         fs::create_dir(root).map_err(|error| format!("create room spool: {error}"))?;
+        // Opening all the bounded room files here keeps the first room-wide
+        // burst from competing with file creation on the single writer.
+        let writers = open_writers(root, rooms)?;
         let (sender, receiver) = mpsc::sync_channel(queue_frames);
-        let path = root.to_path_buf();
         let queue = Arc::new(QueueDepth::new(queue_frames));
         let writer_queue = Arc::clone(&queue);
         let writer = thread::Builder::new()
@@ -144,7 +146,7 @@ impl RoomSpool {
                         Err(TryRecvError::Disconnected) => return None,
                     }
                 });
-                write_rooms(&path, rooms, byte_budget, frames)
+                write_rooms(writers, byte_budget, frames)
             })
             .map_err(|error| format!("start room spool writer: {error}"))?;
         Ok(Self {
@@ -360,16 +362,18 @@ fn open_writer(root: &Path, room: usize) -> Result<BufWriter<File>, String> {
         .map_err(|error| format!("open room {room} spool: {error}"))
 }
 
+fn open_writers(root: &Path, rooms: usize) -> Result<Vec<BufWriter<File>>, String> {
+    (0..rooms).map(|room| open_writer(root, room)).collect()
+}
+
 fn write_rooms(
-    root: &Path,
-    rooms: usize,
+    mut writers: Vec<BufWriter<File>>,
     byte_budget: u64,
     frames: impl IntoIterator<Item = Frame>,
 ) -> Result<Index, String> {
-    let mut writers: Vec<Option<BufWriter<File>>> = (0..rooms).map(|_| None).collect();
     let mut index = Index {
         version: FORMAT,
-        rooms: vec![RoomFile::default(); rooms],
+        rooms: vec![RoomFile::default(); writers.len()],
         capture_queue: None,
     };
     let mut remaining = byte_budget;
@@ -388,11 +392,7 @@ fn write_rooms(
         remaining = remaining
             .checked_sub(framed)
             .ok_or_else(|| format!("room spool byte budget {byte_budget} exhausted"))?;
-        let slot = &mut writers[room];
-        if slot.is_none() {
-            *slot = Some(open_writer(root, room)?);
-        }
-        let writer = slot.as_mut().expect("open room spool writer");
+        let writer = &mut writers[room];
         writer
             .write_all(&size.to_le_bytes())
             .and_then(|()| writer.write_all(&(ordinal as u64).to_le_bytes()))
@@ -402,11 +402,9 @@ fn write_rooms(
         file.rows += 1;
     }
     for (room, writer) in writers.iter_mut().enumerate() {
-        if let Some(writer) = writer {
-            writer
-                .flush()
-                .map_err(|error| format!("flush room {room} spool: {error}"))?;
-        }
+        writer
+            .flush()
+            .map_err(|error| format!("flush room {room} spool: {error}"))?;
     }
     Ok(index)
 }

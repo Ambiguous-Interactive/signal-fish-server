@@ -102,10 +102,16 @@ fn room_spool_rejects_budget_and_write_failures_as_incomplete() {
     assert!(RoomReplay::open(&limited, 1).is_err());
 
     let blocked = temp.path().join("blocked");
-    let spool = RoomSpool::create(&blocked, 1, 1, 1024).unwrap();
-    fs::create_dir(room_path(&blocked, 0)).unwrap();
-    spool.push(0, sent.clone()).unwrap();
-    assert!(spool.finish().unwrap_err().contains("open room 0"));
+    fs::create_dir(&blocked).unwrap();
+    let blocked_room = room_path(&blocked, 0);
+    File::create(&blocked_room).unwrap();
+    let writer = BufWriter::new(File::open(&blocked_room).unwrap());
+    let frames = [Frame {
+        room: 0,
+        event: sent.clone(),
+    }];
+    let error = write_rooms(vec![writer], 1024, frames).err().unwrap();
+    assert!(error.contains("flush room 0"), "{error}");
     assert!(RoomReplay::open(&blocked, 1).is_err());
 
     let rejected = temp.path().join("rejected");
@@ -120,6 +126,20 @@ fn room_spool_rejects_budget_and_write_failures_as_incomplete() {
         .contains("room event identity"));
     assert!(spool.finish().unwrap_err().contains("producer rejected"));
     assert!(RoomReplay::open(&rejected, 1).is_err());
+}
+
+#[test]
+fn room_spool_opens_empty_room_files_before_capture() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("rooms");
+    let spool = RoomSpool::create(&root, 3, 1, 1024).unwrap();
+    for room in 0..3 {
+        assert_eq!(fs::metadata(room_path(&root, room)).unwrap().len(), 0);
+    }
+
+    spool.finish().unwrap();
+    let replay = RoomReplay::open(&root, 3).unwrap();
+    replay.validate_ordinals(0).unwrap();
 }
 
 #[test]
@@ -152,13 +172,13 @@ fn room_spool_queue_refusal_never_commits_an_incomplete_index() {
     let root = temp.path().to_path_buf();
     let (sender, receiver) = mpsc::sync_channel(1);
     let (resume, wait) = mpsc::channel();
-    let path = root.clone();
+    let room_writer = open_writer(&root, 0).unwrap();
     let queue = Arc::new(QueueDepth::new(1));
     let writer_queue = Arc::clone(&queue);
     let writer = thread::spawn(move || {
         wait.recv().unwrap();
         let frames = receiver.into_iter().inspect(|_| writer_queue.release());
-        write_rooms(&path, 1, 1024, frames)
+        write_rooms(vec![room_writer], 1024, frames)
     });
     let spool = RoomSpool {
         root,
@@ -242,7 +262,8 @@ fn room_spool_replay_memory_profile() {
                             .map(frame),
                     )
             });
-            let index = write_rooms(&spool, rooms, u64::MAX, frames).unwrap();
+            let index =
+                write_rooms(open_writers(&spool, rooms).unwrap(), u64::MAX, frames).unwrap();
             crate::artifacts::write_json(spool.join(INDEX), &index).unwrap();
             crate::artifacts::write_deliveries(&root, &crate::complete_records(&plans)).unwrap();
             println!(
