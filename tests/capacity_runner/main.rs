@@ -1980,10 +1980,8 @@ async fn unidentified_game_data_keeps_byte_evidence_without_invented_receipts() 
     use signal_fish_server::protocol::PlayerId;
     use tokio_tungstenite::tungstenite::Message;
     let player = PlayerId::new_v4();
-    let registry: runner::SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::from([(
-        player,
-        ("r0p0".into(), 1),
-    )])));
+    let registry: runner::SenderRegistry =
+        Arc::new(dashmap::DashMap::from_iter([(player, ("r0p0".into(), 1))]));
     let epoch = tokio::time::Instant::now();
     for (case, data, from_player, seq) in [
         (
@@ -3796,7 +3794,7 @@ fn the_notice_cadence_bound_is_exact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn experiment_inbound_classification_is_exact() {
     use signal_fish_server::protocol::ErrorCode;
-    let registry: runner::SenderRegistry = Arc::new(std::sync::Mutex::new(BTreeMap::new()));
+    let registry: runner::SenderRegistry = Arc::new(dashmap::DashMap::new());
     let epoch = tokio::time::Instant::now();
     let observer = runner::ExperimentContext {
         active: true,
