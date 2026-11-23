@@ -1279,14 +1279,7 @@ fn receipt_timing(receipt: &crate::records::ReceiptEvent, sent: &SendIndex<'_>) 
 /// total and per recipient) and the histogram artifact, so they can never
 /// disagree.
 pub fn latency_pairs(records: &RunRecords) -> impl Iterator<Item = (&str, u64)> {
-    latency_pairs_with_foreign(records, None)
-}
-
-pub(super) fn latency_pairs_with_foreign<'a>(
-    records: &'a RunRecords,
-    foreign: Option<&'a ForeignReceiptTimings>,
-) -> impl Iterator<Item = (&'a str, u64)> {
-    indexed_latency_pairs(records, SendIndex::new(&records.sent), foreign)
+    indexed_latency_pairs(records, SendIndex::new(&records.sent), None)
 }
 
 fn indexed_latency_pairs<'a>(
@@ -1507,7 +1500,7 @@ fn individual_recipient_latency_statistics(
     room_of: &BTreeMap<&str, u32>,
     per_recipient: &mut [RecipientOutcome],
     foreign: Option<&ForeignReceiptTimings>,
-) -> LatencyStats {
+) -> LatencyAccumulator {
     let mut latency = LatencyAccumulator::<u64>::default();
     let mut by_recipient = BTreeMap::<&str, RecipientLatency>::new();
     for (recipient, sample) in indexed_latency_pairs(records, sent_by_key, foreign) {
@@ -1526,7 +1519,7 @@ fn individual_recipient_latency_statistics(
             .map(|histogram| histogram.stats_with_scratch(&mut scratch))
             .unwrap_or_default();
     }
-    latency.stats()
+    latency
 }
 
 /// Preserve each recipient's tail while bounding each histogram counter by
@@ -2284,7 +2277,7 @@ pub(super) fn summarize_with_foreign(
     churn: &ChurnPlan,
     experiment: Option<Experiment>,
     foreign: Option<&ForeignReceiptTimings>,
-) -> (OutcomeSummary, RawViolationPositions) {
+) -> (OutcomeSummary, RawViolationPositions, Histogram<u64>) {
     // Share exact send lookups across validation and latency passes. Arbitrary
     // replay order needs one sort and one compact offset index, not three.
     let sent_by_key = SendIndex::new(&records.sent);
@@ -2804,7 +2797,7 @@ pub(super) fn summarize_with_foreign(
     drop(arrivals);
     drop(gap_streams);
     drop(views);
-    let latency_us = individual_recipient_latency_statistics(
+    let latency = individual_recipient_latency_statistics(
         records,
         &sent_by_key,
         room_of,
@@ -2936,7 +2929,7 @@ pub(super) fn summarize_with_foreign(
             gap_covered: total_gap_covered,
         },
         per_recipient,
-        latency_us,
+        latency_us: latency.stats(),
         generator_lag_us: LagStats {
             max_us: max_lag,
             p99_us: lag_p99,
@@ -2946,7 +2939,7 @@ pub(super) fn summarize_with_foreign(
         experiment: experiment.map(Experiment::label).map(str::to_string),
         unsupported_notices: count_u64(records.unsupported_notices.len()),
     };
-    (summary, raw_positions)
+    (summary, raw_positions, latency.histogram)
 }
 
 pub(super) fn explains_unsent(reason: &InvalidReason) -> bool {
