@@ -751,11 +751,12 @@ fn connection_info_schema_is_an_exact_union_of_rust_wire_shapes() {
                         == Some("webrtc")
                 })
                 .expect("webrtc branch"),
-            &["properties", "sdp", "nullable"],
+            &["properties", "sdp", "type"],
         )
-        .and_then(Yaml::as_bool),
-        Some(true),
-        "Rust accepts omitted WebRTC.sdp and serializes None as an explicit null"
+        .and_then(Yaml::as_sequence)
+        .map(|types| types.iter().map(Yaml::as_str).collect::<BTreeSet<_>>()),
+        Some(BTreeSet::from([Some("string"), Some("null")])),
+        "WebRTC SDP must declare string and null as Draft 7 types"
     );
 }
 
@@ -3323,6 +3324,7 @@ mod projection_runtime {
             json!({"type":"relay", "host":"relay.example", "port":65535, "transport":"udp",
                 "allocation_id":"allocation", "token":"fixture", "client_id":0}),
             json!({"type":"webrtc", "sdp":"SDP-観客", "ice_candidates":["candidate:fixture", "候補"]}),
+            json!({"type":"webrtc", "sdp":null, "ice_candidates":["candidate:fixture"]}),
             json!({"type":"custom", "data":{"nested":[null, false, "観客", {"port":0}]}}),
         ];
         for info in cases {
