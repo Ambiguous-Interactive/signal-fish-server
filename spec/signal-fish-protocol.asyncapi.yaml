@@ -1861,8 +1861,9 @@ components:
           required: [authority_player, you_are_authority]
           properties:
             authority_player:
-              allOf: [{ $ref: '#/components/schemas/PlayerId' }]
-              nullable: true
+              anyOf:
+                - { $ref: '#/components/schemas/PlayerId' }
+                - { type: 'null' }
             you_are_authority: { type: boolean }
       required: [type, data]
     AuthorityResponse:
@@ -1874,7 +1875,7 @@ components:
           required: [granted, reason]
           properties:
             granted: { type: boolean }
-            reason: { type: string, nullable: true }
+            reason: { type: [string, 'null'] }
             error_code: { $ref: '#/components/schemas/ErrorCode' }
       required: [type, data]
     LobbyStateChanged:

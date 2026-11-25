@@ -851,37 +851,92 @@ fn legacy_relay_metadata_has_one_informational_untrusted_contract() {
 
 #[test]
 fn authority_option_fields_are_required_but_nullable_on_the_wire() {
-    let text = spec_text();
-    let docs = Yaml::load_from_str(&text)
-        .unwrap_or_else(|error| panic!("protocol spec is not valid YAML: {error}"));
-    let root = docs
-        .first()
-        .expect("protocol spec must contain one document");
+    use serde_json::json;
+    use signal_fish_server::protocol::ServerMessage;
 
-    for (schema_name, field) in [
-        ("AuthorityChanged", "authority_player"),
-        ("AuthorityResponse", "reason"),
+    let docs = Yaml::load_from_str(&spec_text()).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schema = |name| {
+        mapping_path(root, &["components", "schemas", name]).expect("authority message schema")
+    };
+    let player_id = uuid::Uuid::from_u128(1);
+
+    for (name, field, wire, populated) in [
+        (
+            "AuthorityChanged",
+            "authority_player",
+            serde_json::to_value(ServerMessage::AuthorityChanged {
+                authority_player: None,
+                you_are_authority: false,
+            })
+            .expect("serialize authority release"),
+            serde_json::to_value(ServerMessage::AuthorityChanged {
+                authority_player: Some(player_id),
+                you_are_authority: false,
+            })
+            .expect("serialize authority assignment"),
+        ),
+        (
+            "AuthorityResponse",
+            "reason",
+            serde_json::to_value(ServerMessage::AuthorityResponse {
+                granted: true,
+                reason: None,
+                error_code: None,
+            })
+            .expect("serialize granted authority response"),
+            serde_json::to_value(ServerMessage::AuthorityResponse {
+                granted: false,
+                reason: Some("Authority is already assigned.".to_string()),
+                error_code: None,
+            })
+            .expect("serialize refused authority response"),
+        ),
     ] {
-        let data = mapping_path(
-            root,
-            &["components", "schemas", schema_name, "properties", "data"],
-        )
-        .unwrap_or_else(|| panic!("missing {schema_name}.data"));
-        let required: BTreeSet<_> = data
-            .as_mapping_get("required")
-            .and_then(Yaml::as_sequence)
-            .expect("authority payload must list required fields")
-            .iter()
-            .map(|value| value.as_str().expect("required field must be a string"))
-            .collect();
+        let mut envelopes = vec![name];
+        if name == "AuthorityChanged" {
+            envelopes.extend([
+                "V2ReplayableServerMessageEnvelope",
+                "V3ReplayableServerMessageEnvelope",
+            ]);
+        }
+        let mut missing = wire.clone();
+        missing["data"]
+            .as_object_mut()
+            .expect("object payload")
+            .remove(field);
+        let mut wrong_type = wire.clone();
+        wrong_type["data"][field] = json!(17);
+
+        assert_eq!(wire["data"].get(field), Some(&serde_json::Value::Null));
+        for envelope in envelopes {
+            let schema = schema(envelope);
+            assert!(
+                schema_shape_matches(root, schema, &wire),
+                "{envelope}: {wire}"
+            );
+            assert!(
+                schema_shape_matches(root, schema, &populated),
+                "{envelope}: {populated}"
+            );
+            assert!(
+                !schema_shape_matches(root, schema, &missing),
+                "{envelope}: {missing}"
+            );
+            assert!(
+                !schema_shape_matches(root, schema, &wrong_type),
+                "{envelope}: {wrong_type}"
+            );
+        }
+
+        // The local shape matcher honors legacy nullable annotations, but Draft 7 ignores them.
         assert!(
-            required.contains(field),
-            "{schema_name}.{field} is always serialized"
-        );
-        assert_eq!(
-            mapping_path(data, &["properties", field, "nullable"]).and_then(Yaml::as_bool),
-            Some(true),
-            "{schema_name}.{field}=None serializes as null"
+            mapping_path(
+                schema(name),
+                &["properties", "data", "properties", field, "nullable"]
+            )
+            .is_none(),
+            "{name}.{field} must express null using Draft 7 keywords"
         );
     }
 }
