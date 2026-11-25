@@ -73,7 +73,10 @@ fn ready() -> bool {
     Git add src/core.rs | Out-Null
     [System.IO.File]::WriteAllText("src/new.rs", "new file`n")
     Remove-Item src/deleted.rs
-    if ((Get-InternalRefactorExemptions -Mode Worktree).Count -ne 0) { throw "Missing declaration exempted source" }
+    $undeclaredPaths = Get-InternalRefactorExemptions -Mode Worktree
+    if ($undeclaredPaths -isnot [string[]] -or $undeclaredPaths.Length -ne 0) {
+        throw "Expected an empty path list without a declaration"
+    }
     $failedBefore = $script:Failed
     $guidance = Test-ChangelogGate -ChangedFiles @("src/core.rs") 6>&1 | Out-String
     if ($script:Failed -ne $failedBefore + 1 -or $guidance -cnotmatch '\.github/internal-refactor\.json') {
