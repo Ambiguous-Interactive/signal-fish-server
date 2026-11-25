@@ -2110,7 +2110,8 @@ function Test-ChangelogGate {
             $offenders,
             "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact.",
             "Rust diffs confined to a file's trailing test module (at or after its last top-level #[cfg(test)] line) classify as internal.",
-            "If a path is truly internal, add it to the internal-path lists in scripts/check-doc-consistency.sh and this hook."
+            "For reviewed internal changes such as dev-only allocation probes, declare the exact before and after blobs in .github/internal-refactor.json.",
+            "See docs/development.md#internal-refactors-without-release-notes."
         ) -join "`n")
 }
 
