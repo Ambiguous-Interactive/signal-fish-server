@@ -1,4 +1,5 @@
 """Controls for the weekly release decision and GitHub handoff."""
+from pathlib import Path
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -17,6 +18,31 @@ class WeeklyReleaseTests(unittest.TestCase):
         ]:
             with self.subTest(state=state):
                 self.assertEqual(weekly.action_for(*state), expected)
+
+    def test_weekly_branch_reaches_exact_git_push(self):
+        helper = Path(__file__).with_name("push-release-branch.sh")
+        for branch, expected_status in [
+            (weekly_branch, 0),
+            (weekly_branch[:-1], 2),
+            (weekly_branch.replace("-weekly-", "-other-"), 2),
+        ]:
+            with self.subTest(branch=branch):
+                result = subprocess.run(
+                    [
+                        "bash", "-c", r"""
+git() {
+    [[ $# -eq 5 && $1 == -c && $3 == push && $4 == origin ]] || return 99
+    printf '%s\n' "$5"
+}
+export -f git
+GH_TOKEN=fixture bash "$@"
+""", "bash", str(helper), branch, head,
+                    ],
+                    capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(result.returncode, expected_status, result.stderr)
+                expected_ref = f"HEAD:refs/heads/{branch}\n" if expected_status == 0 else ""
+                self.assertEqual(result.stdout, expected_ref)
 
     def test_changed_pr_identity_blocks_merge(self):
         pr = {
