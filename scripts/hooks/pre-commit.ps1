@@ -118,55 +118,6 @@ $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unre
 # so that unavoidable I/O overlaps script setup instead of extending the hook's
 # critical path. The results are consumed exactly once by
 # Get-WorktreeChangedFiles; staged hooks retain their cheaper index-only query.
-function Start-PendingGit {
-    param([string[]]$GitArguments)
-
-    $startInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $GitArguments
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    [pscustomobject]@{
-        Process    = $process
-        StdoutTask = $process.StandardOutput.ReadToEndAsync()
-        StderrTask = $process.StandardError.ReadToEndAsync()
-    }
-}
-
-function Wait-PendingGit {
-    param(
-        [Parameter(Mandatory = $true)][pscustomobject]$Pending,
-        [Parameter(Mandatory = $true)][string[]]$GitArguments,
-        [switch]$AllowFailure
-    )
-
-    try {
-        $Pending.Process.WaitForExit()
-        $stdout = $Pending.StdoutTask.GetAwaiter().GetResult()
-        $stderr = $Pending.StderrTask.GetAwaiter().GetResult()
-        if ($Pending.Process.ExitCode -ne 0 -and -not $AllowFailure) {
-            throw "git $($GitArguments -join ' ') failed:`n$stdout$stderr"
-        }
-        [pscustomobject]@{
-            ExitCode = $Pending.Process.ExitCode
-            Stdout   = $stdout
-            Stderr   = $stderr
-            Output   = $stdout + $stderr
-        }
-    } finally {
-        $Pending.Process.Dispose()
-    }
-}
-
-function Remove-PendingGit {
-    param([Parameter(Mandatory = $true)][pscustomobject]$Pending)
-
-    try {
-        $Pending.Process.WaitForExit()
-        [void]$Pending.StdoutTask.GetAwaiter().GetResult()
-        [void]$Pending.StderrTask.GetAwaiter().GetResult()
-    } finally {
-        $Pending.Process.Dispose()
-    }
-}
-
 function Remove-PreCommitPendingGit {
     $pendingQueries = @(
         $script:PendingWorktreeStatus,
