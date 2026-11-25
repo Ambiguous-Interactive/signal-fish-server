@@ -165,6 +165,26 @@ try {
         }
         $afterRefusal = Get-IndexBlobTexts -ObjectIds @($emptyId) -SingleProcess
         if ($afterRefusal.Count -ne 1 -or $afterRefusal[$emptyId] -cne '') { throw 'Blob reads did not recover after refusal' }
+
+        if ($IsLinux -and (Test-Path -LiteralPath "/proc/$PID/fd")) {
+            function Get-OpenPipeCount {
+                @([IO.Directory]::GetFiles("/proc/$PID/fd") | Where-Object {
+                    [IO.FileInfo]::new($_).LinkTarget -like 'pipe:*'
+                }).Count
+            }
+
+            # GC must not hide redirects that the reader forgot to close.
+            if (-not [GC]::TryStartNoGCRegion(67108864)) { throw 'Could not start pipe lifetime control' }
+            try {
+                $before = Get-OpenPipeCount
+                for ($attempt = 0; $attempt -lt 12; $attempt++) {
+                    [void](Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)
+                }
+                if ((Get-OpenPipeCount) -gt $before) { throw 'Blob refusal retained redirected pipes' }
+            } finally {
+                [GC]::EndNoGCRegion()
+            }
+        }
     } finally { $script:MaxBatchedBlobBytes = $blobBudget }
     foreach ($path in @('server.rs', 'bench.rs')) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
     Git add .

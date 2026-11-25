@@ -626,20 +626,24 @@ function Get-BoundedIndexBlobTexts {
     }
 
     $process = [Diagnostics.Process]::Start($startInfo)
+    $stdin = $null
     $stdout = $null
+    $stderr = $null
     $stderrTask = $null
     $write = $null
     try {
+        $stdin = $process.StandardInput
         $stdout = [IO.BinaryReader]::new([IO.BufferedStream]::new($process.StandardOutput.BaseStream))
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stderr = $process.StandardError
+        $stderrTask = $stderr.ReadToEndAsync()
         $texts = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
         # SHA-256 ID, type, signed 64-bit size, and separators fit in 96 bytes.
         $headerBytes = [byte[]]::new(96)
         $utf8 = [Text.UTF8Encoding]::new($false)
         $totalBytes = [long]0
-        $process.StandardInput.AutoFlush = $true
+        $stdin.AutoFlush = $true
         # Drain output while Git reads requests so neither pipe can block the other.
-        $write = $process.StandardInput.WriteAsync(($ObjectIds -join "`n") + "`n")
+        $write = $stdin.WriteAsync(($ObjectIds -join "`n") + "`n")
         foreach ($objectId in $ObjectIds) {
             $length = 0
             while (($value = $stdout.ReadByte()) -ne 10) {
@@ -664,7 +668,7 @@ function Get-BoundedIndexBlobTexts {
             $totalBytes += $size
         }
         [void]$write.GetAwaiter().GetResult()
-        $process.StandardInput.Close()
+        $stdin.Close()
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "git cat-file --batch failed: $($stderrTask.GetAwaiter().GetResult())" }
         $texts
@@ -680,7 +684,10 @@ function Get-BoundedIndexBlobTexts {
             $process.WaitForExit()
             if ($null -ne $stderrTask) { [void]$stderrTask.GetAwaiter().GetResult() }
         } finally {
+            # Close the input pipe without flushing a failed write again.
+            if ($null -ne $stdin) { $stdin.BaseStream.Dispose() }
             if ($null -ne $stdout) { $stdout.Dispose() }
+            if ($null -ne $stderr) { $stderr.Dispose() }
             $process.Dispose()
         }
     }
