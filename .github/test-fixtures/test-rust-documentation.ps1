@@ -2,7 +2,8 @@
 param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-. (Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1") -SourceOnly
+$hookScript = (Resolve-Path -LiteralPath (Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1")).Path
+. $hookScript -SourceOnly
 
 $source = "pub fn ready() -> bool { true }`n"
 $cases = @(
@@ -174,15 +175,18 @@ try {
             }
 
             # GC must not hide redirects that the reader forgot to close.
-            if (-not [GC]::TryStartNoGCRegion(67108864)) { throw 'Could not start pipe lifetime control' }
-            try {
-                $before = Get-OpenPipeCount
-                for ($attempt = 0; $attempt -lt 12; $attempt++) {
-                    [void](Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)
+            if ([GC]::TryStartNoGCRegion(67108864)) {
+                try {
+                    $before = Get-OpenPipeCount
+                    for ($attempt = 0; $attempt -lt 12; $attempt++) {
+                        [void](Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)
+                    }
+                    if ((Get-OpenPipeCount) -gt $before) { throw 'Blob refusal retained redirected pipes' }
+                } finally {
+                    [GC]::EndNoGCRegion()
                 }
-                if ((Get-OpenPipeCount) -gt $before) { throw 'Blob refusal retained redirected pipes' }
-            } finally {
-                [GC]::EndNoGCRegion()
+            } else {
+                Write-Warning 'Pipe descriptor count unavailable because the runtime could not reserve a no-GC region'
             }
         }
     } finally { $script:MaxBatchedBlobBytes = $blobBudget }
@@ -366,8 +370,10 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
     $script:InspectWorktree = $true
     Set-Location -LiteralPath $child
     [Environment]::CurrentDirectory = $child
-    Start-WorktreePolicyQueries
+    $savedLiteralPathspecs = $env:GIT_LITERAL_PATHSPECS
+    $env:GIT_LITERAL_PATHSPECS = '1'
     try {
+        Start-WorktreePolicyQueries
         Initialize-WorktreeRustChangelog
         if ($null -eq $script:PrefetchedWorktreeRustBlobs -or $script:PrefetchedWorktreeRustBlobs.Count -ne 1) {
             throw 'Worktree prefetch did not find the shared immutable HEAD blob'
@@ -390,6 +396,31 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
         }
     } finally {
         Remove-PreCommitPendingGit
+        $env:GIT_LITERAL_PATHSPECS = $savedLiteralPathspecs
+    }
+
+    $repairRepo = Join-Path $temporary 'stage-repair'
+    New-Item -ItemType Directory -Path (Join-Path $repairRepo 'docs') | Out-Null
+    Set-Location -LiteralPath $repairRepo
+    [Environment]::CurrentDirectory = $repairRepo
+    Git init -q
+    Git config user.name Fixture
+    Git config user.email fixture@example.invalid
+    Git config core.hooksPath .git/empty-hooks
+    Git config commit.gpgsign false
+    Git config core.autocrlf false
+    $usage = 'signal-fish-server = "0.12.0"' + "`n"
+    [IO.File]::WriteAllText((Join-Path $repairRepo 'Cargo.toml'), "[package]`nversion = `"0.12.0`"`n")
+    $usagePath = Join-Path $repairRepo 'docs/library-usage.md'
+    [IO.File]::WriteAllText($usagePath, $usage)
+    Git add .
+    Git commit -qm 'seed a canonical library version'
+    [IO.File]::WriteAllText($usagePath, $usage.Replace('0.12.0', '0.99.0'))
+    Git add -- docs/library-usage.md
+    $hook = Invoke-Native -FileName pwsh -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $hookScript)
+    if ($hook.ExitCode -ne 0) { throw "Repaired index was rejected:`n$($hook.Output)" }
+    if ((Invoke-Git -Arguments @('diff', '--cached', '--name-only')).Stdout.Length -ne 0) {
+        throw 'Version repair did not restore the original staged content'
     }
 } finally {
     Set-Location $originalLocation

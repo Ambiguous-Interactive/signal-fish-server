@@ -151,20 +151,21 @@ function Start-WorktreePolicyQueries {
         $script:WorktreeDiscoveryTimer = [System.Diagnostics.Stopwatch]::StartNew()
         # Start from the caller's directory while Git resolves the root.
         $rootedPathspecs = @($script:WorktreePolicyPathspecs | ForEach-Object { ":(top,literal)$_" })
+        # These queries deliberately use pathspec magic, even in a literal-path session.
         # The tracked and untracked walks are independent filesystem scans;
         # starting them as sibling processes lets the two walks overlap instead
         # of serializing behind one full `status` refresh (issue #318: the
         # untracked scan was a measurable fraction of worktree discovery).
         $statusArguments = @(
-            "status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--"
+            "--no-literal-pathspecs", "status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--"
         ) + $rootedPathspecs
         $script:PendingWorktreeStatus = Start-PendingGit -GitArguments $statusArguments
         $untrackedArguments = @(
-            "ls-files", "--full-name", "--others", "--exclude-standard", "-z", "--"
+            "--no-literal-pathspecs", "ls-files", "--full-name", "--others", "--exclude-standard", "-z", "--"
         ) + $rootedPathspecs
         $script:PendingWorktreeUntracked = Start-PendingGit -GitArguments $untrackedArguments
         $script:PendingChangelogRustDiff = Start-PendingGit -GitArguments @(
-            "diff", "--raw", "--no-abbrev", "--no-renames", "-z", "--no-relative", "HEAD", "--",
+            "--no-literal-pathspecs", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", "--no-relative", "HEAD", "--",
             ":(top,literal)src", ":(top,literal)CHANGELOG.md", ":(top,literal).github/internal-refactor.json"
         )
         # The content policy always reads the index, including on clean trees.
@@ -1707,6 +1708,12 @@ function Repair-DocVersionsIfNeeded {
     }
 
     if ($repaired.Count -gt 0) {
+        if (-not $script:InspectWorktree -and $null -ne $script:PendingChangelogFiles) {
+            # A re-staged repair can remove a path from the changelog input.
+            $pending = $script:PendingChangelogFiles
+            $script:PendingChangelogFiles = $null
+            Remove-PendingGit -Pending $pending
+        }
         Pass "Doc version sync (auto-repaired: $($repaired -join ', '))"
     } else {
         Pass "Doc version sync"
