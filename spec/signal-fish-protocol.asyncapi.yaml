@@ -891,7 +891,7 @@ components:
           required: [type, ice_candidates]
           properties:
             type: { const: webrtc }
-            sdp: { type: string, nullable: true }
+            sdp: { type: [string, 'null'] }
             ice_candidates:
               type: array
               items: { type: string }
