@@ -206,6 +206,40 @@ try {
         $result = Invoke-Native -FileName rustc -Arguments $Arguments
         if ($result.ExitCode -ne 0) { throw $result.Output }
     }
+
+    # Some Git installations launch a child that inherits the redirected pipes.
+    $launcherSource = @'
+use std::{env, process::{Command, ExitCode}};
+
+fn main() -> ExitCode {
+    let git = env::var_os("SIGNAL_FISH_FIXTURE_GIT").expect("Git path");
+    let status = Command::new(git).args(env::args_os().skip(1)).status().expect("launch Git");
+    ExitCode::from(status.code().unwrap_or(1) as u8)
+}
+'@
+    $launcherDir = Join-Path $temporary 'git-launcher'
+    New-Item -ItemType Directory -Path $launcherDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $temporary 'git_launcher.rs'), $launcherSource)
+    $launcher = Join-Path $launcherDir $(if ($IsWindows) { 'git.exe' } else { 'git' })
+    Rustc -Arguments @('--edition', '2021', 'git_launcher.rs', '-o', $launcher)
+    $savedPath = $env:PATH
+    $savedGit = $env:SIGNAL_FISH_FIXTURE_GIT
+    $savedBudget = $script:MaxBatchedBlobBytes
+    try {
+        $env:SIGNAL_FISH_FIXTURE_GIT = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+        $env:PATH = $launcherDir + [IO.Path]::PathSeparator + $savedPath
+        $script:MaxBatchedBlobBytes = 16
+        if ($null -ne (Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)) {
+            throw 'Git launcher retained an oversized blob'
+        }
+        $texts = Get-IndexBlobTexts -ObjectIds @($emptyId) -SingleProcess
+        if ($texts.Count -ne 1 -or $texts[$emptyId] -cne '') { throw 'Git launcher did not recover after refusal' }
+    } finally {
+        $env:PATH = $savedPath
+        $env:SIGNAL_FISH_FIXTURE_GIT = $savedGit
+        $script:MaxBatchedBlobBytes = $savedBudget
+    }
+
     function Compile-Output {
         param([string]$Name, [string]$Content, [string[]]$Extra = @())
         [IO.File]::WriteAllText((Join-Path $temporary "$Name.rs"), $Content)

@@ -674,9 +674,13 @@ function Get-BoundedIndexBlobTexts {
         $texts
     } finally {
         try {
-            # An early refusal can leave Git writing a body we did not accept.
+            # A Git launcher can leave a child writing the refused body.
             if (-not $process.HasExited) {
-                try { $process.Kill() } catch { if (-not $process.HasExited) { throw } }
+                try { $process.Kill($true) } catch { if (-not $process.HasExited) { throw } }
+            }
+            if ($null -ne $stdout) {
+                $stdout.Dispose()
+                $stdout = $null
             }
             if ($null -ne $write) {
                 try { [void]$write.GetAwaiter().GetResult() } catch { }
