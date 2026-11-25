@@ -137,6 +137,9 @@ try {
     [IO.File]::WriteAllText((Join-Path $temporary 'empty-blob'), '')
     $payloadId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'blob-payload')).Stdout.Trim()
     $emptyId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'empty-blob')).Stdout.Trim()
+    [IO.File]::WriteAllText((Join-Path $temporary 'large-blob'), ('x' * 131072))
+    $largeId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'large-blob')).Stdout.Trim()
+    Remove-Item -LiteralPath (Join-Path $temporary 'large-blob')
     $blobBudget = $script:MaxBatchedBlobBytes
     try {
         $script:MaxBatchedBlobBytes = [Text.Encoding]::UTF8.GetByteCount($blobPayload)
@@ -156,6 +159,12 @@ try {
             $missingRejected = $_.Exception.Message -like 'Unexpected git cat-file*'
         }
         if (-not $missingRejected) { throw 'Single-process reader swallowed a missing object as a budget miss' }
+        # Refusal must stop Git even when it is still sending an oversized body.
+        if ($null -ne (Get-IndexBlobTexts -ObjectIds @($emptyId, $largeId, $payloadId) -SingleProcess -AllowBudgetMiss)) {
+            throw 'Single-process reader returned partial results after refusing a large body'
+        }
+        $afterRefusal = Get-IndexBlobTexts -ObjectIds @($emptyId) -SingleProcess
+        if ($afterRefusal.Count -ne 1 -or $afterRefusal[$emptyId] -cne '') { throw 'Blob reads did not recover after refusal' }
     } finally { $script:MaxBatchedBlobBytes = $blobBudget }
     foreach ($path in @('server.rs', 'bench.rs')) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
     Git add .
@@ -290,6 +299,44 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
     Git update-index --chmod=+x -- $cachePaths[0]
     $cache = Get-ChangelogRustTextCache -Paths $cachePaths
     if (Test-FileDiffIsTestOnly -Path $cachePaths[0] -CachedContent $cache[$cachePaths[0]]) { throw 'Cached executable mode change was exempted' }
+
+    $child = Join-Path $temporary 'src/child'
+    New-Item -ItemType Directory -Path $child | Out-Null
+    $worktreePaths = @('src/a.rs', 'src/b space.rs', 'src/child/c.rs')
+    foreach ($path in $worktreePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
+    Git add -- @worktreePaths
+    Git commit -qm 'seed worktree prefetch sources'
+    foreach ($path in $worktreePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), "/// Prefetched docs.`n$source") }
+    [IO.File]::WriteAllText((Join-Path $temporary 'src/untracked.rs'), $source)
+
+    $script:InspectWorktree = $true
+    Set-Location -LiteralPath $child
+    [Environment]::CurrentDirectory = $child
+    Start-WorktreePolicyQueries
+    try {
+        Initialize-WorktreeRustChangelog
+        if ($null -eq $script:PrefetchedWorktreeRustBlobs -or $script:PrefetchedWorktreeRustBlobs.Count -ne 1) {
+            throw 'Worktree prefetch did not find the shared immutable HEAD blob'
+        }
+        $changed = [string[]]@(Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs)
+        foreach ($path in ($worktreePaths + 'src/untracked.rs')) {
+            if ($changed -cnotcontains $path) { throw "Rooted discovery omitted $path" }
+        }
+
+        $cache = Get-ChangelogRustTextCache -Paths $worktreePaths
+        foreach ($path in $worktreePaths) {
+            if (-not (Test-FileDiffIsTestOnly -Path $path -CachedContent $cache[$path])) { throw "Prefetched worktree docs rejected: $path" }
+        }
+        $mixedPath = $worktreePaths[1]
+        [IO.File]::WriteAllText((Join-Path $temporary $mixedPath), "/// Mixed docs.`npub fn ready() -> bool { false }`n")
+        $cache = Get-ChangelogRustTextCache -Paths $worktreePaths
+        if ($cache[$mixedPath].New -cnotmatch '\{ false \}' -or
+            (Test-RustDocumentationOnlyChange -OldContent $cache[$mixedPath].Old -NewContent $cache[$mixedPath].New)) {
+            throw 'Worktree prefetch reused stale disk content or accepted a runtime edit'
+        }
+    } finally {
+        Remove-PreCommitPendingGit
+    }
 } finally {
     Set-Location $originalLocation
     [Environment]::CurrentDirectory = $originalDirectory
