@@ -24954,8 +24954,8 @@ fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
         .collect();
     assert_eq!(
         commands.len(),
-        3,
-        "keep isolated macOS spectator, non-TLS, and H14 controls alongside the runtime selector"
+        4,
+        "keep isolated spectator and refused-start allocation, non-TLS, and H14 controls"
     );
     for command in commands {
         assert!(
@@ -24970,22 +24970,31 @@ fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
 }
 
 #[test]
-fn test_isolated_spectator_qualification_runs_after_loaded_nextest_failure() {
+fn test_isolated_allocation_qualification_runs_after_loaded_nextest_failure() {
     let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
     let job = extract_workflow_job_block(&content, "nextest").expect("nextest job");
-    let isolated = extract_named_workflow_step(
+    let spectator = extract_named_workflow_step(
         &job,
         "Qualify isolated macOS spectator admission allocations",
     )
     .expect("isolated spectator qualification step");
+    let refused_start =
+        extract_named_workflow_step(&job, "Qualify isolated refused StartGame allocations")
+            .expect("isolated refused-start qualification step");
     assert!(
-        isolated.contains("!cancelled() && runner.os == 'macOS'")
-            && isolated.contains("github.event_name == 'workflow_dispatch'")
-            && isolated.contains(
-                "steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure'"
-            ),
-        "collect the isolated profile after either loaded verdict on manual macOS runs"
+        spectator.contains("runner.os == 'macOS'"),
+        "keep the spectator profile on macOS"
     );
+    for isolated in [spectator, refused_start] {
+        assert!(
+            isolated.contains("!cancelled()")
+                && isolated.contains("github.event_name == 'workflow_dispatch'")
+                && isolated.contains(
+                    "steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure'"
+                ),
+            "collect the isolated profile after either loaded verdict on manual runs"
+        );
+    }
     let loaded = extract_named_workflow_step(&job, "Run nextest").expect("loaded Nextest step");
     assert!(
         loaded.contains("id: runtime-tests"),

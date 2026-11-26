@@ -393,6 +393,15 @@ jobs:
           cargo nextest run --profile ci --locked --all-features --cargo-profile ci
           --test spectator_join_allocations --test-threads 1 --no-tests fail
 
+      - name: Qualify isolated refused StartGame allocations
+        if: >-
+          ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
+              (steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure') }}
+        run: >-
+          cargo nextest run --profile ci --locked --all-features --cargo-profile ci
+          --test session_plan_allocations --test-threads 1 --no-tests fail --success-output immediate
+          -E 'test(=unready_start_skips_player_metadata) | test(=runtime_registry_warmup_retains_exact_spawn_cost)'
+
       - name: Upload room replacement attempts
         if: always()
         uses: actions/upload-artifact@v7.0.2

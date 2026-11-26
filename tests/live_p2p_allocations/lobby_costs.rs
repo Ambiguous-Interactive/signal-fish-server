@@ -6,6 +6,7 @@ use signal_fish_server::coordination::{
 };
 use signal_fish_server::database::{GameDatabase, InMemoryDatabase};
 use signal_fish_server::protocol::{ErrorCode, PlayerInfo};
+use signal_fish_server::server::allocation_benchmark::warm_close_waiters_for_measurement;
 use signal_fish_server::server::InMemoryMessageCoordinator;
 use std::sync::Arc;
 
@@ -32,8 +33,12 @@ async fn server() -> Arc<EnhancedGameServer> {
 
 pub(crate) fn unready_start_skips_player_metadata() {
     allocation_harness::block_on(async {
+        // Start the periodic workers on paused time before measuring refusals.
+        tokio::time::pause();
         allocation_harness::warm_current_thread_runtime().await;
         let server = server().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
         let mut receivers = Vec::new();
         for index in 1..=2 {
             let id = Uuid::from_u128(index);
@@ -77,6 +82,17 @@ pub(crate) fn unready_start_skips_player_metadata() {
             set_start_metadata(&server, room, 0).await;
             let cold = refused_start_cost(&server, actor, room, &mut receivers).await;
             println!("UNREADY_START_COLD ready_actor={ready_actor} stats={cold:?}");
+            // One refused start warms the reply lock, but the close listener
+            // can choose a different watch wait list on each subsequent call.
+            let warm_region = stats_alloc::Region::new(ALLOCATOR);
+            assert!(warm_close_waiters_for_measurement(&server, &actor));
+            let first_warm = warm_region.change();
+            let repeat_region = stats_alloc::Region::new(ALLOCATOR);
+            assert!(warm_close_waiters_for_measurement(&server, &actor));
+            let repeat_warm = repeat_region.change();
+            println!("UNREADY_START_CLOSE_WAITERS ready_actor={ready_actor} first={first_warm:?} repeat={repeat_warm:?}");
+            assert_eq!(repeat_warm.allocations, 0, "{repeat_warm:?}");
+            assert_eq!(repeat_warm.reallocations, 0, "{repeat_warm:?}");
             let mut profiles = Vec::new();
             for bytes in [0, 1024, 65536] {
                 set_start_metadata(&server, room, bytes).await;
@@ -112,9 +128,15 @@ async fn refused_start_cost(
     room: Uuid,
     receivers: &mut [tokio::sync::mpsc::Receiver<Arc<ServerMessage>>],
 ) -> stats_alloc::Stats {
+    let before = tokio::time::Instant::now();
     let region = stats_alloc::Region::new(ALLOCATOR);
     server.handle_start_game(&actor).await;
     let stats = region.change();
+    assert_eq!(
+        tokio::time::Instant::now(),
+        before,
+        "refused StartGame must finish before paused time advances"
+    );
     let reply = receivers[0].try_recv().unwrap();
     assert!(
         matches!(
