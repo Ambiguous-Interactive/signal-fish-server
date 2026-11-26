@@ -5,8 +5,8 @@
 # remaining acceptance: representative macOS and Windows measurements).
 #
 # Zero standing allocation: this workflow has NO schedule trigger. It runs
-# manually (workflow_dispatch) and on pull requests that change its definition or fixture,
-# so a baseline refresh costs one short, three-OS job set per deliberate run.
+# manually (workflow_dispatch) and on pull requests that change the replay,
+# the policy fixture, or the pre-commit implementation.
 # The measured wall-clock numbers are evidence for docs/issue records — never
 # a hosted pass/fail threshold (per the no-flaky doctrine, wall-clock totals
 # must not gate correctness).
@@ -29,6 +29,12 @@ on:
     paths:
       - ".github/workflows/hook-baselines.yml"
       - ".github/test-fixtures/profile-internal-refactor.ps1"
+      - ".github/test-fixtures/test-internal-refactor.ps1"
+      - "scripts/hooks/internal-refactor.ps1"
+      - "scripts/hooks/native-process.ps1"
+      - "scripts/hooks/pre-commit.ps1"
+      - "scripts/hooks/pre-commit-rust.ps1"
+      - "scripts/hooks/rust-documentation.ps1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
