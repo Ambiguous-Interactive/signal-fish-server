@@ -120,7 +120,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.10
         with:
           tool: cargo-nextest@0.9.149
       - name: Run relay delivery soak
@@ -239,7 +239,7 @@ jobs:
             .
             clients/native
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.10
         with:
           tool: cargo-nextest@0.9.149
       - name: Build the native reference client
@@ -401,7 +401,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-nextest
         id: install-nextest
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.10
         with:
           tool: cargo-nextest@0.9.149
       # --run-ignored all: the PR-lane profiles (already covered by the ci.yml

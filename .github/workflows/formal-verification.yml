@@ -154,7 +154,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Install pinned hax
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.10
         with:
           tool: cargo-hax@0.4.2
 
@@ -233,7 +233,7 @@ jobs:
           toolchain: ${{ steps.toolchain.outputs.channel }}
 
       - name: Install pinned hax
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.10
         with:
           tool: cargo-hax@0.4.2
 
