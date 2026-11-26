@@ -877,6 +877,7 @@ pub enum GameDataEncoding {
             must_contain: vec![
                 "non-internal changes without CHANGELOG.md update",
                 "src/main.rs",
+                "before and after blobs in .github/internal-refactor.json",
             ],
             must_not_contain: vec![],
         },

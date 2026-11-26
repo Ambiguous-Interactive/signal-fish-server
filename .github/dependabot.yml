@@ -197,6 +197,121 @@ updates:
           - "patch"
 
   # ============================================================================
+  # Rust Dependencies (Cargo) - Audited Fixture Lockfiles
+  # ============================================================================
+  # The exact-release interoperability fixtures (third_party WebRTC/RTC/SCTP and
+  # the Fortress clients) keep their pinned release lines, but CI audits their
+  # Cargo.lock graphs. Without an update job, a new advisory in a transitive
+  # dependency (for example url RUSTSEC-2026-0592) leaves `Dependency Audit`
+  # red forever and blocks every other Dependabot pull request. These entries
+  # use `lockfile-only`, so Dependabot refreshes transitive lock entries and
+  # never edits the pinned fixture manifests.
+  - package-ecosystem: "cargo"
+    directory: "/third_party/webrtc"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    versioning-strategy: "lockfile-only"
+    commit-message:
+      prefix: "chore(webrtc-fixture)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-webrtc-fixture-updates:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/third_party/rtc"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    versioning-strategy: "lockfile-only"
+    commit-message:
+      prefix: "chore(rtc-fixture)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-rtc-fixture-updates:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/third_party/rtc-sctp"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    versioning-strategy: "lockfile-only"
+    commit-message:
+      prefix: "chore(rtc-sctp-fixture)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-rtc-sctp-fixture-updates:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/clients/fortress"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    versioning-strategy: "lockfile-only"
+    commit-message:
+      prefix: "chore(fortress-fixture)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-fortress-fixture-updates:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "cargo"
+    directory: "/clients/fortress-wasm"
+    schedule:
+      interval: "weekly"
+    assignees:
+      - "wallstop"
+    rebase-strategy: "auto"
+    versioning-strategy: "lockfile-only"
+    commit-message:
+      prefix: "chore(fortress-wasm-fixture)"
+      include: "scope"
+    open-pull-requests-limit: 1
+    labels:
+      - "dependencies"
+      - "rust"
+      - "automated"
+    groups:
+      cargo-fortress-wasm-fixture-updates:
+        patterns:
+          - "*"
+
+  # ============================================================================
   # JavaScript Dependencies - Browser Reference Client
   # ============================================================================
   - package-ecosystem: "npm"

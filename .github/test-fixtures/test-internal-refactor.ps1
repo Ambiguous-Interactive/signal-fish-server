@@ -27,7 +27,7 @@ function Expect-Rejection {
 function Expect-Paths {
     param([string]$Mode, [string]$DiffBase = "")
     $paths = Get-InternalRefactorExemptions -Mode $Mode -DiffBase $DiffBase
-    if (($paths | Sort-Object) -join "," -cne "src/.hidden.rs,src/core.rs,src/deleted.rs,src/new.rs") {
+    if (($paths | Sort-Object) -join "," -cne ".cargo/mutants.toml,src/.hidden.rs,src/core.rs,src/deleted.rs,src/new.rs") {
         throw "Wrong exemption paths in $Mode"
     }
 }
@@ -48,10 +48,19 @@ try {
     Git config core.hooksPath $emptyHooks | Out-Null
     Git config user.name "Fixture" | Out-Null
     Git config user.email "fixture@example.invalid" | Out-Null
-    New-Item -ItemType Directory -Path src, .github | Out-Null
-    [System.IO.File]::WriteAllText("src/core.rs", "old core`n")
+    New-Item -ItemType Directory -Path src, .github, .cargo | Out-Null
+    $beforeProbe = "fn ready() -> bool {`n    true`n}`n"
+    $afterProbe = @'
+fn ready() -> bool {
+    #[cfg(feature = "allocation-tracking")]
+    crate::allocation_benchmark::record_stage("ready");
+    true
+}
+'@ + "`n"
+    [System.IO.File]::WriteAllText("src/core.rs", $beforeProbe)
     [System.IO.File]::WriteAllText("src/.hidden.rs", "old hidden`n")
     [System.IO.File]::WriteAllText("src/deleted.rs", "deleted core`n")
+    [System.IO.File]::WriteAllText(".cargo/mutants.toml", "timeout_multiplier = 2.0`n")
     Git add . | Out-Null
     Git commit -qm seed | Out-Null
     $base = Git rev-parse HEAD
@@ -59,18 +68,29 @@ try {
     $deleted = Git rev-parse HEAD:src/deleted.rs
     $hidden = Git rev-parse HEAD:src/.hidden.rs
     [System.IO.File]::WriteAllText("src/.hidden.rs", "new hidden`n")
-    [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
+    [System.IO.File]::WriteAllText(".cargo/mutants.toml", "timeout_multiplier = 3.0`n")
+    Git add src/core.rs | Out-Null
     [System.IO.File]::WriteAllText("src/new.rs", "new file`n")
     Remove-Item src/deleted.rs
-    if ((Get-InternalRefactorExemptions -Mode Worktree).Count -ne 0) { throw "Missing declaration exempted source" }
+    $undeclaredPaths = Get-InternalRefactorExemptions -Mode Worktree
+    if ($undeclaredPaths -isnot [string[]] -or $undeclaredPaths.Length -ne 0) {
+        throw "Expected an empty path list without a declaration"
+    }
+    $failedBefore = $script:Failed
+    $guidance = Test-ChangelogGate -ChangedFiles @("src/core.rs") 6>&1 | Out-String
+    if ($script:Failed -ne $failedBefore + 1 -or $guidance -cnotmatch '\.github/internal-refactor\.json') {
+        throw "Undeclared allocation probe must fail with exact-blob guidance"
+    }
     $declaration = @{
         base = $base
-        reason = "Move unchanged logic into a shared private module."
+        reason = "Add a dev-only allocation probe and refresh private fixtures."
         files = @(
             @{path = "src/core.rs"; before = $before; after = (Git hash-object src/core.rs)},
             @{path = "src/new.rs"; before = $null; after = (Git hash-object src/new.rs)},
             @{path = "src/deleted.rs"; before = $deleted; after = $null},
-            @{path = "src/.hidden.rs"; before = $hidden; after = (Git hash-object src/.hidden.rs)}
+            @{path = "src/.hidden.rs"; before = $hidden; after = (Git hash-object src/.hidden.rs)},
+            @{path = ".cargo/mutants.toml"; before = (Git rev-parse HEAD:.cargo/mutants.toml); after = (Git hash-object .cargo/mutants.toml)}
         )
     }
     Save-Declaration $declaration
@@ -78,6 +98,28 @@ try {
     Git add -A | Out-Null
     Expect-Paths Staged
     Expect-Paths Comparison $base
+    foreach ($worktreeMode in @($false, $true)) {
+        $script:InspectWorktree = $worktreeMode
+        $failedBefore = $script:Failed
+        $declaredChanges = @("src/core.rs", ".cargo/mutants.toml", ".github/internal-refactor.json")
+        Test-ChangelogGate -ChangedFiles $declaredChanges
+        if ($script:Failed -ne $failedBefore) { throw "Hook rejected declared probe or mutation configuration" }
+        $rejection = Test-ChangelogGate -ChangedFiles ($declaredChanges + ".cargo/config.toml") 6>&1 | Out-String
+        if ($script:Failed -ne $failedBefore + 1 -or $rejection -cnotmatch '\.cargo/config\.toml') {
+            throw "Mutation configuration declaration covered Cargo build configuration"
+        }
+        $failedBefore = $script:Failed
+
+        [System.IO.File]::WriteAllText("src/core.rs", $afterProbe.Replace('    true', '    false'))
+        if (-not $worktreeMode) { Git add src/core.rs | Out-Null }
+        $rejection = Test-ChangelogGate -ChangedFiles $declaredChanges 6>&1 | Out-String
+        if ($script:Failed -ne $failedBefore + 1 -or $rejection -cnotmatch 'after blob mismatch') {
+            throw "Allocation probe declaration covered a changed return value"
+        }
+        [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
+        Git add src/core.rs | Out-Null
+    }
+    $script:InspectWorktree = $false
     Expect-Rejection {
         Get-InternalRefactorExemptions -Mode Comparison -DiffBase $base -ChangeAlreadyObserved
     } "comparison discovery bypass"
@@ -85,7 +127,7 @@ try {
     [System.IO.File]::WriteAllText("src/core.rs", "unstaged drift`n")
     Expect-Paths Staged
     Expect-Rejection { Get-InternalRefactorExemptions -Mode Worktree } "unstaged source drift"
-    [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
 
     Remove-Item -LiteralPath src/.hidden.rs -Force
     foreach ($mode in @("Worktree", "Comparison")) {
@@ -157,7 +199,7 @@ try {
     Save-Declaration $substitution
     Expect-Rejection { Get-InternalRefactorExemptions -Mode Comparison -DiffBase "$base...HEAD" } "dirty declaration substitution"
     Save-Declaration $declaration
-    [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
     $refactorBranch = Git symbolic-ref --short HEAD
     Git checkout -qb unrelated-base $base | Out-Null
     [System.IO.File]::WriteAllText("unrelated.txt", "unrelated base advance`n")
@@ -169,7 +211,7 @@ try {
     Expect-Paths Comparison "$advancedBase...HEAD"
 
     Git checkout -qb changed-path-base $base | Out-Null
-    [System.IO.File]::WriteAllText("src/core.rs", "new core`n")
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
     Git add src/core.rs | Out-Null
     Git commit -qm changed-path | Out-Null
     $changedPathBase = Git rev-parse HEAD

@@ -125,7 +125,7 @@ jiff = { version = "1.0.1", default-features = false, features = ["std", "serde"
 semver = "1.0.28"
 # Parse configured browser origins with the URL Standard's canonical host,
 # port, and IP-address rules before comparing their serialized form exactly.
-url = "2.5.8"
+url = "2.5.9"
 # Canonical Unicode caseless matching for player-name identity. This combines
 # canonical normalization with full, non-Turkic folding without conflating
 # compatibility-only equivalents.
