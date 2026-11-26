@@ -25645,7 +25645,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 }
                 if (-not $caught -or $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
-                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingRustPanicDiff -or
                     $null -ne $script:PendingChangelogBlob -or
                     $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
@@ -25690,7 +25690,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 }
                 $script:PendingWorktreeStatus = [pscustomobject]@{ Id = 1 }
                 $script:PendingWorktreeUntracked = [pscustomobject]@{ Id = 2 }
-                $script:PendingWorktreeRustDiff = [pscustomobject]@{ Id = 3 }
+                $script:PendingRustPanicDiff = [pscustomobject]@{ Id = 3 }
                 $script:PendingChangelogBlob = [pscustomobject]@{ Id = 4 }
                 $script:PendingChangelogFiles = [pscustomobject]@{ Id = 5 }
                 $script:PendingChangelogRustDiff = [pscustomobject]@{ Id = 6 }
@@ -25701,7 +25701,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4,5,6' -or
                     $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
-                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingRustPanicDiff -or
                     $null -ne $script:PendingChangelogBlob -or
                     $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
@@ -27612,7 +27612,7 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("CheckTimings.Add")
             && content.contains("PendingWorktreeStatus")
             && content.contains("PendingWorktreeUntracked")
-            && content.contains("PendingWorktreeRustDiff")
+            && content.contains("PendingRustPanicDiff")
             && content.contains("ReadToEndAsync")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")

@@ -102,6 +102,24 @@ fn ready() -> bool {
     Expect-Paths Staged
     Expect-Rejection { Get-InternalRefactorExemptions -Mode Worktree } "unstaged declaration drift"
     Save-Declaration $declaration
+    # A declaration can exempt a changelog entry, while the staged panic policy still applies.
+    $panickingProbe = $afterProbe.Replace('    true', '    panic!("staged refactor probe")')
+    [System.IO.File]::WriteAllText("src/core.rs", $panickingProbe)
+    Git add src/core.rs | Out-Null
+    $declaration.files[0].after = Git rev-parse :src/core.rs
+    Save-Declaration $declaration
+    Git add .github/internal-refactor.json | Out-Null
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
+    $hook = Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1"
+    $rejection = & pwsh -NoLogo -NoProfile -NonInteractive -File $hook
+    if ($LASTEXITCODE -eq 0 -or $rejection -cnotcontains "PASS: Changelog gate" -or
+        $rejection -cnotcontains "FAIL: Rust panic patterns") {
+        throw "An exact declaration hid a staged panic: $($rejection -join "`n")"
+    }
+    $declaration.files[0].after = Git hash-object src/core.rs
+    Save-Declaration $declaration
+    Git add src/core.rs .github/internal-refactor.json | Out-Null
+
     foreach ($worktreeMode in @($false, $true)) {
         $script:InspectWorktree = $worktreeMode
         $failedBefore = $script:Failed
