@@ -24970,6 +24970,24 @@ fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
 }
 
 #[test]
+fn test_isolated_spectator_qualification_runs_after_loaded_nextest_failure() {
+    let content = read_live_file(&repo_root().join(".github/workflows/ci.yml"));
+    let job = extract_workflow_job_block(&content, "nextest").expect("nextest job");
+    let isolated = extract_named_workflow_step(&job, "Qualify isolated macOS spectator admission allocations")
+        .expect("isolated spectator qualification step");
+    assert!(
+        isolated.contains("!cancelled() && runner.os == 'macOS'")
+            && isolated.contains("github.event_name == 'workflow_dispatch'")
+            && isolated.contains(
+                "steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure'"
+            ),
+        "collect the isolated profile after either loaded verdict on manual macOS runs"
+    );
+    let loaded = extract_named_workflow_step(&job, "Run nextest").expect("loaded Nextest step");
+    assert!(loaded.contains("id: runtime-tests"), "identify the loaded test step");
+}
+
+#[test]
 fn test_nextest_preserves_nested_dependency_cache() {
     let root = repo_root();
     let content = read_live_file(&root.join(".github/workflows/ci.yml"));

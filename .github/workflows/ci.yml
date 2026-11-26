@@ -381,11 +381,14 @@ jobs:
         run: bash scripts/record-test-cpu-evidence.sh
 
       - name: Run nextest
+        id: runtime-tests
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: python3 scripts/ci-cohort.py --runtime
 
       - name: Qualify isolated macOS spectator admission allocations
-        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch'
+        if: >-
+          ${{ !cancelled() && runner.os == 'macOS' && github.event_name == 'workflow_dispatch' &&
+              (steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure') }}
         run: >-
           cargo nextest run --profile ci --locked --all-features --cargo-profile ci
           --test spectator_join_allocations --test-threads 1 --no-tests fail
