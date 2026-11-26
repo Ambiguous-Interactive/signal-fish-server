@@ -16,10 +16,6 @@
 # Every run must still PASS all hook checks: a baseline from a failing hook is
 # not a baseline.
 #
-# pwsh note: steps below deliberately avoid bash-flavored syntax (`${...}`,
-# `$(...)`, `2>&1`) so the Windows-job shell-safety check stays clean while
-# every step declares `shell: pwsh`.
-
 name: Hook Baselines
 
 on:
@@ -28,7 +24,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/hook-baselines.yml"
-      - ".github/test-fixtures/profile-internal-refactor.ps1"
+      - ".github/test-fixtures/profile-hook-baselines.py"
       - ".github/test-fixtures/test-internal-refactor.ps1"
       - "scripts/hooks/internal-refactor.ps1"
       - "scripts/hooks/native-process.ps1"
@@ -45,9 +41,6 @@ concurrency:
 
 permissions:
   contents: read
-
-env:
-  REPETITIONS: 5
 
 jobs:
   baseline:
@@ -79,70 +72,15 @@ jobs:
           git --version
           pwsh --version
 
-      - name: Worktree preflight baselines (-Worktree)
-        shell: pwsh
-        run: |
-          $env:SIGNAL_FISH_HOOK_PROFILE = "1"
-          $totals = [System.Collections.Generic.List[long]]::new()
-          for ($i = 1; $i -le $Env:REPETITIONS; $i++) {
-            $label = if ($i -eq 1) { "cold (index refresh)" } else { "warm" }
-            Write-Host "=== pre-commit -Worktree run $i of $Env:REPETITIONS ($label) ==="
-            $output = & pwsh -NoLogo -NoProfile -File scripts/hooks/pre-commit.ps1 -Worktree
-            $output | ForEach-Object { Write-Host "$_" }
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::pre-commit -Worktree run $i failed (exit $LASTEXITCODE)"
-              exit $LASTEXITCODE
-            }
-            $completed = $output | Select-String 'Completed in (\d+)ms'
-            if (-not $completed) {
-              Write-Host "::error::run $i produced no 'Completed in Nms' line"
-              exit 1
-            }
-            $totals.Add([long]$completed.Matches[0].Groups[1].Value)
-          }
-          $warm = @($totals | Select-Object -Skip 1)
-          $sorted = $warm | Sort-Object
-          $idx = [int][math]::Floor(($warm.Count - 1) / 2)
-          $median = $sorted[$idx]
-          "worktree_totals=" + ($totals -join ",") | Out-File -Append $Env:GITHUB_ENV
-          "worktree_median_warm=$median" | Out-File -Append $Env:GITHUB_ENV
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          version: 0.13.10
+          enable-cache: false
 
-      - name: Staged-commit baselines (real staged change)
+      - name: Profile standard pre-commit workloads
         shell: pwsh
-        run: |
-          $env:SIGNAL_FISH_HOOK_PROFILE = "1"
-          Add-Content -Path src/lib.rs -Value "// hook-baseline measurement marker (reverted below, never pushed)"
-          # The pre-commit changelog gate requires a CHANGELOG.md update for a
-          # non-internal staged change; stage the accompaniment the marker
-          # simulates so the hook under measurement passes.
-          Add-Content -Path CHANGELOG.md -Value "- Hooks: hook-baseline measurement marker (reverted below, never pushed)."
-          git add src/lib.rs CHANGELOG.md
-          $totals = [System.Collections.Generic.List[long]]::new()
-          for ($i = 1; $i -le $Env:REPETITIONS; $i++) {
-            $label = if ($i -eq 1) { "cold (index refresh)" } else { "warm" }
-            Write-Host "=== pre-commit (staged) run $i of $Env:REPETITIONS ($label) ==="
-            $output = & pwsh -NoLogo -NoProfile -File scripts/hooks/pre-commit.ps1
-            $output | ForEach-Object { Write-Host "$_" }
-            if ($LASTEXITCODE -ne 0) {
-              Write-Host "::error::pre-commit staged run $i failed (exit $LASTEXITCODE)"
-              git checkout HEAD -- src/lib.rs CHANGELOG.md
-              exit $LASTEXITCODE
-            }
-            $completed = $output | Select-String 'Completed in (\d+)ms'
-            if (-not $completed) {
-              Write-Host "::error::run $i produced no 'Completed in Nms' line"
-              git checkout HEAD -- src/lib.rs CHANGELOG.md
-              exit 1
-            }
-            $totals.Add([long]$completed.Matches[0].Groups[1].Value)
-          }
-          git checkout HEAD -- src/lib.rs CHANGELOG.md
-          $warm = @($totals | Select-Object -Skip 1)
-          $sorted = $warm | Sort-Object
-          $idx = [int][math]::Floor(($warm.Count - 1) / 2)
-          $median = $sorted[$idx]
-          "staged_totals=" + ($totals -join ",") | Out-File -Append $Env:GITHUB_ENV
-          "staged_median_warm=$median" | Out-File -Append $Env:GITHUB_ENV
+        run: uv run --script .github/test-fixtures/profile-hook-baselines.py standard --summary (Join-Path $Env:RUNNER_TEMP "hook-baseline-summary.md")
 
       - name: Verify exact-blob policy
         shell: pwsh
@@ -150,53 +88,13 @@ jobs:
 
       - name: Profile the exact-blob refactor workload
         shell: pwsh
-        run: pwsh -NoLogo -NoProfile -NonInteractive -File .github/test-fixtures/profile-internal-refactor.ps1 -Fetch
+        run: uv run --script .github/test-fixtures/profile-hook-baselines.py refactor --fetch
 
-      - name: Report baseline summary
-        if: always()
+      - name: Post baseline summary
+        if: always() && github.event_name == 'pull_request'
+        continue-on-error: true
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          SUMMARY_MARKDOWN: ${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}
-        run: |
-          $imageVersion = $Env:ImageVersion
-          if (-not $imageVersion) { $imageVersion = 'unknown' }
-          $totalsW = if ($Env:worktree_totals) { $Env:worktree_totals } else { 'not captured' }
-          $medianW = if ($Env:worktree_median_warm) { $Env:worktree_median_warm } else { 'n/a' }
-          $totalsS = if ($Env:staged_totals) { $Env:staged_totals } else { 'not captured' }
-          $medianS = if ($Env:staged_median_warm) { $Env:staged_median_warm } else { 'n/a' }
-          $partsW = $totalsW -split ","
-          $partsS = $totalsS -split ","
-          $coldW = $partsW[0]
-          $warmW = ($partsW | Select-Object -Skip 1) -join ", "
-          $coldS = $partsS[0]
-          $warmS = ($partsS | Select-Object -Skip 1) -join ", "
-          $table = @(
-            "### Pre-commit hook baselines — $Env:MATRIX_OS (runner image $imageVersion)",
-            "",
-            "| Path | Run 1 (cold) | Runs 2-$Env:REPETITIONS (warm) | Warm median |",
-            "| --- | --- | --- | --- |",
-            "| Worktree preflight (`-Worktree`) | $coldW ms | $warmW ms | $medianW ms |",
-            "| Staged (real staged change) | $coldS ms | $warmS ms | $medianS ms |",
-            "",
-            "Command shape: SIGNAL_FISH_HOOK_PROFILE=1 env var, then",
-            # Single-quoted: the backticks are literal markdown, and a double-
-            # quoted trailing backtick would escape the string terminator.
-            '`pwsh -NoLogo -NoProfile -File <pre-commit hook script> [-Worktree]`'
-          )
-          # Pipeline input only (never -InputObject together with a pipeline:
-          # PowerShell cannot bind both and the write silently no-ops).
-          $table | Out-File -Append -FilePath $Env:GITHUB_STEP_SUMMARY
-          # On pull requests, publish the same table as a PR comment so the
-          # recording survives outside the run UI (issue #318's evidence
-          # trail). Best-effort: a failed comment must not fail the baseline.
-          if ($Env:SUMMARY_MARKDOWN -ne "") {
-            $table | Out-File -FilePath baseline-summary.md
-            & gh pr comment $Env:SUMMARY_MARKDOWN --body-file baseline-summary.md
-            if ($LASTEXITCODE -ne 0) {
-              # GITHUB_STEP_SUMMARY evidence already exists; a failed comment
-              # (transient API error, rate limit) must not fail the baseline.
-              Write-Host "::warning::could not post the baseline summary comment (exit $LASTEXITCODE)"
-            }
-          }
-          exit 0
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh pr comment $Env:PR_NUMBER --body-file (Join-Path $Env:RUNNER_TEMP "hook-baseline-summary.md")

@@ -247,6 +247,28 @@ fn ready() -> bool {
     Git add src/core.rs | Out-Null
     if ((Get-InternalRefactorExemptions -Mode Staged).Count -ne 0) { throw "Historical declaration exempted a later change" }
     if ((Get-InternalRefactorExemptions -Mode Worktree).Count -ne 0) { throw "Historical declaration exempted worktree drift" }
+    . (Join-Path $RepositoryRoot "scripts/hooks/pre-commit-rust.ps1")
+    Git config color.grep always | Out-Null
+    $literalPath = "src/panic[1].rs"
+    $decoyPath = "src/panic1.rs"
+    $testPaths = @($literalPath)
+    if (-not $IsWindows) { $testPaths += "src/panic`nname.rs" }
+    foreach ($path in ($testPaths + $decoyPath)) {
+        [System.IO.File]::WriteAllText($path, 'fn example() { panic!("fixture"); }' + "`n")
+    }
+    Git add -- src | Out-Null
+    Git commit -qm "Add literal path scanner controls" | Out-Null
+    foreach ($path in $testPaths) {
+        foreach ($hits in @(
+            ,@(Get-StagedRustPanicMacroCandidates -Pathspecs @($path))
+            ,@(Get-HeadRustPanicMacroCandidates -Pathspecs @($path))
+            ,@(Get-WorktreeRustPanicMacroCandidates -Pathspecs @($path))
+        )) {
+            if ($hits.Count -ne 1 -or $hits[0].File -cne $path -or $hits[0].Line -ne 1) {
+                throw "Panic scanner selected a different path or line"
+            }
+        }
+    }
     Write-Output "PASS internal-refactor staged, worktree, comparison, and negative controls"
 } finally {
     Set-Location -LiteralPath $originalLocation.Path

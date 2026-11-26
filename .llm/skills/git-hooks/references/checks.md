@@ -26,6 +26,10 @@
 - Prefer PowerShell 7 (`pwsh`) for hook logic; keep extensionless `.githooks/*`
   files as tiny Git wrappers
 - Check only staged or pushed files and use NUL-delimited Git output for path safety
+- Reuse literal Git arguments when a prefetch and a fallback read the same paths.
+  Run the full scanner with a glob-shaped filename and a matching decoy.
+  For `git grep -n -z`, parse NUL between the filename, line number, and
+  matching text. Test a newline in a filename on filesystems that allow it.
 - Force UTF-8 stdout/stderr decoding in native process helpers; never rely on
   platform-default code pages for generated-file comparisons
 - PowerShell helpers must return exactly one result object. Assign or `[void]`

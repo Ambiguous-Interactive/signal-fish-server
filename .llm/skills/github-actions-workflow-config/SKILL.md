@@ -32,6 +32,8 @@ description: >-
 - Default permissions to `contents: read`; grant only what is needed
 - For GHCR publishing, derive `images:` from repository owner/name; do not hard-code org names
 - Always include the workflow file itself in `paths:` triggers
+- For a path-filtered workflow that calls repository code, include the script,
+  fixtures, and local helpers that can change its result.
 - Invoke local scripts through interpreters (`bash`, `pwsh -File`, `awk -f`,
   `node`); never use direct `run: scripts/foo.sh` execution
 
@@ -151,6 +153,10 @@ exit 1
 ---
 
 ## 4. Minimal Permissions (Security)
+
+When a job runs pull request code and posts results, disable checkout credential
+persistence and pass the posting token only to the reporting step. If the code
+fetches public fixtures, verify the pinned fetch with credentials disabled.
 
 Declare permissions explicitly (org defaults vary). Start with `contents: read` and grant only what is needed:
 

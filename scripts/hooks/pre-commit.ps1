@@ -491,7 +491,7 @@ function Get-PolicyText {
 function Get-IndexFiles {
     param([string[]]$Pathspecs)
 
-    $arguments = @("ls-files", "-z", "--") + $Pathspecs
+    $arguments = @("--literal-pathspecs", "ls-files", "-z", "--") + $Pathspecs
     $result = Invoke-Git -Arguments $arguments
     if ([string]::IsNullOrEmpty($result.Stdout)) {
         return @()
@@ -573,7 +573,7 @@ function Get-IndexFileObjectIds {
         return $objectIdsByPath
     }
 
-    $arguments = @("ls-files", "-s", "-z", "--") + $Pathspecs
+    $arguments = @("--literal-pathspecs", "ls-files", "-s", "-z", "--") + $Pathspecs
     $result = Invoke-Git -Arguments $arguments
     if ([string]::IsNullOrEmpty($result.Stdout)) {
         return $objectIdsByPath
