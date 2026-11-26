@@ -853,6 +853,44 @@ frozen raw-byte contract and does not add sender fields to those payloads.
 Binary game data is always reliable. The bare binary frame has no `class` or
 `key`, and clients must not infer a delivery class from its contents.
 
+### Addressed binary game data
+
+A v3 client that negotiates a binary format can request
+`addressed_binary_game_data` in `Authenticate.requested_capabilities`. It
+must wait for `ProtocolInfo` before sending binary data. If the server echoes
+the token in `ProtocolInfo.capabilities`, every subsequent client binary
+frame uses one of these headers.
+
+| First byte | Following header bytes | Delivery |
+| --- | --- | --- |
+| `0x00` | None | Ordinary room broadcast |
+| `0x01` | Recipient's 16-byte UUID in network byte order | One seated peer |
+
+The rest of the frame is the original opaque binary payload. The WebSocket
+message limit includes the header. The existing game-data payload limit and
+relay byte budgets measure the payload bytes. A malformed header is rejected.
+Servers that omit the token continue to accept the original unprefixed
+broadcast shape. Existing clients can continue omitting the token.
+
+A directed recipient must be a different current seat in the same room that
+negotiated this capability and the same binary format. A directed request never
+falls back to broadcast. An unavailable target receives no copy. The sender
+receives an `INVALID_INPUT` error if the target is unavailable before
+admission. If the recipient leaves during delivery, the old membership's
+pending delivery is discarded. Spectators are outside this route.
+
+An ordinary broadcast reaches the existing recipients in the existing wire
+shape. A directed delivery uses byte `0x01` followed by the v3 MessagePack
+map described above. In that map `epoch` names the sender's seated
+incarnation, and `seq` is an independent sender-socket receipt ID. Directed
+IDs may be sparse because other peers see only their own addressed deliveries.
+They do not contribute to `DeliveryReport` broadcast gap ranges, the
+broadcast membership baseline, or the broadcast terminal watermark.
+
+Both lanes use the reliable gameplay queue. An addressed message cannot pass
+an earlier message from the same sender to the same recipient. Queue
+pressure follows the same timeout and recipient-close rules as broadcast.
+
 ### Delivery semantics
 
 The v2 contract and an unclassified v3 `GameData` are reliable: a full data

@@ -414,6 +414,8 @@ pub const PROTOCOL_INFO_TRANSPORT_WEBSOCKET: &str = "websocket";
 pub const ROOM_OPERATION_IDS_CAPABILITY: &str = "room_operation_ids";
 /// Server support for live, read-only spectator relay after a fenced snapshot.
 pub const SPECTATOR_RELAY_CAPABILITY: &str = "spectator_relay";
+/// Opt-in game-data framing for private deliveries to one current room seat.
+pub const ADDRESSED_BINARY_GAME_DATA_CAPABILITY: &str = "addressed_binary_game_data";
 
 /// Describes negotiated protocol capabilities for a specific SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -38,7 +38,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, Weak};
 
 use outbound_queue::{
-    CapacityReleaseWitness, DataDeliveryMetadata, DeliveryMessage,
+    is_data_message, CapacityReleaseWitness, DataDeliveryMetadata, DeliveryMessage,
     EnqueueOutcome as QueueEnqueueOutcome, OutboundData, OutboundPermit, OutboundSender,
     TryEnqueueError,
 };
@@ -1021,7 +1021,10 @@ impl DeliverySender {
     ) -> Option<crate::protocol::DeliveryClass> {
         let requested = match message {
             ServerMessage::GameData { class, .. } => class.unwrap_or_default(),
-            ServerMessage::GameDataBinary { .. } => crate::protocol::DeliveryClass::Reliable,
+            ServerMessage::GameDataBinary { .. }
+            | ServerMessage::AddressedGameDataBinary { .. } => {
+                crate::protocol::DeliveryClass::Reliable
+            }
             _ => return None,
         };
         match &self.0 {
@@ -1102,10 +1105,7 @@ impl DeliverySender {
                     sender
                         .try_enqueue_transition(message, *generation)
                         .map_err(map_control_queue_error)
-                } else if matches!(
-                    delivery.message(),
-                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
-                ) {
+                } else if is_data_message(delivery.message()) {
                     let data = classify_outbound_data(delivery, room_id)
                         .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
                     sender
@@ -1145,10 +1145,7 @@ impl DeliverySender {
                         .enqueue_transition(message, *generation)
                         .await
                         .map_err(map_control_queue_error)
-                } else if matches!(
-                    delivery.message(),
-                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
-                ) {
+                } else if is_data_message(delivery.message()) {
                     let data = classify_outbound_data(delivery, room_id)
                         .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
                     sender
@@ -1194,10 +1191,7 @@ impl DeliverySender {
                             deadline,
                         )
                         .map_err(map_control_queue_error)
-                } else if matches!(
-                    delivery.message(),
-                    ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
-                ) {
+                } else if is_data_message(delivery.message()) {
                     let data = classify_outbound_data(delivery, room_id)
                         .map_err(|_| DeliveryTrySendError::InvalidMetadata)?;
                     sender
@@ -1447,6 +1441,12 @@ fn classify_outbound_data(
             epoch,
             ..
         } => (*from_player, *seq, *epoch, None, None),
+        ServerMessage::AddressedGameDataBinary {
+            room_id: addressed_room,
+            ..
+        } if room_id == Some(*addressed_room) => {
+            return Ok(OutboundData::from_delivery(delivery, None));
+        }
         _ => return Err(delivery),
     };
     let (from_player, seq, epoch, class, key) = fields;
@@ -2097,7 +2097,8 @@ fn reliable_class_sender(message: &crate::protocol::ServerMessage) -> Option<Pla
             let reliable = class.unwrap_or_default() == crate::protocol::DeliveryClass::Reliable;
             reliable.then_some(*from_player)
         }
-        ServerMessage::GameDataBinary { from_player, .. } => Some(*from_player),
+        ServerMessage::GameDataBinary { from_player, .. }
+        | ServerMessage::AddressedGameDataBinary { from_player, .. } => Some(*from_player),
         _ => None,
     }
 }
@@ -2189,6 +2190,12 @@ impl RoomRoutesLease {
 
 #[async_trait::async_trait]
 pub trait MessageCoordinator: Send + Sync {
+    /// Whether the owned game-data handoff supports the private addressed variant.
+    /// Implementations must preserve the same room, membership and FIFO fences.
+    fn supports_addressed_game_data(&self) -> bool {
+        false
+    }
+
     /// Serialize the short mutation/enqueue portion of all room-derived state
     /// transitions. Implementations must use the same per-room domain as
     /// [`Self::enqueue_room_event`].
@@ -2608,6 +2615,9 @@ pub trait MessageCoordinator: Send + Sync {
         build_message: &'a mut (dyn FnMut() -> Option<ServerMessage> + Send),
     ) -> anyhow::Result<()> {
         if let Some(message) = build_message() {
+            if matches!(message, ServerMessage::AddressedGameDataBinary { .. }) {
+                anyhow::bail!("Coordinator does not support addressed game data");
+            }
             self.broadcast_to_room_except(room_id, except_player, Arc::new(message))
                 .await?;
         }

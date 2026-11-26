@@ -8,7 +8,8 @@ use crate::coordination::{
 use crate::protocol::{
     ClientMessage, ErrorCode, GameDataEncoding, GameDataLimitPayload, PlayerId,
     PlayerNameRulesPayload, ProtocolInfoPayload, RateLimitInfo, ServerMessage,
-    PROTOCOL_INFO_TRANSPORT_WEBSOCKET, ROOM_OPERATION_IDS_CAPABILITY, SPECTATOR_RELAY_CAPABILITY,
+    ADDRESSED_BINARY_GAME_DATA_CAPABILITY, PROTOCOL_INFO_TRANSPORT_WEBSOCKET,
+    ROOM_OPERATION_IDS_CAPABILITY, SPECTATOR_RELAY_CAPABILITY,
 };
 #[cfg(test)]
 use crate::protocol::{Topology, Transport};
@@ -1263,10 +1264,13 @@ fn record_abandoned_by_class(rx: &OutboundReceiver, batcher: &MessageBatcher) {
 fn protocol_info_capabilities(
     mut compatibility_capabilities: Vec<String>,
     room_operation_ids: bool,
+    addressed_binary: bool,
     protocol_version: u16,
 ) -> Vec<String> {
     compatibility_capabilities.retain(|capability| {
-        capability != ROOM_OPERATION_IDS_CAPABILITY && capability != SPECTATOR_RELAY_CAPABILITY
+        capability != ROOM_OPERATION_IDS_CAPABILITY
+            && capability != ADDRESSED_BINARY_GAME_DATA_CAPABILITY
+            && capability != SPECTATOR_RELAY_CAPABILITY
     });
     if protocol_version >= 3 {
         compatibility_capabilities.push(SPECTATOR_RELAY_CAPABILITY.to_string());
@@ -1274,7 +1278,23 @@ fn protocol_info_capabilities(
     if room_operation_ids {
         compatibility_capabilities.push(ROOM_OPERATION_IDS_CAPABILITY.to_string());
     }
+    if addressed_binary {
+        compatibility_capabilities.push(ADDRESSED_BINARY_GAME_DATA_CAPABILITY.to_string());
+    }
     compatibility_capabilities
+}
+
+fn decode_addressed_binary_ingress(
+    frame: bytes::Bytes,
+) -> Option<(Option<PlayerId>, bytes::Bytes)> {
+    match frame.first().copied()? {
+        0 => Some((None, frame.slice(1..))),
+        1 => {
+            let target: [u8; 16] = frame.get(1..17)?.try_into().ok()?;
+            Some((Some(PlayerId::from_bytes(target)), frame.slice(17..)))
+        }
+        _ => None,
+    }
 }
 
 // `default_protocol_version` is the fallback used when the client omits
@@ -2753,6 +2773,22 @@ async fn handle_socket_supervised(
                                             },
                                         );
 
+                                    let addressed_binary =
+                                        server_clone.supports_addressed_game_data()
+                                            && negotiated_version >= 3
+                                            && negotiated_format != GameDataEncoding::Json
+                                            && requested_capabilities.as_ref().is_some_and(
+                                                |capabilities| {
+                                                    capabilities.iter().any(|capability| {
+                                                capability == ADDRESSED_BINARY_GAME_DATA_CAPABILITY
+                                            })
+                                                },
+                                            );
+                                    server_clone.set_client_addressed_binary(
+                                        &active_player_id,
+                                        addressed_binary,
+                                    );
+
                                     let min_protocol_version = cfg.min_protocol_version;
                                     let max_protocol_version = cfg.max_protocol_version;
 
@@ -2837,6 +2873,7 @@ async fn handle_socket_supervised(
                                             capabilities: protocol_info_capabilities(
                                                 compatibility.capabilities.clone(),
                                                 room_operation_ids,
+                                                addressed_binary,
                                                 negotiated_version,
                                             ),
                                             notes: compatibility.notes.clone(),
@@ -3097,15 +3134,45 @@ async fn handle_socket_supervised(
                         continue;
                     }
 
-                    // Payload from axum WebSocket is already Bytes - pass directly for zero-copy
-                    server_clone
-                        .handle_game_data_binary_from_lifecycle(
-                            &active_player_id,
-                            encoding,
-                            payload,
-                            Arc::clone(&lifecycle_for_receive),
-                        )
-                        .await;
+                    let decoded =
+                        if server_clone.client_supports_addressed_binary(&active_player_id) {
+                            decode_addressed_binary_ingress(payload)
+                        } else {
+                            Some((None, payload))
+                        };
+                    match decoded {
+                        Some((Some(recipient), payload)) => {
+                            server_clone
+                                .handle_addressed_game_data_binary_from_lifecycle(
+                                    &active_player_id,
+                                    encoding,
+                                    payload,
+                                    Arc::clone(&lifecycle_for_receive),
+                                    recipient,
+                                )
+                                .await;
+                        }
+                        Some((None, payload)) => {
+                            server_clone
+                                .handle_game_data_binary_from_lifecycle(
+                                    &active_player_id,
+                                    encoding,
+                                    payload,
+                                    Arc::clone(&lifecycle_for_receive),
+                                )
+                                .await;
+                        }
+                        None => {
+                            let _ = server_clone
+                                .send_error_to_player_from_lifecycle(
+                                    &active_player_id,
+                                    "Invalid negotiated binary game data frame".into(),
+                                    Some(ErrorCode::InvalidInput),
+                                    Arc::clone(&lifecycle_for_receive),
+                                )
+                                .await;
+                        }
+                    }
                     if !server_clone.config().app_id_allowlist_enabled && !authenticate_processed {
                         protocol_handshake_complete.store(true, Ordering::Release);
                     }
@@ -4437,12 +4504,12 @@ mod tests {
             ROOM_OPERATION_IDS_CAPABILITY.to_string(),
         ];
         assert_eq!(
-            protocol_info_capabilities(compatibility.clone(), false, 2),
+            protocol_info_capabilities(compatibility.clone(), false, false, 2),
             vec!["sdk_feature"],
             "a compatibility manifest cannot pre-enable a reserved wire extension"
         );
         assert_eq!(
-            protocol_info_capabilities(compatibility, true, 2),
+            protocol_info_capabilities(compatibility, true, false, 2),
             vec![
                 "sdk_feature".to_string(),
                 ROOM_OPERATION_IDS_CAPABILITY.to_string()
@@ -4460,6 +4527,7 @@ mod tests {
                     SPECTATOR_RELAY_CAPABILITY.into(),
                     SPECTATOR_RELAY_CAPABILITY.into(),
                 ],
+                false,
                 false,
                 version,
             );

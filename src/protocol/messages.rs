@@ -874,6 +874,17 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         epoch: Option<u32>,
     },
+    /// Socket-only addressed game data, independent of broadcast sequence accounting.
+    #[serde(skip)]
+    AddressedGameDataBinary {
+        from_player: PlayerId,
+        recipient: PlayerId,
+        room_id: RoomId,
+        encoding: GameDataEncoding,
+        payload: Bytes,
+        receipt: u64,
+        epoch: u32,
+    },
     /// Authority status changed
     AuthorityChanged {
         authority_player: Option<PlayerId>,

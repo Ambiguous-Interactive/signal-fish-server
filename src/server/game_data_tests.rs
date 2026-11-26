@@ -457,6 +457,142 @@ mod handler_honesty {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn addressed_relay_fences_rejoin_and_orders_behind_backpressure() {
+        let coordinator = Arc::new(InMemoryMessageCoordinator::new());
+        let server =
+            crate::server::room_service_tests::create_test_server_with_message_coordinator_and_lock(
+                ServerConfig::default(),
+                coordinator.clone(),
+                Arc::new(InMemoryDistributedLock::new()),
+                Arc::new(InMemoryDatabase::new()),
+            )
+            .await;
+        let (source, mut source_rx) = register_client(&server).await;
+        let (target, mut target_rx) = register_client(&server).await;
+        let (bystander, mut bystander_rx) = register_client(&server).await;
+        let join = |player, name: &'static str| {
+            let server = &server;
+            async move {
+                server
+                    .handle_join_room(
+                        &player,
+                        "addressed-order".into(),
+                        Some("ADDR01".into()),
+                        name.into(),
+                        Some(3),
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+            }
+        };
+        for (player, name) in [
+            (source, "source"),
+            (target, "target"),
+            (bystander, "bystander"),
+        ] {
+            join(player, name).await;
+            server.set_client_game_data_format(&player, GameDataEncoding::MessagePack);
+            server.set_client_addressed_binary(&player, true);
+        }
+        for receiver in [&mut source_rx, &mut target_rx, &mut bystander_rx] {
+            drain_setup_messages(receiver);
+        }
+        let lifecycle = server.connection_manager.client_lifecycle(&source).unwrap();
+        let send = |payload: u8| {
+            server.handle_addressed_game_data_binary_from_lifecycle(
+                &source,
+                GameDataEncoding::MessagePack,
+                Bytes::from(vec![payload]),
+                Arc::clone(&lifecycle),
+                target,
+            )
+        };
+        let room = server.get_client_room(&source).await.unwrap();
+        let order = coordinator.relay_order_gates.try_write(source).unwrap();
+        let stale = send(0);
+        tokio::pin!(stale);
+        assert!(futures_util::poll!(&mut stale).is_pending());
+        server.leave_room(&target).await;
+        join(target, "target").await;
+        assert_eq!(server.get_client_room(&target).await, Some(room));
+        for receiver in [&mut source_rx, &mut target_rx, &mut bystander_rx] {
+            while receiver.try_recv().is_ok() {}
+        }
+        drop(order);
+        stale.await;
+        assert!(matches!(
+            target_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        for payload in 1..=16 {
+            send(payload).await;
+        }
+        let parked = send(17);
+        tokio::pin!(parked);
+        assert!(futures_util::poll!(&mut parked).is_pending());
+        let broadcast = server.handle_game_data_binary_from_lifecycle(
+            &source,
+            GameDataEncoding::MessagePack,
+            Bytes::from_static(b"broadcast"),
+            Arc::clone(&lifecycle),
+        );
+        tokio::pin!(broadcast);
+        assert!(futures_util::poll!(&mut broadcast).is_pending());
+        assert!(matches!(
+            bystander_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        tokio::join!(parked, broadcast, async {
+            for n in 1..=17_u8 {
+                let message = recv(&mut target_rx).await;
+                let ServerMessage::AddressedGameDataBinary {
+                    from_player,
+                    recipient,
+                    payload,
+                    receipt,
+                    epoch,
+                    ..
+                } = message.as_ref()
+                else {
+                    panic!("expected directed data, got {message:?}");
+                };
+                assert_eq!(
+                    (*from_player, *recipient, *receipt, *epoch),
+                    (source, target, u64::from(n), 1)
+                );
+                assert_eq!(payload.as_ref(), &[n]);
+            }
+            let message = recv(&mut target_rx).await;
+            assert!(matches!(
+                message.as_ref(),
+                ServerMessage::GameDataBinary {
+                    seq: Some(1),
+                    epoch: Some(1),
+                    ..
+                }
+            ));
+        });
+        let message = recv(&mut bystander_rx).await;
+        assert!(matches!(
+            message.as_ref(),
+            ServerMessage::GameDataBinary {
+                seq: Some(1),
+                epoch: Some(1),
+                ..
+            }
+        ));
+        assert!(matches!(
+            bystander_rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     /// #826: The router has already refreshed activity when JSON relay
     /// dispatch reaches this second wait on the physical socket's lifecycle.
     #[tokio::test(start_paused = true)]

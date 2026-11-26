@@ -796,6 +796,46 @@ pub(super) async fn send_single_message_ref(
     let metrics = accounting.server.metrics();
     let mut disposition = SendDisposition::Written;
     match message {
+        ServerMessage::AddressedGameDataBinary {
+            from_player,
+            recipient,
+            encoding,
+            payload,
+            receipt,
+            epoch,
+            ..
+        } => {
+            if player_id != recipient || !recipient_supports_v3 || recipient_format != *encoding {
+                return Err(SendMessageError::Materialization);
+            }
+            let frame = V3BinaryGameDataFrame {
+                from_player: *from_player,
+                encoding: *encoding,
+                payload,
+                seq: *receipt,
+                epoch: *epoch,
+            };
+            let wire = encode_named_binary_frame_limited(
+                &frame,
+                payload.len(),
+                max_outbound_message_size,
+                &[1],
+            )
+            .map_err(|error| match error {
+                GameDataMaterializationError::MessageTooLarge { size, max } => {
+                    SendMessageError::MessageTooLarge { size, max }
+                }
+                _ => SendMessageError::Materialization,
+            })?;
+            send_materialized_frame(
+                sender,
+                Message::Binary(wire.into()),
+                player_id,
+                max_outbound_message_size,
+                &metrics,
+            )
+            .await?;
+        }
         ServerMessage::GameDataBinary {
             from_player,
             encoding,
@@ -2498,7 +2538,7 @@ fn encode_binary_game_data_limited(
                 seq,
                 epoch,
             };
-            encode_named_binary_frame_limited(&frame, payload.len(), max).map(Bytes::from)
+            encode_named_binary_frame_limited(&frame, payload.len(), max, &[]).map(Bytes::from)
         }
         (None, None) => match encoding {
             GameDataEncoding::MessagePack => encode_named_binary_frame_limited(
@@ -2509,6 +2549,7 @@ fn encode_binary_game_data_limited(
                 },
                 payload.len(),
                 max,
+                &[],
             )
             .map(Bytes::from),
             GameDataEncoding::Json | GameDataEncoding::Rkyv | GameDataEncoding::Protobuf => {
@@ -2555,15 +2596,14 @@ fn encode_named_binary_frame_limited<T: Serialize>(
     frame: &T,
     payload_len: usize,
     max: usize,
+    prefix: &[u8],
 ) -> Result<Vec<u8>, GameDataMaterializationError> {
     const BINARY_ENVELOPE_HEADROOM: usize = 128;
-    if payload_len > max {
-        return Err(GameDataMaterializationError::MessageTooLarge {
-            size: payload_len,
-            max,
-        });
+    let minimum = payload_len.saturating_add(prefix.len());
+    if minimum > max {
+        return Err(GameDataMaterializationError::MessageTooLarge { size: minimum, max });
     }
-    let capacity = payload_len
+    let capacity = minimum
         .checked_add(BINARY_ENVELOPE_HEADROOM)
         .filter(|capacity| *capacity <= isize::MAX as usize)
         .ok_or_else(|| {
@@ -2579,6 +2619,7 @@ fn encode_named_binary_frame_limited<T: Serialize>(
                 "failed to reserve binary frame capacity: {error}"
             ))
         })?;
+    bytes.extend_from_slice(prefix);
     let (result, exceeded_len) = {
         let mut writer = FallibleVecWriter::with_limit(&mut bytes, "binary", max);
         let result = write_named(&mut writer, frame);

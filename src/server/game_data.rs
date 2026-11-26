@@ -528,7 +528,7 @@ impl EnhancedGameServer {
         encoding: GameDataEncoding,
         payload: Bytes,
     ) {
-        self.handle_game_data_binary_with_lifecycle(player_id, encoding, payload, None)
+        self.handle_game_data_binary_with_lifecycle(player_id, encoding, payload, None, None)
             .await;
     }
 
@@ -544,6 +544,25 @@ impl EnhancedGameServer {
             encoding,
             payload,
             Some(source_lifecycle),
+            None,
+        )
+        .await;
+    }
+
+    pub(crate) async fn handle_addressed_game_data_binary_from_lifecycle(
+        &self,
+        player_id: &PlayerId,
+        encoding: GameDataEncoding,
+        payload: Bytes,
+        source_lifecycle: Arc<ClientLifecycle>,
+        recipient: PlayerId,
+    ) {
+        self.handle_game_data_binary_with_lifecycle(
+            player_id,
+            encoding,
+            payload,
+            Some(source_lifecycle),
+            Some(recipient),
         )
         .await;
     }
@@ -554,6 +573,7 @@ impl EnhancedGameServer {
         encoding: GameDataEncoding,
         payload: Bytes,
         source_lifecycle: Option<Arc<ClientLifecycle>>,
+        recipient: Option<PlayerId>,
     ) {
         let source_lifecycle =
             source_lifecycle.or_else(|| self.connection_manager.client_lifecycle(player_id));
@@ -630,6 +650,30 @@ impl EnhancedGameServer {
             return;
         }
         if let Some(room_id) = self.get_client_room(player_id).await {
+            let addressed = match recipient {
+                None => None,
+                Some(recipient) => {
+                    let generation = (recipient != *player_id)
+                        .then(|| {
+                            self.connection_manager
+                                .addressed_target_generation(&recipient, &room_id, encoding)
+                        })
+                        .flatten();
+                    let Some(generation) = generation else {
+                        drop(source_gate);
+                        let _ = self
+                            .send_error_to_player_for_source(
+                                player_id,
+                                "Addressed binary target is unavailable in this room".into(),
+                                Some(ErrorCode::InvalidInput),
+                                source_lifecycle.as_ref(),
+                            )
+                            .await;
+                        return;
+                    };
+                    Some((recipient, generation))
+                }
+            };
             // Sender-side relay byte budget (issue #519) plus the room's
             // aggregate ceiling (issue #530): charge the binary payload
             // before the fan-out, mirroring the text lane.
@@ -684,6 +728,30 @@ impl EnhancedGameServer {
                     != expected_epoch
                 {
                     return None;
+                }
+                if let Some((recipient, generation)) = addressed {
+                    if connection_manager.addressed_target_generation(
+                        &recipient,
+                        &expected_room,
+                        encoding,
+                    ) != Some(generation)
+                    {
+                        return None;
+                    }
+                    let stamp = connection_manager.next_addressed_receipt(
+                        player_id,
+                        &expected_room,
+                        source_ref.as_ref()?,
+                    )?;
+                    return Some(ServerMessage::AddressedGameDataBinary {
+                        from_player: *player_id,
+                        recipient,
+                        room_id: expected_room,
+                        encoding,
+                        payload,
+                        receipt: stamp.seq,
+                        epoch: stamp.epoch,
+                    });
                 }
                 let stamp = connection_manager.next_relay_stamp_in_room_from_lifecycle(
                     player_id,
