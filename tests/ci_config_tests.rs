@@ -24954,8 +24954,8 @@ fn test_nextest_uses_the_cargo_ci_profile_for_every_build() {
         .collect();
     assert_eq!(
         commands.len(),
-        2,
-        "keep non-TLS and H14 controls alongside the explicit runtime selector"
+        3,
+        "keep isolated macOS spectator, non-TLS, and H14 controls alongside the runtime selector"
     );
     for command in commands {
         assert!(

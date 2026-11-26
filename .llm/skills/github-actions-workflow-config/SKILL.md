@@ -197,6 +197,10 @@ on:
 
 **Always include the workflow file itself** — changes to the workflow should trigger a run to validate them.
 
+When adding a direct Nextest command to the root Nextest job, keep both
+`--profile ci` and `--cargo-profile ci`. Update the invocation count and run
+`bash scripts/dev-loop.sh test_nextest_uses_the_cargo_ci_profile_for_every_build`.
+
 ### Concurrency Control
 
 ```yaml
