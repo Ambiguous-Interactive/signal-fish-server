@@ -25585,6 +25585,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                     $caught = $_.Exception.Message -eq "policy probe"
                 }
                 if (-not $caught -or $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
                     throw "a throwing check must preserve its error and clear the pending content read"
                 }
@@ -25613,6 +25614,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                     $null -ne $script:PendingWorktreeUntracked -or
                     $null -ne $script:PendingWorktreeRustDiff -or
                     $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
                     throw "a startup failure must preserve its error and clear all pending queries"
                 }
@@ -25626,14 +25628,15 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 }
 
                 $script:StartedPending.Clear()
-                $script:StartupFailureAfter = 1
+                $script:StartupFailureAfter = 2
                 $caught = $false
                 try { Start-StagedPolicyQueries } catch {
                     $caught = $_.Exception.Message -eq "startup probe"
                 }
                 if (-not $caught -or $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
-                    throw "a staged startup failure must clear both pending reads"
+                    throw "a staged startup failure must clear every pending read"
                 }
                 foreach ($started in $script:StartedPending) {
                     if (-not $started.StdoutTask.IsCompleted -or -not $started.StderrTask.IsCompleted) {
@@ -25656,16 +25659,18 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 $script:PendingWorktreeUntracked = [pscustomobject]@{ Id = 2 }
                 $script:PendingWorktreeRustDiff = [pscustomobject]@{ Id = 3 }
                 $script:PendingChangelogBlob = [pscustomobject]@{ Id = 4 }
-                $script:PendingChangelogRustDiff = [pscustomobject]@{ Id = 5 }
+                $script:PendingChangelogFiles = [pscustomobject]@{ Id = 5 }
+                $script:PendingChangelogRustDiff = [pscustomobject]@{ Id = 6 }
                 $caught = $false
                 try { Remove-PreCommitPendingGit } catch {
                     $caught = $_.Exception.Message -eq "cleanup probe 1"
                 }
-                if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4,5' -or
+                if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4,5,6' -or
                     $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
                     $null -ne $script:PendingWorktreeRustDiff -or
                     $null -ne $script:PendingChangelogBlob -or
+                    $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
                     throw "cleanup must attempt every query, clear its fields, and preserve the first error"
                 }
@@ -27487,7 +27492,17 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 # Tracked-query fixture carries no "?" records (the tracked
                 # status runs with --untracked-files=no); untracked files come
                 # from the sibling ls-files walk fixture.
-                $script:StatusFixture = " M src/lib.rs${nul}M  src/main.rs${nul}MM src/server.rs${nul}R  src/new_name.rs${nul}src/old_name.rs${nul}"
+                $head = 'a' * 40
+                $index = 'b' * 40
+                $sameMode = "N... 100644 100644 100644 $head $index"
+                $script:StatusFixture = @(
+                    '# stash 1',
+                    "1 .M $sameMode src/lib.rs",
+                    "1 M. $sameMode src/main.rs",
+                    "1 MM $sameMode src/server.rs",
+                    "2 R. $sameMode R100 src/new_name.rs",
+                    "src/old_name.rs"
+                ) -join $nul
                 $script:UntrackedFixture = "src/new.rs${nul}"
                 function Invoke-Git {
                     param([string[]]$Arguments)
@@ -27505,7 +27520,15 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert ($script:WorktreeUntrackedFileSet.Contains("src/new.rs")) "untracked edit should fail closed"
                 Assert (-not ($paths -contains "src/old_name.rs")) "rename source metadata is not a current policy path"
 
-                $script:StatusFixture = "?? src/new.rs${nul}"
+                Assert ($script:WorktreeRustEntries["src/lib.rs"].Old -ceq $head) "old blob must come from the HEAD field"
+                Assert (-not $script:WorktreeRustEntries["src/lib.rs"].Reject) "same regular file modes should be eligible"
+                Assert (-not $script:WorktreeRustEntries.ContainsKey("src/new_name.rs")) "renames must retain the raw diff fallback"
+
+                $script:StatusFixture = "1 .M N... 100644 100644 100755 $head $index src/lib.rs" + $nul
+                [void]@(Get-WorktreeChangedFiles)
+                Assert ($script:WorktreeRustEntries["src/lib.rs"].Reject) "changed worktree mode must refuse Rustdoc classification"
+
+                $script:StatusFixture = "? src/new.rs" + $nul
                 $threw = $false
                 try {
                     Get-WorktreeChangedFiles | Out-Null
@@ -27542,9 +27565,9 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
     assert!(
         content.contains("[switch]$Worktree")
             && content.contains("Get-WorktreeChangedFiles")
-            && content.contains("\"status\", \"--porcelain=v1\", \"-z\", \"--untracked-files=no\"")
+            && content.contains("\"status\", \"--porcelain=v2\", \"-z\", \"--untracked-files=no\"")
             && content
-                .contains("\"ls-files\", \"--others\", \"--exclude-standard\", \"-z\", \"--\"")
+                .contains("\"ls-files\", \"--full-name\", \"--others\", \"--exclude-standard\", \"-z\", \"--\"")
             && content.contains("\"--no-renames\"")
             && content.contains("StagedChangedFileSet")
             && content.contains("WorktreeChangedFileSet")
