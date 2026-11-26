@@ -1979,7 +1979,8 @@ components:
       uniqueItems: true
       description: >-
         Present on plans for opted-in seats. Lists the other live same-format
-        seats that negotiated addressed binary delivery, ordered by player_id.
+        seats that negotiated addressed binary delivery. Each player_id must
+        occur once and the sequence of player_id values must strictly increase.
       items:
         type: object
         additionalProperties: false

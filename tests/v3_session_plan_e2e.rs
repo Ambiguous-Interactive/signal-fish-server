@@ -501,7 +501,7 @@ async fn addressed_binary_plan_lists_only_opted_same_format_seats() {
 }
 
 #[tokio::test]
-async fn addressed_binary_plan_refreshes_the_same_seat_epoch_on_reconnect() {
+async fn addressed_binary_plan_tracks_reconnect_and_finalized_seat_fill() {
     use GameDataEncoding::MessagePack;
 
     let running_server = start_server_with_session(SessionConfig::default()).await;
@@ -511,7 +511,8 @@ async fn addressed_binary_plan_refreshes_the_same_seat_epoch_on_reconnect() {
     let original = join_room_with_size(&mut incumbent, None, "Incumbent", 2).await;
     let mut guest = connect(addr).await;
     authenticate_addressed_plan(&mut guest, MessagePack, true).await;
-    let joined = join_room_with_size(&mut guest, Some(original.room_code), "Reconnect", 2).await;
+    let joined =
+        join_room_with_size(&mut guest, Some(original.room_code.clone()), "Reconnect", 2).await;
 
     ready(&mut incumbent).await;
     await_ready_count(&mut incumbent, 1).await;
@@ -574,27 +575,97 @@ async fn addressed_binary_plan_refreshes_the_same_seat_epoch_on_reconnect() {
     .await;
     assert_eq!(restored.player_id, joined.player_id);
 
-    for (socket, expected_peer, epoch) in [
-        (&mut incumbent, joined.player_id, 2),
-        (&mut replacement, original.player_id, 1),
-    ] {
-        let plan = next_matching_server_message_within(
-            socket,
-            SERVER_MESSAGE_TIMEOUT,
-            "refresh addressed plan",
-            |message| match message {
-                ServerMessage::SessionPlan(plan) => Some(plan),
-                _ => None,
-            },
-        )
-        .await;
-        let wire = serde_json::to_value(plan).unwrap();
-        assert_eq!(
-            wire.get("addressed_binary_peers"),
-            Some(&serde_json::json!([{"player_id": expected_peer, "epoch": epoch}]))
-        );
-    }
+    expect_addressed_plan(&mut incumbent, joined.player_id, 2).await;
+    expect_addressed_plan(&mut replacement, original.player_id, 1).await;
+
+    send(&mut replacement, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "reconnected leaver's RoomLeft",
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut incumbent,
+        SERVER_MESSAGE_TIMEOUT,
+        "old occupant's PlayerLeft",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == joined.player_id => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let mut late = connect(addr).await;
+    authenticate_addressed_plan(&mut late, MessagePack, true).await;
+    send(
+        &mut late,
+        &ClientMessage::JoinRoom {
+            game_name: "plan-game".into(),
+            room_code: Some(original.room_code),
+            player_name: "Seat filler".into(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: Some(true),
+        },
+    )
+    .await;
+    let filled = next_matching_server_message_within(
+        &mut late,
+        SERVER_MESSAGE_TIMEOUT,
+        "finalized seat fill baseline",
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("late join failed: {reason} ({error_code:?})")
+            }
+            ServerMessage::SessionPlan(_) => panic!("received plan before late join baseline"),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(filled.room_id, joined.room_id);
+    assert_eq!(
+        filled.lobby_state,
+        signal_fish_server::protocol::LobbyState::Finalized
+    );
+    assert_ne!(filled.player_id, joined.player_id);
+    next_matching_server_message_within(
+        &mut incumbent,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent seat fill lifecycle",
+        |message| match message {
+            ServerMessage::PlayerJoined { player } if player.id == filled.player_id => Some(()),
+            ServerMessage::SessionPlan(_) => panic!("received plan before seat fill lifecycle"),
+            _ => None,
+        },
+    )
+    .await;
+    expect_addressed_plan(&mut late, original.player_id, 1).await;
+    expect_addressed_plan(&mut incumbent, filled.player_id, 1).await;
     running_server.shutdown().await;
+}
+
+async fn expect_addressed_plan(socket: &mut WsStream, expected_peer: PlayerId, epoch: u32) {
+    let plan = next_matching_server_message_within(
+        socket,
+        SERVER_MESSAGE_TIMEOUT,
+        "refresh addressed plan",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            _ => None,
+        },
+    )
+    .await;
+    let wire = serde_json::to_value(plan).unwrap();
+    assert_eq!(
+        wire.get("addressed_binary_peers"),
+        Some(&serde_json::json!([{"player_id": expected_peer, "epoch": epoch}]))
+    );
 }
 
 #[tokio::test]
