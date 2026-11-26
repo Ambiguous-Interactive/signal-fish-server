@@ -990,6 +990,13 @@ function Test-ProductionRustSourcePath {
     -not ($Path.Contains("/test/") -or $Path.Contains("/tests/"))
 }
 
+function Get-RustPanicDiffArguments {
+    param([string[]]$Pathspecs)
+
+    $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
+    @("--literal-pathspecs", "diff", $diffBase, "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--") + $Pathspecs
+}
+
 function Test-RustPanicPolicyRelevantDiff {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs)
 
@@ -997,8 +1004,7 @@ function Test-RustPanicPolicyRelevantDiff {
         return $false
     }
 
-    $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
-    $arguments = @("diff", $diffBase, "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--") + $Pathspecs
+    $arguments = Get-RustPanicDiffArguments -Pathspecs $Pathspecs
     $pending = $script:PendingRustPanicDiff
     $script:PendingRustPanicDiff = $null
     $result = if ($null -eq $pending) {
@@ -2330,10 +2336,7 @@ try {
         }
         # Staged refactor validation can overlap this source-only read.
         # Doc version sync can re-stage version docs, and it never writes src.
-        $diffSource = if ($script:InspectWorktree) { @("--literal-pathspecs", "diff", "HEAD") } else { @("diff", "--cached") }
-        $script:PendingRustPanicDiff = Start-PendingGit -GitArguments ($diffSource + @(
-            "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--"
-        ) + $changedSourcePaths)
+        $script:PendingRustPanicDiff = Start-PendingGit -GitArguments (Get-RustPanicDiffArguments -Pathspecs $changedSourcePaths)
     }
 } catch {
     # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.

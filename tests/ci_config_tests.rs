@@ -27463,6 +27463,7 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert (-not $changed) "exit 0 should skip the full Rust scanner"
                 Assert ($script:Calls -eq 1) "staged fast gate should run one git query"
                 Assert ($script:CapturedArguments -contains "--cached") "fast gate must inspect the staged index"
+                Assert ($script:CapturedArguments[0] -ceq "--literal-pathspecs") "fast gate must use literal filenames"
                 Assert ($script:CapturedArguments -contains "--unified=0") "fast gate should materialize only matching zero-context hunks"
                 Assert ($script:CapturedArguments -contains "--no-color") "fast gate output must be stable for line classification"
                 $patternIndex = [array]::IndexOf($script:CapturedArguments, "-G") + 1
