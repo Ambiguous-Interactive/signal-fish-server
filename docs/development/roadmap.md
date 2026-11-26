@@ -514,3 +514,15 @@ new exact-value assertion. The production source is restored byte-for-byte.
 See [the audit record](production-correctness-audit.md#a01-correlated-reconnect-values-on-real-sockets).
 The issue owns final review and delivery. Accepted bounded criteria do not
 close #826 or attribute a historical failure. The trial assessment is unchanged.
+
+## Transport report allocation attribution
+
+The pinned macOS replay for [#1436][i1436] reproduces the first connected
+report's increase from 20 allocations and 4,440 bytes to 21 allocations and
+4,504 bytes. The extra 64 bytes initialize the mutex for a Tokio semaphore's
+wait list when the background room rate limiter drops its write guard.
+
+The steady-state test retains the first-use samples and the exact delivery
+checks. Restoring generic fan-out for a single recipient still fails the
+two-allocation saving. The existing test passes on Linux, macOS, and Windows.
+[Allocation traces and platform evidence](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1436#issuecomment-7205115936).
