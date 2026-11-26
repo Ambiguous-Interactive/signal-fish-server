@@ -917,6 +917,13 @@ is_internal_path() {
         clients/fortress/src/*|clients/fortress-wasm/src/*|clients/fortress-wasm/harness.mjs|clients/fortress-wasm/project/main.gd|clients/fortress-wasm/README.md)
             return 0
             ;;
+        # Standalone fixture lockfiles do not affect the release graph.
+        clients/native/Cargo.lock|clients/fortress/Cargo.lock|clients/fortress-wasm/Cargo.lock|fuzz/Cargo.lock)
+            return 0
+            ;;
+        third_party/rtc-sctp/Cargo.lock|third_party/rtc/Cargo.lock|third_party/webrtc/Cargo.lock)
+            return 0
+            ;;
         src/*_tests.rs|src/*_test.rs|src/*/tests.rs|clients/native/src/*_tests.rs|clients/native/src/*_test.rs|clients/native/src/*/tests.rs)
             return 0
             ;;

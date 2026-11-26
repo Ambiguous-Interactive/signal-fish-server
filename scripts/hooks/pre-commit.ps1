@@ -65,6 +65,10 @@ $script:ChangelogInternalPathGlobs = [string[]]@(
     # Standalone compatibility fixture sources (both packages publish = false)
     "clients/fortress/src/*", "clients/fortress-wasm/src/*",
     "clients/fortress-wasm/harness.mjs", "clients/fortress-wasm/project/main.gd", "clients/fortress-wasm/README.md",
+    # Standalone fixture lockfiles do not affect the release graph.
+    "clients/native/Cargo.lock", "clients/fortress/Cargo.lock", "clients/fortress-wasm/Cargo.lock",
+    "fuzz/Cargo.lock", "third_party/rtc-sctp/Cargo.lock", "third_party/rtc/Cargo.lock",
+    "third_party/webrtc/Cargo.lock",
     # Test-only Rust sources
     "src/*_tests.rs", "src/*_test.rs", "src/*/tests.rs",
     "clients/native/src/*_tests.rs", "clients/native/src/*_test.rs", "clients/native/src/*/tests.rs",
