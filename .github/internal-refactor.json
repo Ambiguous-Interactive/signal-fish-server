@@ -1,16 +1,11 @@
 {
-  "base": "ce9df99685139d2544bd62588006ea8c4af316db",
-  "reason": "Separate repository verification from runtime builds and update contributor command paths. Package metadata, shipped features, runtime code, public APIs, wire behavior, and defaults do not change.",
+  "base": "df203a1e6544f3529289f3a2c6cc6107bfd78d81",
+  "reason": "Update the dependencies of the unpublished fuzz harness. The server build uses its own lockfile.",
   "files": [
     {
-      "path": "Cargo.toml",
-      "before": "09a62be7c0bdfe413d66d87788f9642aaced7b87",
-      "after": "487ddd913a00c3d2f172f994663651eb606711f0"
-    },
-    {
-      "path": "docs/adr/ci-cd-preventative-measures.md",
-      "before": "86e2cefcada605c7cdbf6f42e562079d47772501",
-      "after": "25c9cb5279c1ef333e32571e7e95cfce458e7c58"
+      "path": "fuzz/Cargo.lock",
+      "before": "7eae26ecd161e3fd76d07bab2b8eb037b0677aeb",
+      "after": "b2b039d055aa8f435ba17c75b8bb16a10b8df1b7"
     }
   ]
 }
