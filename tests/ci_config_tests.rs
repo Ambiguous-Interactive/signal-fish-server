@@ -35354,8 +35354,10 @@ fn test_post_create_uses_opt_in_cargo_check_warmup() {
     With 61 shards, ceil(605/61) * 29s remains 290s.
     606 (was 605): Direct endpoint selection adds one host-identity match site (#636).
     With 61 shards, ceil(606/61) * 29s remains 290s.
+    623 (was 606): recent protocol and transport changes add seventeen sites.
+    With 63 shards, ceil(623/63) * 29s remains 290s.
 */
-const MUTATION_TOTAL_MUTANTS: u32 = 606;
+const MUTATION_TOTAL_MUTANTS: u32 = 623;
 // CI-measured per-mutant budget: shard 22, the worst 12-mutant shard, took
 // 310.12s (25.843s/mutant). Adding ~10% headroom and rounding up gives 29s for
 // the in-place + slice + lib-only oracle. Update ONLY after re-measuring.
@@ -35623,12 +35625,12 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
         .into_iter()
         .flat_map(str::lines)
         .any(|line| {
-            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/61"
+            line.trim() == "run: bash scripts/run-mutants.sh --shard ${{ matrix.shard }}/63"
         })
     {
         violations.push(
             "mutation.yml mutants job must run mutation via the exact `bash \
-             scripts/run-mutants.sh --shard ${{ matrix.shard }}/61` command, not an inline or \
+             scripts/run-mutants.sh --shard ${{ matrix.shard }}/63` command, not an inline or \
              differently scoped invocation (which would bypass the single source of truth)."
                 .to_string(),
         );
@@ -35779,7 +35781,7 @@ fn test_mutation_workflow_uses_fast_linker_and_in_place() {
          slice sharding are the measured levers (see .llm/skills/mutation-testing-performance/SKILL.md), \
          and routing through scripts/run-mutants.sh keeps CI and local runs identical.\n\
          Fix: restore the listed levers in scripts/run-mutants.sh / .github/workflows/mutation.yml.\n\
-         Verify: bash scripts/run-mutants.sh --shard 0/61 --print-cmd",
+         Verify: bash scripts/run-mutants.sh --shard 0/63 --print-cmd",
         violations.join("\n")
     );
 }
