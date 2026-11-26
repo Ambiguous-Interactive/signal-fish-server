@@ -25645,7 +25645,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 }
                 if (-not $caught -or $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
-                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingRustPanicDiff -or
                     $null -ne $script:PendingChangelogBlob -or
                     $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
@@ -25690,7 +25690,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 }
                 $script:PendingWorktreeStatus = [pscustomobject]@{ Id = 1 }
                 $script:PendingWorktreeUntracked = [pscustomobject]@{ Id = 2 }
-                $script:PendingWorktreeRustDiff = [pscustomobject]@{ Id = 3 }
+                $script:PendingRustPanicDiff = [pscustomobject]@{ Id = 3 }
                 $script:PendingChangelogBlob = [pscustomobject]@{ Id = 4 }
                 $script:PendingChangelogFiles = [pscustomobject]@{ Id = 5 }
                 $script:PendingChangelogRustDiff = [pscustomobject]@{ Id = 6 }
@@ -25701,7 +25701,7 @@ fn test_powershell_native_bytes_helper_returns_single_result_object_when_pwsh_av
                 if (-not $caught -or ($script:CleanupCalls -join ',') -ne '1,2,3,4,5,6' -or
                     $null -ne $script:PendingWorktreeStatus -or
                     $null -ne $script:PendingWorktreeUntracked -or
-                    $null -ne $script:PendingWorktreeRustDiff -or
+                    $null -ne $script:PendingRustPanicDiff -or
                     $null -ne $script:PendingChangelogBlob -or
                     $null -ne $script:PendingChangelogFiles -or
                     $null -ne $script:PendingChangelogRustDiff) {
@@ -27409,8 +27409,8 @@ fn test_pre_commit_rust_panic_scan_is_scoped_to_production_sources() {
             && content.contains("Select-ProductionRustPanicMacroCandidates")
             && content.contains("Sort-Object -Property File, Line")
             && content.contains("Get-PolicyText")
-            && content.contains("\"grep\", \"--cached\", \"-n\", \"-E\"")
-            && content.contains("\"grep\", \"-n\", \"-E\", $grepPattern, \"HEAD\"")
+            && content.contains("\"grep\", \"--cached\", \"-n\", \"-z\", \"--no-color\", \"-E\"")
+            && content.contains("\"grep\", \"-n\", \"-z\", \"--no-color\", \"-E\", $grepPattern, \"HEAD\"")
             && content.contains("panic|todo|unimplemented|unreachable")
             && content.contains("Full .expect/.unwrap policy runs in local CI and CI")
             && content.contains("$($candidate.File):$($candidate.Line):")
@@ -27463,6 +27463,7 @@ fn test_pre_commit_rust_panic_fast_gate_fails_closed_when_pwsh_available() {
                 Assert (-not $changed) "exit 0 should skip the full Rust scanner"
                 Assert ($script:Calls -eq 1) "staged fast gate should run one git query"
                 Assert ($script:CapturedArguments -contains "--cached") "fast gate must inspect the staged index"
+                Assert ($script:CapturedArguments[0] -ceq "--literal-pathspecs") "fast gate must use literal filenames"
                 Assert ($script:CapturedArguments -contains "--unified=0") "fast gate should materialize only matching zero-context hunks"
                 Assert ($script:CapturedArguments -contains "--no-color") "fast gate output must be stable for line classification"
                 $patternIndex = [array]::IndexOf($script:CapturedArguments, "-G") + 1
@@ -27612,7 +27613,7 @@ fn test_pre_commit_runner_has_worktree_preflight_mode_for_agents() {
             && content.contains("CheckTimings.Add")
             && content.contains("PendingWorktreeStatus")
             && content.contains("PendingWorktreeUntracked")
-            && content.contains("PendingWorktreeRustDiff")
+            && content.contains("PendingRustPanicDiff")
             && content.contains("ReadToEndAsync")
             && content.contains("Get-WorktreeRustPanicMacroCandidates")
             && content.contains("HookPolicyChangedFiles")

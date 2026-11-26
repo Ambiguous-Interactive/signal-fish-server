@@ -109,7 +109,7 @@ $script:WorktreePolicyPathspecs = @(
 ) + $script:DocVersionSyncFiles + $script:HookPolicyFiles
 $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
-$script:PendingWorktreeRustDiff = $null
+$script:PendingRustPanicDiff = $null
 $script:PendingChangelogBlob = $null
 $script:PendingChangelogFiles = $null
 $script:PendingChangelogRustDiff = $null
@@ -128,14 +128,14 @@ function Remove-PreCommitPendingGit {
     $pendingQueries = @(
         $script:PendingWorktreeStatus,
         $script:PendingWorktreeUntracked,
-        $script:PendingWorktreeRustDiff,
+        $script:PendingRustPanicDiff,
         $script:PendingChangelogBlob,
         $script:PendingChangelogFiles,
         $script:PendingChangelogRustDiff
     )
     $script:PendingWorktreeStatus = $null
     $script:PendingWorktreeUntracked = $null
-    $script:PendingWorktreeRustDiff = $null
+    $script:PendingRustPanicDiff = $null
     $script:PendingChangelogBlob = $null
     $script:PendingChangelogFiles = $null
     $script:PendingChangelogRustDiff = $null
@@ -491,7 +491,7 @@ function Get-PolicyText {
 function Get-IndexFiles {
     param([string[]]$Pathspecs)
 
-    $arguments = @("ls-files", "-z", "--") + $Pathspecs
+    $arguments = @("--literal-pathspecs", "ls-files", "-z", "--") + $Pathspecs
     $result = Invoke-Git -Arguments $arguments
     if ([string]::IsNullOrEmpty($result.Stdout)) {
         return @()
@@ -573,7 +573,7 @@ function Get-IndexFileObjectIds {
         return $objectIdsByPath
     }
 
-    $arguments = @("ls-files", "-s", "-z", "--") + $Pathspecs
+    $arguments = @("--literal-pathspecs", "ls-files", "-s", "-z", "--") + $Pathspecs
     $result = Invoke-Git -Arguments $arguments
     if ([string]::IsNullOrEmpty($result.Stdout)) {
         return $objectIdsByPath
@@ -990,6 +990,13 @@ function Test-ProductionRustSourcePath {
     -not ($Path.Contains("/test/") -or $Path.Contains("/tests/"))
 }
 
+function Get-RustPanicDiffArguments {
+    param([string[]]$Pathspecs)
+
+    $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
+    @("--literal-pathspecs", "diff", $diffBase, "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--") + $Pathspecs
+}
+
 function Test-RustPanicPolicyRelevantDiff {
     param([Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs)
 
@@ -997,27 +1004,13 @@ function Test-RustPanicPolicyRelevantDiff {
         return $false
     }
 
-    $diffBase = if ($script:InspectWorktree) { "HEAD" } else { "--cached" }
-    if ($null -eq $script:PendingWorktreeRustDiff) {
-        $result = Invoke-Native -FileName "git" -Arguments (@(
-                "diff", $diffBase, "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--"
-            ) + $Pathspecs)
+    $arguments = Get-RustPanicDiffArguments -Pathspecs $Pathspecs
+    $pending = $script:PendingRustPanicDiff
+    $script:PendingRustPanicDiff = $null
+    $result = if ($null -eq $pending) {
+        Invoke-Native -FileName "git" -Arguments $arguments
     } else {
-        $pending = $script:PendingWorktreeRustDiff
-        $script:PendingWorktreeRustDiff = $null
-        try {
-            $pending.Process.WaitForExit()
-            $stdout = $pending.StdoutTask.GetAwaiter().GetResult()
-            $stderr = $pending.StderrTask.GetAwaiter().GetResult()
-            $result = [pscustomobject]@{
-                ExitCode = $pending.Process.ExitCode
-                Stdout = $stdout
-                Stderr = $stderr
-                Output = $stdout + $stderr
-            }
-        } finally {
-            $pending.Process.Dispose()
-        }
+        Wait-PendingGit -Pending $pending -GitArguments $arguments -AllowFailure
     }
     if ($script:InspectWorktree) {
         # Git cannot see untracked files. A file without any of these names
@@ -2326,12 +2319,13 @@ try {
         })
     $changedFilesTimer.Stop()
     $changedProductionRustFiles = [string[]]@($allChangedFiles | Where-Object { Test-ProductionRustSourcePath -Path $_ })
-    if ($script:InspectWorktree -and $changedProductionRustFiles.Count -gt 0) {
+    if ($changedProductionRustFiles.Count -gt 0 -and
+        ($script:InspectWorktree -or $allChangedFiles -ccontains ".github/internal-refactor.json")) {
         # A modified test-only file cannot change another file's panic context.
         # Keep all source paths for structural changes so Git sees both sides
         # of renames and copies, including moves between test and runtime files.
         $changedSourcePaths = $changedProductionRustFiles
-        if ($script:WorktreeHasStructuralChanges) {
+        if ($script:InspectWorktree -and $script:WorktreeHasStructuralChanges) {
             $changedSourcePaths = @($allChangedFiles | Where-Object {
                 $_ -ceq 'src' -or $_.StartsWith('src/', [System.StringComparison]::Ordinal)
             })
@@ -2340,9 +2334,9 @@ try {
         if (($changedSourcePaths -join ' ').Length -gt 4096) {
             $changedSourcePaths = @('src')
         }
-        $script:PendingWorktreeRustDiff = Start-PendingGit -GitArguments (@(
-            "--literal-pathspecs", "diff", "HEAD", "--unified=0", "--no-color", "-G", $script:RustPanicGrepPattern, "--"
-        ) + $changedSourcePaths)
+        # Staged refactor validation can overlap this source-only read.
+        # Doc version sync can re-stage version docs, and it never writes src.
+        $script:PendingRustPanicDiff = Start-PendingGit -GitArguments (Get-RustPanicDiffArguments -Pathspecs $changedSourcePaths)
     }
 } catch {
     # A discovery-stage throw aborts before Complete-PreCommit's sweep can run.

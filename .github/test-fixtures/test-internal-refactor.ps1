@@ -27,7 +27,7 @@ function Expect-Rejection {
 function Expect-Paths {
     param([string]$Mode, [string]$DiffBase = "")
     $paths = Get-InternalRefactorExemptions -Mode $Mode -DiffBase $DiffBase
-    if (($paths | Sort-Object) -join "," -cne ".cargo/mutants.toml,src/.hidden.rs,src/core.rs,src/deleted.rs,src/new.rs") {
+    if (($paths | Sort-Object) -join "," -cne ".cargo/mutants.toml,src/.hidden space.rs,src/core.rs,src/deleted.rs,src/new.rs") {
         throw "Wrong exemption paths in $Mode"
     }
 }
@@ -58,7 +58,7 @@ fn ready() -> bool {
 }
 '@ + "`n"
     [System.IO.File]::WriteAllText("src/core.rs", $beforeProbe)
-    [System.IO.File]::WriteAllText("src/.hidden.rs", "old hidden`n")
+    [System.IO.File]::WriteAllText("src/.hidden space.rs", "old hidden`n")
     [System.IO.File]::WriteAllText("src/deleted.rs", "deleted core`n")
     [System.IO.File]::WriteAllText(".cargo/mutants.toml", "timeout_multiplier = 2.0`n")
     Git add . | Out-Null
@@ -66,8 +66,8 @@ fn ready() -> bool {
     $base = Git rev-parse HEAD
     $before = Git rev-parse HEAD:src/core.rs
     $deleted = Git rev-parse HEAD:src/deleted.rs
-    $hidden = Git rev-parse HEAD:src/.hidden.rs
-    [System.IO.File]::WriteAllText("src/.hidden.rs", "new hidden`n")
+    $hidden = Git rev-parse "HEAD:src/.hidden space.rs"
+    [System.IO.File]::WriteAllText("src/.hidden space.rs", "new hidden`n")
     [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
     [System.IO.File]::WriteAllText(".cargo/mutants.toml", "timeout_multiplier = 3.0`n")
     Git add src/core.rs | Out-Null
@@ -89,7 +89,7 @@ fn ready() -> bool {
             @{path = "src/core.rs"; before = $before; after = (Git hash-object src/core.rs)},
             @{path = "src/new.rs"; before = $null; after = (Git hash-object src/new.rs)},
             @{path = "src/deleted.rs"; before = $deleted; after = $null},
-            @{path = "src/.hidden.rs"; before = $hidden; after = (Git hash-object src/.hidden.rs)},
+            @{path = "src/.hidden space.rs"; before = $hidden; after = (Git hash-object "src/.hidden space.rs")},
             @{path = ".cargo/mutants.toml"; before = (Git rev-parse HEAD:.cargo/mutants.toml); after = (Git hash-object .cargo/mutants.toml)}
         )
     }
@@ -98,6 +98,28 @@ fn ready() -> bool {
     Git add -A | Out-Null
     Expect-Paths Staged
     Expect-Paths Comparison $base
+    [System.IO.File]::WriteAllText(".github/internal-refactor.json", "{")
+    Expect-Paths Staged
+    Expect-Rejection { Get-InternalRefactorExemptions -Mode Worktree } "unstaged declaration drift"
+    Save-Declaration $declaration
+    # A declaration can exempt a changelog entry, while the staged panic policy still applies.
+    $panickingProbe = $afterProbe.Replace('    true', '    panic!("staged refactor probe")')
+    [System.IO.File]::WriteAllText("src/core.rs", $panickingProbe)
+    Git add src/core.rs | Out-Null
+    $declaration.files[0].after = Git rev-parse :src/core.rs
+    Save-Declaration $declaration
+    Git add .github/internal-refactor.json | Out-Null
+    [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
+    $hook = Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1"
+    $rejection = & pwsh -NoLogo -NoProfile -NonInteractive -File $hook
+    if ($LASTEXITCODE -eq 0 -or $rejection -cnotcontains "PASS: Changelog gate" -or
+        $rejection -cnotcontains "FAIL: Rust panic patterns") {
+        throw "An exact declaration hid a staged panic: $($rejection -join "`n")"
+    }
+    $declaration.files[0].after = Git hash-object src/core.rs
+    Save-Declaration $declaration
+    Git add src/core.rs .github/internal-refactor.json | Out-Null
+
     foreach ($worktreeMode in @($false, $true)) {
         $script:InspectWorktree = $worktreeMode
         $failedBefore = $script:Failed
@@ -129,34 +151,36 @@ fn ready() -> bool {
     Expect-Rejection { Get-InternalRefactorExemptions -Mode Worktree } "unstaged source drift"
     [System.IO.File]::WriteAllText("src/core.rs", $afterProbe)
 
-    Remove-Item -LiteralPath src/.hidden.rs -Force
+    Remove-Item -LiteralPath "src/.hidden space.rs" -Force
     foreach ($mode in @("Worktree", "Comparison")) {
         Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "missing hidden source in $mode" "after blob mismatch"
     }
     Expect-Paths Staged
     if (-not $IsWindows) {
-        New-Item -ItemType SymbolicLink -Path src/.hidden.rs -Target core.rs | Out-Null
+        New-Item -ItemType SymbolicLink -Path "src/.hidden space.rs" -Target core.rs | Out-Null
         foreach ($mode in @("Worktree", "Comparison")) {
             Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "hidden source symlink in $mode" "not a regular file"
         }
-        Remove-Item -LiteralPath src/.hidden.rs -Force
+        Remove-Item -LiteralPath "src/.hidden space.rs" -Force
     }
-    [System.IO.File]::WriteAllText("src/.hidden.rs", "wrong hidden`n")
+    [System.IO.File]::WriteAllText("src/.hidden space.rs", "wrong hidden`n")
     foreach ($mode in @("Worktree", "Comparison")) {
         Expect-Rejection { Get-InternalRefactorExemptions -Mode $mode -DiffBase $base } "hidden source drift in $mode" "after blob mismatch"
     }
-    [System.IO.File]::WriteAllText("src/.hidden.rs", "new hidden`n")
+    [System.IO.File]::WriteAllText("src/.hidden space.rs", "new hidden`n")
     Expect-Paths Worktree
     Expect-Paths Comparison $base
 
     $originalJson = $declaration | ConvertTo-Json -Depth 5
-    foreach ($mutation in @("before", "after", "reason", "traversal", "duplicate", "base", "extra")) {
+    foreach ($mutation in @("before", "after", "reason", "traversal", "wildcard", "newline", "duplicate", "base", "extra")) {
         $invalid = ConvertFrom-Json -AsHashtable $originalJson
         switch ($mutation) {
             "before" { $invalid.files[0].before = "0" * 40 }
             "after" { $invalid.files[0].after = "0" * 40 }
             "reason" { $invalid.reason = " " }
             "traversal" { $invalid.files[0].path = "src/../core.rs" }
+            "wildcard" { $invalid.files[0].path = "src/*.rs" }
+            "newline" { $invalid.files[0].path = "src/core`n.rs" }
             "duplicate" { $invalid.files += @{path = "SRC/core.rs"; before = $before; after = $declaration.files[0].after} }
             "base" { $invalid.base = "0" * 40 }
             "extra" { $invalid["unexpected"] = $true }
@@ -223,6 +247,28 @@ fn ready() -> bool {
     Git add src/core.rs | Out-Null
     if ((Get-InternalRefactorExemptions -Mode Staged).Count -ne 0) { throw "Historical declaration exempted a later change" }
     if ((Get-InternalRefactorExemptions -Mode Worktree).Count -ne 0) { throw "Historical declaration exempted worktree drift" }
+    . (Join-Path $RepositoryRoot "scripts/hooks/pre-commit-rust.ps1")
+    Git config color.grep always | Out-Null
+    $literalPath = "src/panic[1].rs"
+    $decoyPath = "src/panic1.rs"
+    $testPaths = @($literalPath)
+    if (-not $IsWindows) { $testPaths += "src/panic`nname.rs" }
+    foreach ($path in ($testPaths + $decoyPath)) {
+        [System.IO.File]::WriteAllText($path, 'fn example() { panic!("fixture"); }' + "`n")
+    }
+    Git add -- src | Out-Null
+    Git commit -qm "Add literal path scanner controls" | Out-Null
+    foreach ($path in $testPaths) {
+        foreach ($hits in @(
+            ,@(Get-StagedRustPanicMacroCandidates -Pathspecs @($path))
+            ,@(Get-HeadRustPanicMacroCandidates -Pathspecs @($path))
+            ,@(Get-WorktreeRustPanicMacroCandidates -Pathspecs @($path))
+        )) {
+            if ($hits.Count -ne 1 -or $hits[0].File -cne $path -or $hits[0].Line -ne 1) {
+                throw "Panic scanner selected a different path or line"
+            }
+        }
+    }
     Write-Output "PASS internal-refactor staged, worktree, comparison, and negative controls"
 } finally {
     Set-Location -LiteralPath $originalLocation.Path

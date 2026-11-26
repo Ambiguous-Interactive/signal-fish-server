@@ -799,6 +799,32 @@ function Get-RustCandidateTestLineSet {
     Write-Output -NoEnumerate $testCandidateLines
 }
 
+function Read-GitGrepLines {
+    param([AllowEmptyString()][string]$Output, [switch]$Head)
+
+    # Git separates the filename and line number with NUL. A filename may
+    # contain a newline, so only the end of the matching source line uses LF.
+    $pattern = [regex]'\G(?<file>[^\x00]+)\x00(?<line>[0-9]+)\x00(?<text>[^\n]*)\n'
+    $offset = 0
+    while ($offset -lt $Output.Length) {
+        $entry = $pattern.Match($Output, $offset)
+        if (-not $entry.Success) { throw "Unable to parse git grep output at character $offset" }
+        $path = $entry.Groups["file"].Value
+        if ($Head) {
+            if (-not $path.StartsWith("HEAD:", [System.StringComparison]::Ordinal)) {
+                throw "Git grep result has no HEAD prefix"
+            }
+            $path = $path.Substring("HEAD:".Length)
+        }
+        [pscustomobject]@{
+            File = $path
+            Line = [int]$entry.Groups["line"].Value
+            Text = $entry.Groups["text"].Value.TrimEnd("`r")
+        }
+        $offset += $entry.Length
+    }
+}
+
 function Get-WorktreeRustPanicMacroCandidates {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$Pathspecs
@@ -817,24 +843,15 @@ function Get-WorktreeRustPanicMacroCandidates {
 
     if ($trackedFiles.Count -gt 0) {
         $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
-        $result = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", $grepPattern, "--") + $trackedFiles)
+        $result = Invoke-Native -FileName "git" -Arguments (@("--literal-pathspecs", "grep", "-n", "-z", "--no-color", "-E", $grepPattern, "--") + $trackedFiles)
         if ($result.ExitCode -ne 0 -and $result.ExitCode -ne 1) {
             throw "git grep failed:`n$($result.Output)"
         }
         if ($result.ExitCode -eq 0) {
-            foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-                $line = $rawLine.TrimEnd("`r")
-                if ($line -notmatch "^(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
-                    throw "Unable to parse git grep output line: $line"
-                }
-
-                $text = $Matches["text"]
-                if (Test-RustPanicMacroLine -Line $text) {
-                    [void]$candidates.Add([pscustomobject]@{
-                            File = $Matches["file"]
-                            Line = [int]$Matches["line"]
-                            Text = $text.TrimStart()
-                        })
+            foreach ($candidate in (Read-GitGrepLines -Output $result.Stdout)) {
+                if (Test-RustPanicMacroLine -Line $candidate.Text) {
+                    $candidate.Text = $candidate.Text.TrimStart()
+                    $candidates.Add($candidate)
                 }
             }
         }
@@ -874,7 +891,7 @@ function Get-StagedRustPanicMacroCandidates {
     }
 
     $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
-    $result = Invoke-Native -FileName "git" -Arguments (@("grep", "--cached", "-n", "-E", $grepPattern, "--") + $Pathspecs)
+    $result = Invoke-Native -FileName "git" -Arguments (@("--literal-pathspecs", "grep", "--cached", "-n", "-z", "--no-color", "-E", $grepPattern, "--") + $Pathspecs)
     if ($result.ExitCode -eq 1) {
         return @()
     }
@@ -883,19 +900,10 @@ function Get-StagedRustPanicMacroCandidates {
     }
 
     $candidates = [System.Collections.Generic.List[object]]::new()
-    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $line = $rawLine.TrimEnd("`r")
-        if ($line -notmatch "^(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
-            throw "Unable to parse git grep output line: $line"
-        }
-
-        $text = $Matches["text"]
-        if (Test-RustPanicMacroLine -Line $text) {
-            [void]$candidates.Add([pscustomobject]@{
-                    File = $Matches["file"]
-                    Line = [int]$Matches["line"]
-                    Text = $text.TrimStart()
-                })
+    foreach ($candidate in (Read-GitGrepLines -Output $result.Stdout)) {
+        if (Test-RustPanicMacroLine -Line $candidate.Text) {
+            $candidate.Text = $candidate.Text.TrimStart()
+            $candidates.Add($candidate)
         }
     }
 
@@ -910,7 +918,7 @@ function Get-HeadRustPanicMacroCandidates {
     }
 
     $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
-    $result = Invoke-Native -FileName "git" -Arguments (@("grep", "-n", "-E", $grepPattern, "HEAD", "--") + $Pathspecs)
+    $result = Invoke-Native -FileName "git" -Arguments (@("--literal-pathspecs", "grep", "-n", "-z", "--no-color", "-E", $grepPattern, "HEAD", "--") + $Pathspecs)
     if ($result.ExitCode -eq 1) {
         return @()
     }
@@ -922,19 +930,10 @@ function Get-HeadRustPanicMacroCandidates {
     }
 
     $candidates = [System.Collections.Generic.List[object]]::new()
-    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $line = $rawLine.TrimEnd("`r")
-        if ($line -notmatch "^HEAD:(?<file>[^:]+):(?<line>\d+):(?<text>.*)$") {
-            throw "Unable to parse git grep HEAD output line: $line"
-        }
-
-        $text = $Matches["text"]
-        if (Test-RustPanicMacroLine -Line $text) {
-            [void]$candidates.Add([pscustomobject]@{
-                    File = $Matches["file"]
-                    Line = [int]$Matches["line"]
-                    Text = $text.TrimStart()
-                })
+    foreach ($candidate in (Read-GitGrepLines -Output $result.Stdout -Head)) {
+        if (Test-RustPanicMacroLine -Line $candidate.Text) {
+            $candidate.Text = $candidate.Text.TrimStart()
+            $candidates.Add($candidate)
         }
     }
 
@@ -988,13 +987,13 @@ function Get-RustTestContextMarkerSignatureFromGit {
     }
 
     $grepPattern = "#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest)"
-    $arguments = @("grep")
+    $arguments = @("--literal-pathspecs", "grep")
     if ($Head) {
-        $arguments += @("-n", "-E", $grepPattern, "HEAD")
+        $arguments += @("-n", "-z", "--no-color", "-E", $grepPattern, "HEAD")
     } elseif (-not $script:InspectWorktree) {
-        $arguments += @("--cached", "-n", "-E", $grepPattern)
+        $arguments += @("--cached", "-n", "-z", "--no-color", "-E", $grepPattern)
     } else {
-        $arguments += @("-n", "-E", $grepPattern)
+        $arguments += @("-n", "-z", "--no-color", "-E", $grepPattern)
     }
     $arguments += @("--") + $CandidateFiles
 
@@ -1010,12 +1009,8 @@ function Get-RustTestContextMarkerSignatureFromGit {
     }
 
     $markers = [System.Collections.Generic.List[string]]::new()
-    foreach ($rawLine in $result.Stdout.Split("`n", [System.StringSplitOptions]::RemoveEmptyEntries)) {
-        $line = $rawLine.TrimEnd("`r")
-        if ($Head -and $line.StartsWith("HEAD:", [System.StringComparison]::Ordinal)) {
-            $line = $line.Substring("HEAD:".Length)
-        }
-        [void]$markers.Add($line)
+    foreach ($marker in (Read-GitGrepLines -Output $result.Stdout -Head:$Head)) {
+        $markers.Add("$($marker.File)`0$($marker.Line)`0$($marker.Text)")
     }
 
     $markerArray = [string[]]$markers
@@ -1050,7 +1045,7 @@ function Test-RustPanicMacroDiffChanged {
     }
 
     $grepPattern = "(^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!"
-    $arguments = @("diff")
+    $arguments = @("--literal-pathspecs", "diff")
     if ($script:InspectWorktree) {
         $arguments += "HEAD"
     } else {
