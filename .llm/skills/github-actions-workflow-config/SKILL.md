@@ -200,6 +200,8 @@ on:
 When adding a direct Nextest command to the root Nextest job, keep both
 `--profile ci` and `--cargo-profile ci`. Update the invocation count and run
 `bash scripts/dev-loop.sh test_nextest_uses_the_cargo_ci_profile_for_every_build`.
+Format changes to repository checks with
+`cargo fmt --manifest-path tools/repo-checks/Cargo.toml --all`.
 
 Use an explicit status condition when a supplemental diagnostic needs to run
 after a failed test step. Check that the test step ran and skip canceled jobs.
