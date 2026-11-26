@@ -4,185 +4,48 @@ mod test_helpers;
 
 mod allocation_harness;
 
-use signal_fish_server::protocol::{ServerMessage, SpectatorInfo};
+use signal_fish_server::{
+    protocol::{RoomId, ServerMessage, SpectatorInfo},
+    server::EnhancedGameServer,
+};
+use std::sync::Arc;
+use tokio::{runtime::Runtime, sync::mpsc};
 use uuid::Uuid;
 
 #[global_allocator]
 static ALLOCATOR: &stats_alloc::StatsAlloc<std::alloc::System> = &stats_alloc::INSTRUMENTED_SYSTEM;
 
+const ROSTER_SIZES: [u128; 3] = [0, 16, 254];
+const HOST: Uuid = Uuid::from_u128(1);
+const SPECTATOR: Uuid = Uuid::from_u128(2);
+
+struct AdmissionFixture {
+    server: Arc<EnhancedGameServer>,
+    room_id: RoomId,
+    host_receiver: mpsc::Receiver<Arc<ServerMessage>>,
+    spectator_receiver: mpsc::Receiver<Arc<ServerMessage>>,
+}
+
+fn admission_runtime() -> Runtime {
+    // Poll both scheduler queues and the driver during warm-up.
+    tokio::runtime::Builder::new_current_thread()
+        .global_queue_interval(1)
+        .event_interval(1)
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
 /// Bound roster-copy growth in isolated runtimes with warmed scheduler storage.
 fn spectator_admission_reuses_its_owned_room_and_roster() {
-    #[cfg(feature = "allocation-tracking")]
-    signal_fish_server::server::allocation_benchmark::install_spectator_allocation_observer(
-        record_stage,
-    )
-    .unwrap();
     let mut profiles = Vec::new();
-    for spectators in [0_u128, 16, 254] {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            // Poll both scheduler queues and the driver during warm-up. Their
-            // native locks must not first initialize inside the measured join.
-            .global_queue_interval(1)
-            .event_interval(1)
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
+    for spectators in ROSTER_SIZES {
+        let stats = admission_runtime().block_on(async {
             allocation_harness::warm_current_thread_runtime().await;
-            let server = test_helpers::create_test_server().await;
-            let host = Uuid::from_u128(1);
-            let spectator = Uuid::from_u128(2);
-            let (host_sender, mut host_receiver) = tokio::sync::mpsc::channel(16);
-            let (spectator_sender, mut spectator_receiver) = tokio::sync::mpsc::channel(16);
-            server.connect_client(host, host_sender).await;
-            server.connect_client(spectator, spectator_sender).await;
-            server
-                .handle_join_room(
-                    &host,
-                    "spectator-profile".into(),
-                    Some("SPROF1".into()),
-                    "Host".into(),
-                    Some(4),
-                    Some(true),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-            let room_joined = host_receiver.try_recv().unwrap();
-            assert!(matches!(room_joined.as_ref(), ServerMessage::RoomJoined(_)));
-            let lobby = host_receiver.try_recv().unwrap();
-            assert!(matches!(
-                lobby.as_ref(),
-                ServerMessage::LobbyStateChanged { .. }
-            ));
-            let room_id = server.get_client_room(&host).await.unwrap();
-            server
-                .database()
-                .set_room_max_spectators(&room_id, Some(255))
-                .await
-                .unwrap();
-            for index in 0..spectators {
-                assert!(server
-                    .database()
-                    .add_spectator_to_room(
-                        &room_id,
-                        SpectatorInfo {
-                            id: Uuid::from_u128(index + 3),
-                            name: format!("Viewer{index}"),
-                            connected_at: None,
-                        },
-                    )
-                    .await
-                    .unwrap());
-            }
-            server
-                .handle_join_as_spectator(
-                    &spectator,
-                    "spectator-profile".into(),
-                    "SPROF1".into(),
-                    "Viewer".into(),
-                    None,
-                )
-                .await;
-            let warm_baseline = spectator_receiver.try_recv().unwrap();
-            assert!(matches!(
-                warm_baseline.as_ref(),
-                ServerMessage::SpectatorJoined(_)
-            ));
-            let warm_notification = host_receiver.try_recv().unwrap();
-            assert!(matches!(
-                warm_notification.as_ref(),
-                ServerMessage::NewSpectatorJoined { .. }
-            ));
-            server.handle_leave_spectator(&spectator).await;
-            let left = spectator_receiver.try_recv().unwrap();
-            assert!(matches!(left.as_ref(), ServerMessage::SpectatorLeft { .. }));
-            let disconnected = host_receiver.try_recv().unwrap();
-            assert!(matches!(
-                disconnected.as_ref(),
-                ServerMessage::SpectatorDisconnected { .. }
-            ));
-
-            let game_name = "spectator-profile".into();
-            let room_code = "SPROF1".into();
-            let spectator_name = "Viewer".into();
-            let region = stats_alloc::Region::new(ALLOCATOR);
-            #[cfg(feature = "allocation-tracking")]
-            {
-                RECORDING.store(true, std::sync::atomic::Ordering::Relaxed);
-                record_stage("before_call");
-            }
-            server
-                .handle_join_as_spectator(&spectator, game_name, room_code, spectator_name, None)
-                .await;
-            #[cfg(feature = "allocation-tracking")]
-            {
-                record_stage("returned");
-                RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
-            }
-            let stats = region.change();
-            #[cfg(feature = "allocation-tracking")]
-            print_stages(spectators);
-            println!("SPECTATOR_JOIN_PROFILE spectators={spectators} stats={stats:?}");
-            profiles.push((spectators, stats.allocations));
-
-            let baseline = spectator_receiver.try_recv().unwrap();
-            let ServerMessage::SpectatorJoined(payload) = baseline.as_ref() else {
-                panic!("expected spectator baseline, got {baseline:?}");
-            };
-            assert_eq!(payload.room_id, room_id);
-            assert_eq!(payload.room_code, "SPROF1");
-            assert_eq!(payload.game_name, "spectator-profile");
-            assert_eq!(payload.current_players.len(), 1);
-            assert_eq!(payload.current_players[0].id, host);
-            assert_eq!(
-                payload.current_spectators.len(),
-                usize::try_from(spectators).unwrap() + 1
-            );
-            for index in 0..spectators {
-                let expected_id = Uuid::from_u128(index + 3);
-                let expected_name = format!("Viewer{index}");
-                assert!(
-                    payload.current_spectators.iter().any(|entry| {
-                        entry.id == expected_id
-                            && entry.name == expected_name
-                            && entry.connected_at.is_none()
-                    }),
-                    "baseline is missing spectator {expected_id}"
-                );
-            }
-            let admitted = payload
-                .current_spectators
-                .iter()
-                .find(|entry| entry.id == spectator)
-                .expect("baseline includes the admitted spectator");
-            assert_eq!(admitted.name, "Viewer");
-            assert!(admitted.connected_at.is_some());
-            let notification = host_receiver.try_recv().unwrap();
-            let ServerMessage::NewSpectatorJoined {
-                spectator: joined,
-                current_spectators,
-                spectator_count,
-                ..
-            } = notification.as_ref()
-            else {
-                panic!("expected spectator notification, got {notification:?}");
-            };
-            assert_eq!(joined.id, spectator);
-            assert_eq!(
-                serde_json::to_value(joined).unwrap(),
-                serde_json::to_value(admitted).unwrap()
-            );
-            assert_eq!(
-                serde_json::to_value(current_spectators).unwrap(),
-                serde_json::to_value(&payload.current_spectators).unwrap()
-            );
-            assert_eq!(
-                *spectator_count,
-                Some(u32::try_from(spectators).unwrap() + 1)
-            );
+            let fixture = prepare_admission(spectators).await;
+            measure_admission(fixture, spectators).await
         });
+        profiles.push((spectators, stats.allocations));
     }
     println!("SPECTATOR_JOIN_ALLOCATIONS {profiles:?}");
     let empty_allocations = profiles[0].1;
@@ -192,6 +55,175 @@ fn spectator_admission_reuses_its_owned_room_and_roster() {
             "spectator roster allocation growth exceeded three copies: spectators={spectators} allocations={allocations} empty={empty_allocations}"
         );
     }
+}
+
+async fn prepare_admission(spectators: u128) -> AdmissionFixture {
+    let server = test_helpers::create_test_server().await;
+    let (host_sender, mut host_receiver) = tokio::sync::mpsc::channel(16);
+    let (spectator_sender, mut spectator_receiver) = tokio::sync::mpsc::channel(16);
+    server.connect_client(HOST, host_sender).await;
+    server.connect_client(SPECTATOR, spectator_sender).await;
+    server
+        .handle_join_room(
+            &HOST,
+            "spectator-profile".into(),
+            Some("SPROF1".into()),
+            "Host".into(),
+            Some(4),
+            Some(true),
+            None,
+            None,
+            None,
+        )
+        .await;
+    let room_joined = host_receiver.try_recv().unwrap();
+    assert!(matches!(room_joined.as_ref(), ServerMessage::RoomJoined(_)));
+    let lobby = host_receiver.try_recv().unwrap();
+    assert!(matches!(
+        lobby.as_ref(),
+        ServerMessage::LobbyStateChanged { .. }
+    ));
+    let room_id = server.get_client_room(&HOST).await.unwrap();
+    server
+        .database()
+        .set_room_max_spectators(&room_id, Some(255))
+        .await
+        .unwrap();
+    for index in 0..spectators {
+        assert!(server
+            .database()
+            .add_spectator_to_room(
+                &room_id,
+                SpectatorInfo {
+                    id: Uuid::from_u128(index + 3),
+                    name: format!("Viewer{index}"),
+                    connected_at: None,
+                },
+            )
+            .await
+            .unwrap());
+    }
+    server
+        .handle_join_as_spectator(
+            &SPECTATOR,
+            "spectator-profile".into(),
+            "SPROF1".into(),
+            "Viewer".into(),
+            None,
+        )
+        .await;
+    let warm_baseline = spectator_receiver.try_recv().unwrap();
+    assert!(matches!(
+        warm_baseline.as_ref(),
+        ServerMessage::SpectatorJoined(_)
+    ));
+    let warm_notification = host_receiver.try_recv().unwrap();
+    assert!(matches!(
+        warm_notification.as_ref(),
+        ServerMessage::NewSpectatorJoined { .. }
+    ));
+    server.handle_leave_spectator(&SPECTATOR).await;
+    let left = spectator_receiver.try_recv().unwrap();
+    assert!(matches!(left.as_ref(), ServerMessage::SpectatorLeft { .. }));
+    let disconnected = host_receiver.try_recv().unwrap();
+    assert!(matches!(
+        disconnected.as_ref(),
+        ServerMessage::SpectatorDisconnected { .. }
+    ));
+
+    AdmissionFixture {
+        server,
+        room_id,
+        host_receiver,
+        spectator_receiver,
+    }
+}
+
+async fn measure_admission(fixture: AdmissionFixture, spectators: u128) -> stats_alloc::Stats {
+    let AdmissionFixture {
+        server,
+        room_id,
+        mut host_receiver,
+        mut spectator_receiver,
+    } = fixture;
+    let game_name = "spectator-profile".into();
+    let room_code = "SPROF1".into();
+    let spectator_name = "Viewer".into();
+    let region = stats_alloc::Region::new(ALLOCATOR);
+    #[cfg(feature = "allocation-tracking")]
+    {
+        RECORDING.store(true, std::sync::atomic::Ordering::Relaxed);
+        record_stage("before_call");
+    }
+    server
+        .handle_join_as_spectator(&SPECTATOR, game_name, room_code, spectator_name, None)
+        .await;
+    #[cfg(feature = "allocation-tracking")]
+    {
+        record_stage("returned");
+        RECORDING.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    let stats = region.change();
+    #[cfg(feature = "allocation-tracking")]
+    print_stages(spectators);
+    println!("SPECTATOR_JOIN_PROFILE spectators={spectators} stats={stats:?}");
+
+    let baseline = spectator_receiver.try_recv().unwrap();
+    let ServerMessage::SpectatorJoined(payload) = baseline.as_ref() else {
+        panic!("expected spectator baseline, got {baseline:?}");
+    };
+    assert_eq!(payload.room_id, room_id);
+    assert_eq!(payload.room_code, "SPROF1");
+    assert_eq!(payload.game_name, "spectator-profile");
+    assert_eq!(payload.current_players.len(), 1);
+    assert_eq!(payload.current_players[0].id, HOST);
+    assert_eq!(
+        payload.current_spectators.len(),
+        usize::try_from(spectators).unwrap() + 1
+    );
+    for index in 0..spectators {
+        let expected_id = Uuid::from_u128(index + 3);
+        let expected_name = format!("Viewer{index}");
+        assert!(
+            payload.current_spectators.iter().any(|entry| {
+                entry.id == expected_id
+                    && entry.name == expected_name
+                    && entry.connected_at.is_none()
+            }),
+            "baseline is missing spectator {expected_id}"
+        );
+    }
+    let admitted = payload
+        .current_spectators
+        .iter()
+        .find(|entry| entry.id == SPECTATOR)
+        .expect("baseline includes the admitted spectator");
+    assert_eq!(admitted.name, "Viewer");
+    assert!(admitted.connected_at.is_some());
+    let notification = host_receiver.try_recv().unwrap();
+    let ServerMessage::NewSpectatorJoined {
+        spectator: joined,
+        current_spectators,
+        spectator_count,
+        ..
+    } = notification.as_ref()
+    else {
+        panic!("expected spectator notification, got {notification:?}");
+    };
+    assert_eq!(joined.id, SPECTATOR);
+    assert_eq!(
+        serde_json::to_value(joined).unwrap(),
+        serde_json::to_value(admitted).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(current_spectators).unwrap(),
+        serde_json::to_value(&payload.current_spectators).unwrap()
+    );
+    assert_eq!(
+        *spectator_count,
+        Some(u32::try_from(spectators).unwrap() + 1)
+    );
+    stats
 }
 
 #[cfg(feature = "allocation-tracking")]
@@ -242,14 +274,66 @@ fn record_stage(stage: &'static str) {
     BYTES[index].store(stats.bytes_allocated, Relaxed);
 }
 
+#[cfg(feature = "allocation-tracking")]
+fn stage_deltas() -> [(usize, usize); STAGES.len() - 1] {
+    use std::sync::atomic::Ordering::Relaxed;
+    std::array::from_fn(|offset| {
+        let index = offset + 1;
+        let allocations = ALLOCATIONS[index].load(Relaxed) - ALLOCATIONS[index - 1].load(Relaxed);
+        let bytes = BYTES[index].load(Relaxed) - BYTES[index - 1].load(Relaxed);
+        (allocations, bytes)
+    })
+}
+
 /// Print stage deltas only after the complete admission measurement ends.
 #[cfg(feature = "allocation-tracking")]
 fn print_stages(spectators: u128) {
-    use std::sync::atomic::Ordering::Relaxed;
-    for index in 1..STAGES.len() {
-        let allocations = ALLOCATIONS[index].load(Relaxed) - ALLOCATIONS[index - 1].load(Relaxed);
-        let bytes = BYTES[index].load(Relaxed) - BYTES[index - 1].load(Relaxed);
-        println!("ADMISSION_STAGE spectators={spectators} stage={} allocations={allocations} bytes={bytes}", STAGES[index]);
+    for (stage, (allocations, bytes)) in STAGES[1..].iter().zip(stage_deltas()) {
+        println!("ADMISSION_STAGE spectators={spectators} stage={stage} allocations={allocations} bytes={bytes}");
+    }
+}
+
+/// Match the spawn interval of the historical macOS failure (#1359).
+#[cfg(feature = "allocation-tracking")]
+fn spectator_admission_attributes_first_use_registry_allocation() {
+    let native_lock = if cfg!(target_os = "macos") {
+        (1, 64)
+    } else {
+        (0, 0)
+    };
+    for spectators in ROSTER_SIZES {
+        let [(cold, cold_stages), (warm, warm_stages)] = [3, 4].map(|warm_tasks| {
+            // Keep room setup tasks out of the measuring runtime. Three
+            // consecutive task IDs warm three shards. The next spawn either
+            // uses the fourth shard or reuses the first, already warm shard.
+            let setup = admission_runtime();
+            let fixture = setup.block_on(prepare_admission(spectators));
+            let stats = admission_runtime().block_on(async {
+                tokio::task::yield_now().await;
+                for _ in 0..warm_tasks {
+                    tokio::spawn(std::future::ready(())).await.unwrap();
+                }
+                println!("ADMISSION_REGISTRY spectators={spectators} warm_tasks={warm_tasks}");
+                measure_admission(fixture, spectators).await
+            });
+            (stats, stage_deltas())
+        });
+        assert_eq!(cold.allocations, warm.allocations + native_lock.0);
+        assert_eq!(cold.bytes_allocated, warm.bytes_allocated + native_lock.1);
+        for ((stage, cold_stage), warm_stage) in
+            STAGES[1..].iter().zip(cold_stages).zip(warm_stages)
+        {
+            let extra = if *stage == "task_started" {
+                native_lock
+            } else {
+                (0, 0)
+            };
+            assert_eq!(
+                cold_stage,
+                (warm_stage.0 + extra.0, warm_stage.1 + extra.1),
+                "spectators={spectators} stage={stage} warm={warm_stage:?}",
+            );
+        }
     }
 }
 
@@ -292,7 +376,12 @@ fn runtime_task_registry_initializes_each_shard_once() {
 
 /// Run allocation histories without a concurrent test-runner thread.
 fn main() {
-    allocation_harness::run_trials(vec![
+    #[cfg(feature = "allocation-tracking")]
+    signal_fish_server::server::allocation_benchmark::install_spectator_allocation_observer(
+        record_stage,
+    )
+    .unwrap();
+    let trials = vec![
         allocation_harness::trial(
             "spectator_admission_reuses_its_owned_room_and_roster",
             spectator_admission_reuses_its_owned_room_and_roster,
@@ -301,5 +390,11 @@ fn main() {
             "runtime_task_registry_initializes_each_shard_once",
             runtime_task_registry_initializes_each_shard_once,
         ),
-    ]);
+        #[cfg(feature = "allocation-tracking")]
+        allocation_harness::trial(
+            "spectator_admission_attributes_first_use_registry_allocation",
+            spectator_admission_attributes_first_use_registry_allocation,
+        ),
+    ];
+    allocation_harness::run_trials(trials);
 }

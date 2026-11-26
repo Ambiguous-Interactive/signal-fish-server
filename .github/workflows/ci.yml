@@ -384,6 +384,12 @@ jobs:
         # nextest does not support doc-tests; those are validated by doc-validation.yml
         run: python3 scripts/ci-cohort.py --runtime
 
+      - name: Qualify isolated macOS spectator admission allocations
+        if: runner.os == 'macOS' && github.event_name == 'workflow_dispatch'
+        run: >-
+          cargo nextest run --profile ci --locked --all-features --cargo-profile ci
+          --test spectator_join_allocations --test-threads 1 --no-tests fail
+
       - name: Upload room replacement attempts
         if: always()
         uses: actions/upload-artifact@v7.0.2
