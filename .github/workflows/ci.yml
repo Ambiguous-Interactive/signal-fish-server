@@ -342,31 +342,8 @@ jobs:
           if [[ "$TRACE_ARGS" == "--matched" ]]; then
             python3 .github/scripts/trace-transport-report.py trace-source --matched
           else
-            python3 .github/scripts/trace-transport-report.py trace-source
+            python3 .github/scripts/trace-transport-report.py trace-source --traces 16
           fi
-
-  transport-report-platforms:
-    name: Transport report qualification (${{ matrix.runner }})
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/1436-transport-report-allocation'
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 22
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [macos-26, windows-latest]
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: 1.94.0
-      - uses: taiki-e/install-action@v2.90.6
-        with:
-          tool: cargo-nextest@0.9.149
-      - name: Run the exact transport report control
-        run: >-
-          cargo nextest run --profile ci --locked --all-features --cargo-profile ci
-          --test session_plan_allocations --test-threads 1 --no-tests fail --success-output immediate
-          -E 'test(=transport_report_delivery_cost)'
 
   nextest:
     name: Nextest (${{ matrix.os }})
