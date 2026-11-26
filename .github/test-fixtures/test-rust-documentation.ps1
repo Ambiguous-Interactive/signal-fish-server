@@ -2,7 +2,8 @@
 param([Parameter(Mandatory = $true)][string]$RepositoryRoot)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-. (Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1") -SourceOnly
+$hookScript = (Resolve-Path -LiteralPath (Join-Path $RepositoryRoot "scripts/hooks/pre-commit.ps1")).Path
+. $hookScript -SourceOnly
 
 $source = "pub fn ready() -> bool { true }`n"
 $cases = @(
@@ -137,6 +138,9 @@ try {
     [IO.File]::WriteAllText((Join-Path $temporary 'empty-blob'), '')
     $payloadId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'blob-payload')).Stdout.Trim()
     $emptyId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'empty-blob')).Stdout.Trim()
+    [IO.File]::WriteAllText((Join-Path $temporary 'large-blob'), ('x' * 131072))
+    $largeId = (Invoke-Git -Arguments @('hash-object', '-w', '--', 'large-blob')).Stdout.Trim()
+    Remove-Item -LiteralPath (Join-Path $temporary 'large-blob')
     $blobBudget = $script:MaxBatchedBlobBytes
     try {
         $script:MaxBatchedBlobBytes = [Text.Encoding]::UTF8.GetByteCount($blobPayload)
@@ -156,6 +160,35 @@ try {
             $missingRejected = $_.Exception.Message -like 'Unexpected git cat-file*'
         }
         if (-not $missingRejected) { throw 'Single-process reader swallowed a missing object as a budget miss' }
+        # Refusal must stop Git even when it is still sending an oversized body.
+        if ($null -ne (Get-IndexBlobTexts -ObjectIds @($emptyId, $largeId, $payloadId) -SingleProcess -AllowBudgetMiss)) {
+            throw 'Single-process reader returned partial results after refusing a large body'
+        }
+        $afterRefusal = Get-IndexBlobTexts -ObjectIds @($emptyId) -SingleProcess
+        if ($afterRefusal.Count -ne 1 -or $afterRefusal[$emptyId] -cne '') { throw 'Blob reads did not recover after refusal' }
+
+        if ($IsLinux -and (Test-Path -LiteralPath "/proc/$PID/fd")) {
+            function Get-OpenPipeCount {
+                @([IO.Directory]::GetFiles("/proc/$PID/fd") | Where-Object {
+                    [IO.FileInfo]::new($_).LinkTarget -like 'pipe:*'
+                }).Count
+            }
+
+            # GC must not hide redirects that the reader forgot to close.
+            if ([GC]::TryStartNoGCRegion(67108864)) {
+                try {
+                    $before = Get-OpenPipeCount
+                    for ($attempt = 0; $attempt -lt 12; $attempt++) {
+                        [void](Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)
+                    }
+                    if ((Get-OpenPipeCount) -gt $before) { throw 'Blob refusal retained redirected pipes' }
+                } finally {
+                    [GC]::EndNoGCRegion()
+                }
+            } else {
+                Write-Warning 'Pipe descriptor count unavailable because the runtime could not reserve a no-GC region'
+            }
+        }
     } finally { $script:MaxBatchedBlobBytes = $blobBudget }
     foreach ($path in @('server.rs', 'bench.rs')) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
     Git add .
@@ -177,6 +210,40 @@ try {
         $result = Invoke-Native -FileName rustc -Arguments $Arguments
         if ($result.ExitCode -ne 0) { throw $result.Output }
     }
+
+    # Some Git installations launch a child that inherits the redirected pipes.
+    $launcherSource = @'
+use std::{env, process::{Command, ExitCode}};
+
+fn main() -> ExitCode {
+    let git = env::var_os("SIGNAL_FISH_FIXTURE_GIT").expect("Git path");
+    let status = Command::new(git).args(env::args_os().skip(1)).status().expect("launch Git");
+    ExitCode::from(status.code().unwrap_or(1) as u8)
+}
+'@
+    $launcherDir = Join-Path $temporary 'git-launcher'
+    New-Item -ItemType Directory -Path $launcherDir | Out-Null
+    [IO.File]::WriteAllText((Join-Path $temporary 'git_launcher.rs'), $launcherSource)
+    $launcher = Join-Path $launcherDir $(if ($IsWindows) { 'git.exe' } else { 'git' })
+    Rustc -Arguments @('--edition', '2021', 'git_launcher.rs', '-o', $launcher)
+    $savedPath = $env:PATH
+    $savedGit = $env:SIGNAL_FISH_FIXTURE_GIT
+    $savedBudget = $script:MaxBatchedBlobBytes
+    try {
+        $env:SIGNAL_FISH_FIXTURE_GIT = (Get-Command git -CommandType Application | Select-Object -First 1).Source
+        $env:PATH = $launcherDir + [IO.Path]::PathSeparator + $savedPath
+        $script:MaxBatchedBlobBytes = 16
+        if ($null -ne (Get-IndexBlobTexts -ObjectIds @($largeId) -SingleProcess -AllowBudgetMiss)) {
+            throw 'Git launcher retained an oversized blob'
+        }
+        $texts = Get-IndexBlobTexts -ObjectIds @($emptyId) -SingleProcess
+        if ($texts.Count -ne 1 -or $texts[$emptyId] -cne '') { throw 'Git launcher did not recover after refusal' }
+    } finally {
+        $env:PATH = $savedPath
+        $env:SIGNAL_FISH_FIXTURE_GIT = $savedGit
+        $script:MaxBatchedBlobBytes = $savedBudget
+    }
+
     function Compile-Output {
         param([string]$Name, [string]$Content, [string[]]$Extra = @())
         [IO.File]::WriteAllText((Join-Path $temporary "$Name.rs"), $Content)
@@ -290,6 +357,71 @@ pub fn shadow_clone(item: TokenStream) -> TokenStream {
     Git update-index --chmod=+x -- $cachePaths[0]
     $cache = Get-ChangelogRustTextCache -Paths $cachePaths
     if (Test-FileDiffIsTestOnly -Path $cachePaths[0] -CachedContent $cache[$cachePaths[0]]) { throw 'Cached executable mode change was exempted' }
+
+    $child = Join-Path $temporary 'src/child'
+    New-Item -ItemType Directory -Path $child | Out-Null
+    $worktreePaths = @('src/a.rs', 'src/b space.rs', 'src/child/c.rs')
+    foreach ($path in $worktreePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), $source) }
+    Git add -- @worktreePaths
+    Git commit -qm 'seed worktree prefetch sources'
+    foreach ($path in $worktreePaths) { [IO.File]::WriteAllText((Join-Path $temporary $path), "/// Prefetched docs.`n$source") }
+    [IO.File]::WriteAllText((Join-Path $temporary 'src/untracked.rs'), $source)
+
+    $script:InspectWorktree = $true
+    Set-Location -LiteralPath $child
+    [Environment]::CurrentDirectory = $child
+    $savedLiteralPathspecs = $env:GIT_LITERAL_PATHSPECS
+    $env:GIT_LITERAL_PATHSPECS = '1'
+    try {
+        Start-WorktreePolicyQueries
+        Initialize-WorktreeRustChangelog
+        if ($null -eq $script:PrefetchedWorktreeRustBlobs -or $script:PrefetchedWorktreeRustBlobs.Count -ne 1) {
+            throw 'Worktree prefetch did not find the shared immutable HEAD blob'
+        }
+        $changed = [string[]]@(Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs)
+        foreach ($path in ($worktreePaths + 'src/untracked.rs')) {
+            if ($changed -cnotcontains $path) { throw "Rooted discovery omitted $path" }
+        }
+
+        $cache = Get-ChangelogRustTextCache -Paths $worktreePaths
+        foreach ($path in $worktreePaths) {
+            if (-not (Test-FileDiffIsTestOnly -Path $path -CachedContent $cache[$path])) { throw "Prefetched worktree docs rejected: $path" }
+        }
+        $mixedPath = $worktreePaths[1]
+        [IO.File]::WriteAllText((Join-Path $temporary $mixedPath), "/// Mixed docs.`npub fn ready() -> bool { false }`n")
+        $cache = Get-ChangelogRustTextCache -Paths $worktreePaths
+        if ($cache[$mixedPath].New -cnotmatch '\{ false \}' -or
+            (Test-RustDocumentationOnlyChange -OldContent $cache[$mixedPath].Old -NewContent $cache[$mixedPath].New)) {
+            throw 'Worktree prefetch reused stale disk content or accepted a runtime edit'
+        }
+    } finally {
+        Remove-PreCommitPendingGit
+        $env:GIT_LITERAL_PATHSPECS = $savedLiteralPathspecs
+    }
+
+    $repairRepo = Join-Path $temporary 'stage-repair'
+    New-Item -ItemType Directory -Path (Join-Path $repairRepo 'docs') | Out-Null
+    Set-Location -LiteralPath $repairRepo
+    [Environment]::CurrentDirectory = $repairRepo
+    Git init -q
+    Git config user.name Fixture
+    Git config user.email fixture@example.invalid
+    Git config core.hooksPath .git/empty-hooks
+    Git config commit.gpgsign false
+    Git config core.autocrlf false
+    $usage = 'signal-fish-server = "0.12.0"' + "`n"
+    [IO.File]::WriteAllText((Join-Path $repairRepo 'Cargo.toml'), "[package]`nversion = `"0.12.0`"`n")
+    $usagePath = Join-Path $repairRepo 'docs/library-usage.md'
+    [IO.File]::WriteAllText($usagePath, $usage)
+    Git add .
+    Git commit -qm 'seed a canonical library version'
+    [IO.File]::WriteAllText($usagePath, $usage.Replace('0.12.0', '0.99.0'))
+    Git add -- docs/library-usage.md
+    $hook = Invoke-Native -FileName pwsh -Arguments @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', $hookScript)
+    if ($hook.ExitCode -ne 0) { throw "Repaired index was rejected:`n$($hook.Output)" }
+    if ((Invoke-Git -Arguments @('diff', '--cached', '--name-only')).Stdout.Length -ne 0) {
+        throw 'Version repair did not restore the original staged content'
+    }
 } finally {
     Set-Location $originalLocation
     [Environment]::CurrentDirectory = $originalDirectory

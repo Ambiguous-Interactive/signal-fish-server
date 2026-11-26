@@ -102,7 +102,7 @@ function Remove-RustDocumentationComments {
         [int]$ChangedEnd = [int]::MaxValue
     )
 
-    $tokens = [regex]::new(@'
+    $tokenPattern = @'
 (?x)
 (?<literal>(?:br|cr|r)(?<hash>\#{0,255})"(?s:.*?)"\k<hash>
 | "(?:\\(?s:.)|[^"\\])*"
@@ -110,16 +110,16 @@ function Remove-RustDocumentationComments {
 | (?<comment>/\*(?>[^*/]+|/(?!\*)|\*(?!/)|(?<depth>/\*)|(?<-depth>\*/))*(?(depth)(?!))\*/
 | //[^\r\n]*)
 | (?<invalid>(?:br|cr|r)\#*"|/\*|")
-'@, [System.Text.RegularExpressions.RegexOptions]::Singleline,
-        [System.TimeSpan]::FromMilliseconds(100))
+'@
     $mask = [System.Text.StringBuilder]::new($Content.Length)
     $documentationTokens = [System.Collections.Generic.List[System.Text.RegularExpressions.Match]]::new()
     $codePosition = 0
-    foreach ($token in $tokens.Matches($Content)) {
+    $lineBreaks = [char[]]"`r`n"
+    foreach ($token in [regex]::Matches($Content, $tokenPattern, [Text.RegularExpressions.RegexOptions]::Singleline, [TimeSpan]::FromMilliseconds(100))) {
         if ($token.Groups['invalid'].Success) { throw 'Incomplete Rust literal or comment' }
         # Copy unchanged code in one span; only literals and comments need masking.
         [void]$mask.Append($Content, $codePosition, $token.Index - $codePosition)
-        if ($token.Value.Contains("`n") -or $token.Value.Contains("`r")) {
+        if ($Content.IndexOfAny($lineBreaks, $token.Index, $token.Length) -ge 0) {
             [void]$mask.Append([regex]::Replace($token.Value, '[^\r\n]', ' '))
         } else {
             [void]$mask.Append([char]' ', $token.Length)
@@ -127,10 +127,11 @@ function Remove-RustDocumentationComments {
         $codePosition = $token.Index + $token.Length
         if (-not $token.Groups['comment'].Success) { continue }
         if ($token.Index -gt $ChangedEnd -or $token.Index + $token.Length -lt $ChangedStart) { continue }
-        $documentation = $token.Value.StartsWith('///', [System.StringComparison]::Ordinal) -and -not $token.Value.StartsWith('////', [System.StringComparison]::Ordinal)
-        $documentation = $documentation -or $token.Value.StartsWith('//!', [System.StringComparison]::Ordinal)
-        $documentation = $documentation -or ($token.Value -cne '/**/' -and $token.Value.StartsWith('/**', [System.StringComparison]::Ordinal) -and -not $token.Value.StartsWith('/***', [System.StringComparison]::Ordinal))
-        $documentation = $documentation -or $token.Value.StartsWith('/*!', [System.StringComparison]::Ordinal)
+        $comment = $token.Value
+        $documentation = $comment.StartsWith('///', [System.StringComparison]::Ordinal) -and -not $comment.StartsWith('////', [System.StringComparison]::Ordinal)
+        $documentation = $documentation -or $comment.StartsWith('//!', [System.StringComparison]::Ordinal)
+        $documentation = $documentation -or ($comment -cne '/**/' -and $comment.StartsWith('/**', [System.StringComparison]::Ordinal) -and -not $comment.StartsWith('/***', [System.StringComparison]::Ordinal))
+        $documentation = $documentation -or $comment.StartsWith('/*!', [System.StringComparison]::Ordinal)
         if ($documentation) { $documentationTokens.Add($token) }
     }
     [void]$mask.Append($Content, $codePosition, $Content.Length - $codePosition)
@@ -139,20 +140,22 @@ function Remove-RustDocumentationComments {
     $options = [System.Text.RegularExpressions.RegexOptions]::Singleline
     $timeout = [System.TimeSpan]::FromMilliseconds(100)
     $macroPattern = '!\s*(?:[^\s()\[\]{};!,]+\s*)?[([{](?>[^()\[\]{}]+|(?<nested>[([{])|(?<-nested>[)\]}]))*(?(nested)(?!))[)\]}]'
-    $macroSpans = [regex]::new($macroPattern, $options, $timeout).Matches($code)
+    $macroSpans = [regex]::Matches($code, $macroPattern, $options, $timeout)
     if ([regex]::IsMatch($code, '\bmacro\s+\S', $options, $timeout)) { throw 'Unclassified macro definition' }
     $attributePattern = '#\s*!?\s*\[(?<body>(?>[^\[\]]+|(?<nested>\[)|(?<-nested>\]))*)(?(nested)(?!))\]'
-    $attributes = [regex]::new($attributePattern, $options, $timeout).Matches($code)
+    $attributes = [regex]::Matches($code, $attributePattern, $options, $timeout)
     $asyncTraitImport = '(?m)^use\s+(?:::)?async_trait\s*::\s*async_trait\s*;'
     $asyncTraitAttribute = '#\s*\[\s*(?:::)?async_trait(?:::\s*async_trait)?\s*(?:\(\s*\?\s*Send\s*\))?\s*\]'
-    $withoutAsyncTrait = [regex]::Replace([regex]::Replace($code, $asyncTraitImport, ''), $asyncTraitAttribute, '')
-    $trustedAsyncTrait = -not [regex]::IsMatch($withoutAsyncTrait, '\basync_trait\b')
-    if ($trustedAsyncTrait) {
-        $shortAsyncTrait = [regex]::IsMatch($code, '#\s*\[\s*async_trait\s*(?:\(|\])')
-        if ($shortAsyncTrait -and [regex]::Matches($code, $asyncTraitImport).Count -ne 1) { $trustedAsyncTrait = $false }
+    $trustedAsyncTrait = $false
+    if ($code.Contains('async_trait')) {
+        $withoutAsyncTrait = [regex]::Replace([regex]::Replace($code, $asyncTraitImport, ''), $asyncTraitAttribute, '')
+        $trustedAsyncTrait = -not [regex]::IsMatch($withoutAsyncTrait, '\basync_trait\b')
+        if ($trustedAsyncTrait -and [regex]::IsMatch($code, '#\s*\[\s*async_trait\s*(?:\(|\])')) {
+            $trustedAsyncTrait = [regex]::Matches($code, $asyncTraitImport).Count -eq 1
+        }
     }
     $testModulePattern = '(?m)^#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*(?:#\[[^\]]*\]\s*)*mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{(?>[^{}]+|(?<nested>\{)|(?<-nested>\}))*(?(nested)(?!))\}\s*\z'
-    $testModule = [regex]::new($testModulePattern, $options, $timeout).Match($code)
+    $testModule = [regex]::Match($code, $testModulePattern, $options, $timeout)
     $productionCode = if ($testModule.Success) { $code.Substring(0, $testModule.Index) } else { $code }
     $deriveNames = '(?:Clone|Copy|Debug|Default|Eq|Hash|Ord|PartialEq|PartialOrd)'
     $trustedBuiltinDerives = $true
@@ -170,28 +173,24 @@ function Remove-RustDocumentationComments {
     if ([regex]::IsMatch($productionCode, "\b(?:mod|macro_rules\s*!)\s+(?:r#)?$deriveNames\b|\bextern\s+crate\b[^;]*\bas\s+$deriveNames\b")) { $trustedBuiltinDerives = $false }
     $macroBracePosition = 0
     $macroBraceDepth = 0
-    $macroBracePositions = [regex]::Matches($productionCode, '[{}]')
     foreach ($macro in $macroSpans) {
         if ($macro.Index -ge $productionCode.Length) { break }
-        while ($macroBracePosition -lt $macroBracePositions.Count -and $macroBracePositions[$macroBracePosition].Index -lt $macro.Index) {
-            if ($macroBracePositions[$macroBracePosition].Value -ceq '{') { $macroBraceDepth++ } else { $macroBraceDepth-- }
-            $macroBracePosition++
-        }
+        $scope = $productionCode.Substring($macroBracePosition, $macro.Index - $macroBracePosition)
+        $macroBraceDepth += $scope.Replace('}', '').Length - $scope.Replace('{', '').Length
+        $macroBracePosition = $macro.Index
         if ($macroBraceDepth -eq 0) { $trustedBuiltinDerives = $false; $trustedAsyncTrait = $false; break }
     }
     $unsafeAttributeSpans = [System.Collections.Generic.List[object]]::new()
     $hasInnerAttributes = [regex]::IsMatch($productionCode, '#\s*!')
-    $bracePositions = [regex]::Matches($code, '[{}]')
     $bracePosition = 0
     $braceDepth = 0
     for ($attributeIndex = 0; $attributeIndex -lt $attributes.Count; $attributeIndex++) {
         $attribute = $attributes[$attributeIndex]
         if ($testModule.Success -and $attribute.Index -ge $testModule.Index) { break }
         if ($unsafeAttributeSpans.Count -gt 0 -and $unsafeAttributeSpans[$unsafeAttributeSpans.Count - 1].End -gt $attribute.Index) { continue }
-        while ($bracePosition -lt $bracePositions.Count -and $bracePositions[$bracePosition].Index -lt $attribute.Index) {
-            if ($bracePositions[$bracePosition].Value -ceq '{') { $braceDepth++ } else { $braceDepth-- }
-            $bracePosition++
-        }
+        $scope = $code.Substring($bracePosition, $attribute.Index - $bracePosition)
+        $braceDepth += $scope.Replace('}', '').Length - $scope.Replace('{', '').Length
+        $bracePosition = $attribute.Index
         $start = $attribute.Index
         for ($previous = $attributeIndex - 1; $previous -ge 0; $previous--) {
             $previousEnd = $attributes[$previous].Index + $attributes[$previous].Length

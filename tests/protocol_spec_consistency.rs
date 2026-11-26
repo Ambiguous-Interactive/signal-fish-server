@@ -751,11 +751,12 @@ fn connection_info_schema_is_an_exact_union_of_rust_wire_shapes() {
                         == Some("webrtc")
                 })
                 .expect("webrtc branch"),
-            &["properties", "sdp", "nullable"],
+            &["properties", "sdp", "type"],
         )
-        .and_then(Yaml::as_bool),
-        Some(true),
-        "Rust accepts omitted WebRTC.sdp and serializes None as an explicit null"
+        .and_then(Yaml::as_sequence)
+        .map(|types| types.iter().map(Yaml::as_str).collect::<BTreeSet<_>>()),
+        Some(BTreeSet::from([Some("string"), Some("null")])),
+        "WebRTC SDP must declare string and null as Draft 7 types"
     );
 }
 
@@ -1128,6 +1129,53 @@ fn spec_models_disjoint_v2_and_v3_physical_binary_envelopes() {
     assert_eq!(
         mapping_path(v3, &["properties", "epoch", "maximum"]).and_then(Yaml::as_integer),
         Some(u32::MAX.into())
+    );
+}
+
+#[test]
+fn spec_models_v2_raw_binary_game_data() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let schemas = outbound_schemas(root);
+    let raw = schemas
+        .iter()
+        .find(|(tag, payload)| {
+            tag == "GameDataBinary"
+                && payload.as_mapping_get("type").and_then(Yaml::as_str) == Some("string")
+        })
+        .map(|(_, payload)| *payload)
+        .expect("receiveFromServer must expose a raw octet-stream GameDataBinary payload");
+    assert_eq!(
+        raw.as_mapping_get("format").and_then(Yaml::as_str),
+        Some("binary")
+    );
+
+    for (encoding, bytes) in [
+        ("protobuf", &[0x08, 0x2a][..]),
+        ("rkyv", &[0x2a, 0, 0, 0][..]),
+    ] {
+        let octets = serde_json::Value::String(bytes.iter().copied().map(char::from).collect());
+        assert!(
+            schema_shape_matches_version(root, raw, &octets, Some(2)),
+            "raw v2 {encoding} gameplay bytes must match the octet-stream payload"
+        );
+        assert!(
+            !schema_shape_matches_version(root, raw, &octets, Some(3)),
+            "raw {encoding} payload must be v2 only"
+        );
+    }
+    assert!(
+        !schema_shape_matches(
+            root,
+            raw,
+            &serde_json::json!({
+                "from_player": "0123456789abcdef",
+                "encoding": "message_pack",
+                "payload": "*"
+            })
+        ),
+        "a decoded MessagePack map must not match the raw payload schema"
     );
 }
 
@@ -1745,6 +1793,7 @@ fn outbound_schemas<'doc, 'input>(root: &'doc Yaml<'input>) -> Vec<(String, &'do
         mapping_path(operation, &["channel", "$ref"]).and_then(Yaml::as_str),
         Some("#/channels/signaling")
     );
+    let mut seen_messages = BTreeSet::new();
     operation
         .as_mapping_get("messages")
         .and_then(Yaml::as_sequence)
@@ -1762,6 +1811,10 @@ fn outbound_schemas<'doc, 'input>(root: &'doc Yaml<'input>) -> Vec<(String, &'do
                 .as_mapping_get("$ref")
                 .and_then(Yaml::as_str)
                 .expect("component message reference");
+            assert!(
+                seen_messages.insert(message_ref),
+                "duplicate outbound operation message {message_ref}"
+            );
             let message =
                 resolve_local_reference(root, message_ref).expect("reachable component message");
             let payload = message.as_mapping_get("payload").expect("message payload");
@@ -1769,12 +1822,17 @@ fn outbound_schemas<'doc, 'input>(root: &'doc Yaml<'input>) -> Vec<(String, &'do
                 .as_mapping_get("x-rust-server-variant")
                 .and_then(Yaml::as_str)
             {
-                // The binary carrier is projected into physical MessagePack
-                // frames. It must not be tested as serde's JSON enum shape.
+                // Binary game data has two physical messages and one Rust variant.
                 assert_eq!(physical, "GameDataBinary");
+                let content_type = match message_ref {
+                    "#/components/messages/GameDataBinary" => "application/msgpack",
+                    "#/components/messages/V2RawGameDataBinary" => "application/octet-stream",
+                    _ => panic!("unexpected binary message {message_ref}"),
+                };
                 assert_eq!(
                     message.as_mapping_get("contentType").and_then(Yaml::as_str),
-                    Some("application/msgpack")
+                    Some(content_type),
+                    "{message_ref} content type"
                 );
                 BTreeSet::from([physical.to_string()])
             } else {
@@ -1798,9 +1856,9 @@ fn outbound_schema_operation_reaches_exact_rust_message_set() {
     let schemas = outbound_schemas(root);
     let actual: BTreeSet<_> = schemas.iter().map(|(tag, _)| tag.clone()).collect();
     assert_eq!(
-        actual.len(),
+        actual.len() + 1,
         schemas.len(),
-        "duplicate outbound operation message"
+        "only GameDataBinary has two outbound messages"
     );
     let source = read_file(&repo_root().join("src/protocol/messages.rs"));
     let mut expected: BTreeSet<_> = enum_variants(&source, "ServerMessage")
@@ -3323,6 +3381,7 @@ mod projection_runtime {
             json!({"type":"relay", "host":"relay.example", "port":65535, "transport":"udp",
                 "allocation_id":"allocation", "token":"fixture", "client_id":0}),
             json!({"type":"webrtc", "sdp":"SDP-観客", "ice_candidates":["candidate:fixture", "候補"]}),
+            json!({"type":"webrtc", "sdp":null, "ice_candidates":["candidate:fixture"]}),
             json!({"type":"custom", "data":{"nested":[null, false, "観客", {"port":0}]}}),
         ];
         for info in cases {

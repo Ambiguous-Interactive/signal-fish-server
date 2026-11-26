@@ -20,3 +20,8 @@ slow-timeout = { period = "300s", terminate-after = 3 }
 [profile.ci]
 inherits = "default"
 slow-timeout = { period = "120s", terminate-after = 3 }
+
+# Start the portable Rustdoc fixture early so fail-fast runs retain its verdict.
+[[profile.ci.overrides]]
+filter = 'test(=rust_documentation_gate_checks_literals_and_both_git_modes_when_pwsh_available)'
+priority = 1
