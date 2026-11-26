@@ -360,14 +360,14 @@ jobs:
       - name: Install cargo-nextest (attempt 1)
         id: install_nextest
         continue-on-error: true
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-nextest@0.9.149
       - name: Install cargo-nextest (retry on transient runner failure)
         # Only runs when attempt 1 failed (e.g., the Windows bash-startup flake).
         # No continue-on-error here, so a second failure correctly fails the job.
         if: steps.install_nextest.outcome == 'failure'
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-nextest@0.9.149
       - name: Install Node.js for browser installer fixtures
@@ -701,7 +701,7 @@ jobs:
           toolchain: ${{ steps.deny-msrv.outputs.version }}
       - name: Install cargo-deny
         if: steps.dep-relevance.outputs.relevant == 'true'
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-deny@0.20.2
       - name: Run cargo-deny
@@ -820,7 +820,7 @@ jobs:
       # nothing.
       - name: Install cargo-audit
         if: ${{ !cancelled() && steps.dep-relevance.outputs.relevant == 'true' }}
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-audit@0.22.2
           fallback: none
@@ -865,7 +865,7 @@ jobs:
         run: cargo audit --file clients/fortress-wasm/Cargo.lock
       - name: Install cargo-sbom
         if: ${{ !cancelled() && github.event_name != 'schedule' && steps.dep-relevance.outputs.relevant == 'true' }}
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-sbom
 
@@ -1178,7 +1178,7 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-llvm-cov
 
@@ -1244,12 +1244,12 @@ jobs:
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           workspaces: tools/repo-checks
-      - uses: taiki-e/install-action@v2.90.6
+      - uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-nextest@0.9.149
       - name: Install mutation inventory tool (deep verification)
         if: github.event_name != 'pull_request'
-        uses: taiki-e/install-action@v2.90.6
+        uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-mutants@27.1.0
       - name: Check repository tooling format
@@ -1304,7 +1304,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: taiki-e/install-action@v2.90.6
+      - uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-nextest@0.9.149
       - name: Verify published crate and API boundaries once
@@ -1334,7 +1334,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.3
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: taiki-e/install-action@v2.90.6
+      - uses: taiki-e/install-action@v2.90.8
         with:
           tool: cargo-nextest@0.9.149
       - name: Record CPU budget before capacity qualification
