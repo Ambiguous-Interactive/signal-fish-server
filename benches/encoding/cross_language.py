@@ -226,12 +226,9 @@ def verify_saved(directory):
     self_test_order(rows, rust)
     require(all(row['benchmark']['seed'] == environment['sample_order_seed'] for row in rows
                 if row['language'] != 'csharp'), 'Recorded seed differs')
-    # `Cargo.lock` and this verifier are provenance, not measured inputs. A
-    # dependency patch update (including a security fix) or a verifier fix
-    # refreshes those hashes without changing a harness source file. Wire
-    # agreement against the current graph is still checked by
-    # verify(rows, rust, True) above, so provenance drift must not fail the
-    # historical cohort replay. Report it for operators instead.
+    # Replay checks saved samples against the saved Rust wire output.
+    # The live run checks wire agreement with the current dependency graph.
+    # Report lockfile and verifier hash changes as historical provenance.
     require(PROVENANCE_SOURCES.issubset(environment['sources']),
             'Recorded source manifest omits provenance entries')
     for name, expected in environment['sources'].items():

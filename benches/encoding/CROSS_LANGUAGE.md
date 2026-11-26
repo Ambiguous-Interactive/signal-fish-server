@@ -43,8 +43,9 @@ server throughput or network latency measurements.
 
 The recorded source manifest pins every harness input. `Cargo.lock` and
 `cross_language.py` are provenance only: a dependency patch update or a verifier
-fix records a new hash without failing historical replay. Wire agreement runs
-against the current graph, so a lock refresh cannot hide an encoding change.
+fix records a new hash without failing historical replay. Replay compares
+saved samples with the saved `rust-wire.json`. The live `--check` run builds
+the Rust wire oracle with the current lockfile and checks wire agreement.
 
 The runner checks source lengths and hashes against the corpus manifest. Each
 language checks logical values and coordinate/velocity float64 bits, including
