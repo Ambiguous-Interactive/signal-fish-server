@@ -22,4 +22,4 @@ ignored = ["jiff", "serde", "uuid"]
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 uuid = { version = "1.29.0", default-features = false }
-jiff = { version = "=1.0.2", default-features = false, features = ["std"] }
+jiff = { version = "=1.0.3", default-features = false, features = ["std"] }
