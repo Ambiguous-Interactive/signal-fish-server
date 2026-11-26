@@ -86,13 +86,6 @@ function Get-InternalRefactorExemptions {
         $declaration.files -isnot [array] -or $declaration.files.Count -eq 0 -or $declaration.files.Count -gt 32) {
         throw "Invalid internal-refactor declaration schema"
     }
-    $ancestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, "HEAD")
-    if ($ancestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of HEAD" }
-    if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
-        $baseAncestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, $comparisonBase)
-        if ($baseAncestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of the comparison base" }
-    }
-
     $paths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($entry in $declaration.files) {
         if ($entry -isnot [System.Collections.IDictionary] -or
@@ -110,12 +103,11 @@ function Get-InternalRefactorExemptions {
         if ($entry.before -ceq $entry.after) { throw "Internal-refactor entry has no content change: $($entry.path)" }
     }
     $declaredPaths = [string[]]@($declaration.files | ForEach-Object { $_.path })
-    function Read-RefactorBlobs {
-        param([string[]]$Arguments, [string]$Pattern)
-        $result = Invoke-Native -FileName "git" -Arguments ($Arguments + @("--") + $declaredPaths)
-        if ($result.ExitCode -ne 0) { throw "Cannot read refactor blobs" }
+    function ConvertFrom-RefactorBlobList {
+        param([pscustomobject]$Result, [string]$Pattern)
+        if ($Result.ExitCode -ne 0) { throw "Cannot read refactor blobs" }
         $blobs = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-        foreach ($record in $result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
+        foreach ($record in $Result.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
             if ($record -cnotmatch $Pattern -or $blobs.ContainsKey($Matches[3])) {
                 throw "Refactor path is not one regular file"
             }
@@ -123,8 +115,29 @@ function Get-InternalRefactorExemptions {
         }
         return $blobs
     }
+    function Read-RefactorBlobs {
+        param([string[]]$Arguments, [string]$Pattern)
+        $result = Invoke-Native -FileName "git" -Arguments ($Arguments + @("--") + $declaredPaths)
+        ConvertFrom-RefactorBlobList -Result $result -Pattern $Pattern
+    }
     $treePattern = '^100(644|755) blob ([0-9a-f]{40})\t(.+)$'
-    $beforeBlobs = Read-RefactorBlobs @("ls-tree", "-z", $declaration.base) $treePattern
+    # Read the immutable base tree while Git validates its ancestry.
+    $beforeArguments = @("ls-tree", "-z", $declaration.base, "--") + $declaredPaths
+    $pendingBefore = Start-PendingGit -GitArguments $beforeArguments
+    try {
+        $ancestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, "HEAD")
+        if ($ancestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of HEAD" }
+        if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
+            $baseAncestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, $comparisonBase)
+            if ($baseAncestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of the comparison base" }
+        }
+        $pending = $pendingBefore
+        $pendingBefore = $null
+        $beforeResult = Wait-PendingGit -Pending $pending -GitArguments $beforeArguments -AllowFailure
+    } finally {
+        if ($null -ne $pendingBefore) { Remove-PendingGit -Pending $pendingBefore }
+    }
+    $beforeBlobs = ConvertFrom-RefactorBlobList -Result $beforeResult -Pattern $treePattern
     $comparisonBlobs = if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
         Read-RefactorBlobs @("ls-tree", "-z", $comparisonBase) $treePattern
     } else { $null }

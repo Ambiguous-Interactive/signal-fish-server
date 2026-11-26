@@ -27,6 +27,7 @@ description: >-
 
 ## Incident Examples
 
+- [Dependabot audit and encoding evidence](references/dependabot-audit.md)
 - [CI CD Troubleshooting Example Python Cache Mismatch](references/example-python-cache-mismatch.md)
 - [CI CD Troubleshooting Example Stale Nightly Toolchain](references/example-stale-nightly-toolchain.md)
 - [CI CD Troubleshooting Example Unused Dependencies](references/example-unused-dependencies.md)

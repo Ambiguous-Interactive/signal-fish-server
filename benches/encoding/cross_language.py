@@ -18,6 +18,9 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[2]
 STUDY = ROOT / 'benches/encoding'
 CORPUS = ROOT / 'test-fixtures/encoding'
+# Recorded for provenance, but excluded from historical replay equality: patch
+# dependency updates and verifier fixes must not invalidate recorded cohorts.
+PROVENANCE_SOURCES = frozenset({'Cargo.lock', 'cross_language.py'})
 MODES = {'typescript': ['msgpack-all-f64', 'protobuf'],
          'csharp': ['protobuf'], 'gdscript': ['msgpack-f32', 'schema-varint']}
 
@@ -223,9 +226,21 @@ def verify_saved(directory):
     self_test_order(rows, rust)
     require(all(row['benchmark']['seed'] == environment['sample_order_seed'] for row in rows
                 if row['language'] != 'csharp'), 'Recorded seed differs')
+    # `Cargo.lock` and this verifier are provenance, not measured inputs. A
+    # dependency patch update (including a security fix) or a verifier fix
+    # refreshes those hashes without changing a harness source file. Wire
+    # agreement against the current graph is still checked by
+    # verify(rows, rust, True) above, so provenance drift must not fail the
+    # historical cohort replay. Report it for operators instead.
+    require(PROVENANCE_SOURCES.issubset(environment['sources']),
+            'Recorded source manifest omits provenance entries')
     for name, expected in environment['sources'].items():
-        require(hashlib.sha256((STUDY / name).read_bytes()).hexdigest() == expected,
-                f'Recorded source differs: {name}')
+        actual = hashlib.sha256((STUDY / name).read_bytes()).hexdigest()
+        if name in PROVENANCE_SOURCES:
+            if actual != expected:
+                print(f'Recorded provenance differs from the current tree: {name}')
+            continue
+        require(actual == expected, f'Recorded source differs: {name}')
     require(hashlib.sha256((CORPUS / 'manifest.json').read_bytes()).hexdigest() ==
             environment['corpus_manifest_sha256'], 'Recorded corpus manifest differs')
     summaries = list(csv.DictReader((directory / 'summary.csv').open()))

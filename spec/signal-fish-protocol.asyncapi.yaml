@@ -127,6 +127,7 @@ channels:
       PlayerLeft: { $ref: '#/components/messages/PlayerLeft' }
       ServerGameData: { $ref: '#/components/messages/ServerGameData' }
       GameDataBinary: { $ref: '#/components/messages/GameDataBinary' }
+      V2RawGameDataBinary: { $ref: '#/components/messages/V2RawGameDataBinary' }
       AuthorityChanged: { $ref: '#/components/messages/AuthorityChanged' }
       AuthorityResponse: { $ref: '#/components/messages/AuthorityResponse' }
       LobbyStateChanged: { $ref: '#/components/messages/LobbyStateChanged' }
@@ -189,6 +190,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/PlayerLeft' }
       - { $ref: '#/channels/signaling/messages/ServerGameData' }
       - { $ref: '#/channels/signaling/messages/GameDataBinary' }
+      - { $ref: '#/channels/signaling/messages/V2RawGameDataBinary' }
       - { $ref: '#/channels/signaling/messages/AuthorityChanged' }
       - { $ref: '#/channels/signaling/messages/AuthorityResponse' }
       - { $ref: '#/channels/signaling/messages/LobbyStateChanged' }
@@ -380,6 +382,19 @@ components:
         oneOf:
           - { $ref: '#/components/schemas/V2BinaryGameDataEnvelope' }
           - { $ref: '#/components/schemas/V3BinaryGameDataEnvelope' }
+    V2RawGameDataBinary:
+      title: Raw v2 binary game data
+      contentType: application/octet-stream
+      summary: Raw binary WebSocket delivery to v2 recipients with the same opaque encoding as the sender.
+      x-rust-server-variant: GameDataBinary
+      payload:
+        type: string
+        format: binary
+        x-protocol-version: 2
+        description: >-
+          Unchanged rkyv or protobuf payload bytes. The receiver uses its
+          negotiated encoding. The frame carries no sender identity or relay
+          sequence fields.
     AuthorityChanged:
       title: AuthorityChanged
       payload: { $ref: '#/components/schemas/AuthorityChanged' }
@@ -891,7 +906,7 @@ components:
           required: [type, ice_candidates]
           properties:
             type: { const: webrtc }
-            sdp: { type: string, nullable: true }
+            sdp: { type: [string, 'null'] }
             ice_candidates:
               type: array
               items: { type: string }
@@ -1815,8 +1830,8 @@ components:
       x-protocol-version: 2
       description: >-
         The frozen three-field MessagePack map sent to protocol-v2 recipients
-        that negotiated message_pack. Legacy JSON and rkyv binary paths are raw
-        payload passthrough and do not use this map.
+        that negotiated message_pack. The v2 raw rkyv and protobuf paths use
+        V2RawGameDataBinary.
       required: [from_player, encoding, payload]
       properties:
         from_player: { $ref: '#/components/schemas/BinaryPlayerId' }
