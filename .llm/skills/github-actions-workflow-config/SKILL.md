@@ -205,6 +205,8 @@ Format changes to repository checks with
 
 Use an explicit status condition when a supplemental diagnostic needs to run
 after a failed test step. Check that the test step ran and skip canceled jobs.
+Propagate the test runner's exit status in qualification jobs. A trace that
+captures an expected failure must report the test verdict separately.
 
 ### Concurrency Control
 

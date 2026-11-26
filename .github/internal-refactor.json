@@ -1,16 +1,16 @@
 {
-  "base": "ce9df99685139d2544bd62588006ea8c4af316db",
-  "reason": "Separate repository verification from runtime builds and update contributor command paths. Package metadata, shipped features, runtime code, public APIs, wire behavior, and defaults do not change.",
+  "base": "eed6020717fd9bf2a30d13364d3a4692483cc7e9",
+  "reason": "Warm the exact close watch only in the allocation-tracking fixture. The shipped runtime, public protocol, and client behavior are unchanged.",
   "files": [
     {
-      "path": "Cargo.toml",
-      "before": "09a62be7c0bdfe413d66d87788f9642aaced7b87",
-      "after": "487ddd913a00c3d2f172f994663651eb606711f0"
+      "path": "src/coordination/mod.rs",
+      "before": "ec45374237d5b9a363009c9f57b9a10ad22a885c",
+      "after": "e1c164dcde29d37dd5659376e7468bdeea777890"
     },
     {
-      "path": "docs/adr/ci-cd-preventative-measures.md",
-      "before": "86e2cefcada605c7cdbf6f42e562079d47772501",
-      "after": "25c9cb5279c1ef333e32571e7e95cfce458e7c58"
+      "path": "src/server.rs",
+      "before": "007773c5eda08d3d0acaa72a2f90166fe19d0b67",
+      "after": "dd89a91100e1feee2c2ba30f72056619d569f8ce"
     }
   ]
 }

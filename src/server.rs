@@ -498,6 +498,19 @@ pub(crate) enum OwnedRoomOperationPanicPoint {
 pub mod allocation_benchmark {
     pub use super::game_data::broadcast_game_data_with;
 
+    /// Warm the exact connection's close-wait locks before steady-state measurements.
+    pub fn warm_close_waiters_for_measurement(
+        server: &super::EnhancedGameServer,
+        player_id: &crate::protocol::PlayerId,
+    ) -> bool {
+        if let Some(close) = server.connection_manager.close_signal_for(player_id) {
+            close.warm_waiters_for_measurement();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Measure one abandoned-room attempt without worker scheduler allocations.
     pub async fn cleanup_abandoned_room_for_measurement(
         server: &super::EnhancedGameServer,

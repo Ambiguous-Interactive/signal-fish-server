@@ -310,34 +310,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/check-no-panics.sh
 
-  refused-start-trace:
-    name: Refused StartGame trace (${{ matrix.source }})
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-26
-    timeout-minutes: 25
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - source: legacy
-            ref: 770c674e817fb3dbc35027d4603881140c63adf6
-          - source: current
-            ref: eed6020717fd9bf2a30d13364d3a4692483cc7e9
-    steps:
-      - name: Checkout the trace driver
-        uses: actions/checkout@v7.0.1
-      - name: Checkout the pinned source
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: ${{ matrix.ref }}
-          path: trace-source
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: 1.94.0
-      - name: Trace the focused test
-        run: python3 .github/scripts/trace-refused-start.py trace-source
-
   nextest:
     name: Nextest (${{ matrix.os }})
     needs: [verified-head-guard, quick-check, ci-matrix]
@@ -420,6 +392,15 @@ jobs:
         run: >-
           cargo nextest run --profile ci --locked --all-features --cargo-profile ci
           --test spectator_join_allocations --test-threads 1 --no-tests fail
+
+      - name: Qualify isolated refused StartGame allocations
+        if: >-
+          ${{ !cancelled() && github.event_name == 'workflow_dispatch' &&
+              (steps.runtime-tests.outcome == 'success' || steps.runtime-tests.outcome == 'failure') }}
+        run: >-
+          cargo nextest run --profile ci --locked --all-features --cargo-profile ci
+          --test session_plan_allocations --test-threads 1 --no-tests fail --success-output immediate
+          -E 'test(=unready_start_skips_player_metadata) | test(=runtime_registry_warmup_retains_exact_spawn_cost)'
 
       - name: Upload room replacement attempts
         if: always()

@@ -612,6 +612,12 @@ struct ConnectionCloseRequest {
 }
 
 impl ConnectionCloseSignal {
+    /// Initialize all watch wait lists without changing the close reason.
+    #[cfg(feature = "allocation-tracking")]
+    pub(crate) fn warm_waiters_for_measurement(&self) {
+        self.tx.send_modify(|_| {});
+    }
+
     /// Observe close requests for this connection.
     pub(crate) fn subscribe(&self) -> ConnectionCloseListener {
         ConnectionCloseListener {
