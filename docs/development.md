@@ -13,7 +13,8 @@ records reviewed contracts, reproducible findings, and the remaining audit work.
 ## Internal refactors without release notes
 
 Release notes describe changes users can observe. For a behavior-preserving
-refactor, add or update `.github/internal-refactor.json` in the same change:
+refactor or internal source instrumentation, add or update
+`.github/internal-refactor.json` in the same change:
 
 ```json
 {
@@ -40,6 +41,12 @@ content. The declaration accepts at most 32 regular files and no path aliases.
 Review the rationale and exact source diff in the PR. Hashes establish which
 change was classified; they do not establish semantic equivalence. Do not use
 this declaration for user-visible changes. Keep such changes in the changelog.
+
+For allocation probes in shared server source, review both the measurement
+helper and its call sites. Confirm that the `allocation-tracking` feature
+guards the probe and that gameplay behavior stays the same. Bind the exact
+blobs from the probe-only review. Use the same process for changes confined
+to mutation testing in `.cargo/mutants.toml`.
 
 The staged hook checks index blobs; its `-Worktree` preflight checks disk
 content. Hosted checks require after blobs to match the checked-out comparison

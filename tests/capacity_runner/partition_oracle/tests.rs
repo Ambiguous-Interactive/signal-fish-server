@@ -193,6 +193,19 @@ fn bounded_room_replay_matches_mixed_faults_across_capture_orders() {
             None,
         );
         assert!(!expected.valid);
+        let expected_histogram =
+            oracle::latency_histogram(oracle::latency_pairs(&records).map(|(_, latency)| latency));
+        let buckets = |histogram: &Histogram<u64>| {
+            histogram
+                .iter_recorded()
+                .map(|bucket| (bucket.value_iterated_to(), bucket.count_at_value()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            buckets(&actual.histogram),
+            buckets(&expected_histogram),
+            "seed {seed}",
+        );
         assert_eq!(
             serde_json::to_value(actual.summary).unwrap(),
             serde_json::to_value(expected).unwrap(),

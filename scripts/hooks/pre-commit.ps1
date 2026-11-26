@@ -27,6 +27,7 @@ $script:StagedChangedFileSet = [System.Collections.Generic.HashSet[string]]::new
 $script:WorktreeChangedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeUntrackedFileSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 $script:WorktreeHasStructuralChanges = $false
+$script:WorktreeRustEntries = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
 $script:HookBudgetMs = 1000
 $script:CheckTimings = [System.Collections.Generic.List[object]]::new()
 $script:HookPolicyFiles = @(
@@ -106,6 +107,7 @@ $script:PendingWorktreeStatus = $null
 $script:PendingWorktreeUntracked = $null
 $script:PendingWorktreeRustDiff = $null
 $script:PendingChangelogBlob = $null
+$script:PendingChangelogFiles = $null
 $script:PendingChangelogRustDiff = $null
 $script:WorktreeDiscoveryTimer = $null
 $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unreachable)[[:space:]]*(/\*[^*]*\*+([^/*][^*]*\*+)*/[[:space:]]*)*!)|(#\[[[:space:]]*(cfg[[:space:]]*\(|test|tokio::test|async_std::test|rstest))"
@@ -118,67 +120,20 @@ $script:RustPanicGrepPattern = "((^|[^[:alnum:]_])(panic|todo|unimplemented|unre
 # so that unavoidable I/O overlaps script setup instead of extending the hook's
 # critical path. The results are consumed exactly once by
 # Get-WorktreeChangedFiles; staged hooks retain their cheaper index-only query.
-function Start-PendingGit {
-    param([string[]]$GitArguments)
-
-    $startInfo = New-NativeProcessStartInfo -FileName "git" -Arguments $GitArguments
-    $process = [System.Diagnostics.Process]::Start($startInfo)
-    [pscustomobject]@{
-        Process    = $process
-        StdoutTask = $process.StandardOutput.ReadToEndAsync()
-        StderrTask = $process.StandardError.ReadToEndAsync()
-    }
-}
-
-function Wait-PendingGit {
-    param(
-        [Parameter(Mandatory = $true)][pscustomobject]$Pending,
-        [Parameter(Mandatory = $true)][string[]]$GitArguments,
-        [switch]$AllowFailure
-    )
-
-    try {
-        $Pending.Process.WaitForExit()
-        $stdout = $Pending.StdoutTask.GetAwaiter().GetResult()
-        $stderr = $Pending.StderrTask.GetAwaiter().GetResult()
-        if ($Pending.Process.ExitCode -ne 0 -and -not $AllowFailure) {
-            throw "git $($GitArguments -join ' ') failed:`n$stdout$stderr"
-        }
-        [pscustomobject]@{
-            ExitCode = $Pending.Process.ExitCode
-            Stdout   = $stdout
-            Stderr   = $stderr
-            Output   = $stdout + $stderr
-        }
-    } finally {
-        $Pending.Process.Dispose()
-    }
-}
-
-function Remove-PendingGit {
-    param([Parameter(Mandatory = $true)][pscustomobject]$Pending)
-
-    try {
-        $Pending.Process.WaitForExit()
-        [void]$Pending.StdoutTask.GetAwaiter().GetResult()
-        [void]$Pending.StderrTask.GetAwaiter().GetResult()
-    } finally {
-        $Pending.Process.Dispose()
-    }
-}
-
 function Remove-PreCommitPendingGit {
     $pendingQueries = @(
         $script:PendingWorktreeStatus,
         $script:PendingWorktreeUntracked,
         $script:PendingWorktreeRustDiff,
         $script:PendingChangelogBlob,
+        $script:PendingChangelogFiles,
         $script:PendingChangelogRustDiff
     )
     $script:PendingWorktreeStatus = $null
     $script:PendingWorktreeUntracked = $null
     $script:PendingWorktreeRustDiff = $null
     $script:PendingChangelogBlob = $null
+    $script:PendingChangelogFiles = $null
     $script:PendingChangelogRustDiff = $null
     $firstError = $null
     foreach ($pending in $pendingQueries) {
@@ -194,18 +149,25 @@ function Remove-PreCommitPendingGit {
 function Start-WorktreePolicyQueries {
     try {
         $script:WorktreeDiscoveryTimer = [System.Diagnostics.Stopwatch]::StartNew()
+        # Start from the caller's directory while Git resolves the root.
+        $rootedPathspecs = @($script:WorktreePolicyPathspecs | ForEach-Object { ":(top,literal)$_" })
+        # These queries deliberately use pathspec magic, even in a literal-path session.
         # The tracked and untracked walks are independent filesystem scans;
         # starting them as sibling processes lets the two walks overlap instead
         # of serializing behind one full `status` refresh (issue #318: the
         # untracked scan was a measurable fraction of worktree discovery).
         $statusArguments = @(
-            "status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--"
-        ) + $script:WorktreePolicyPathspecs
+            "--no-literal-pathspecs", "status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--"
+        ) + $rootedPathspecs
         $script:PendingWorktreeStatus = Start-PendingGit -GitArguments $statusArguments
         $untrackedArguments = @(
-            "ls-files", "--others", "--exclude-standard", "-z", "--"
-        ) + $script:WorktreePolicyPathspecs
+            "--no-literal-pathspecs", "ls-files", "--full-name", "--others", "--exclude-standard", "-z", "--"
+        ) + $rootedPathspecs
         $script:PendingWorktreeUntracked = Start-PendingGit -GitArguments $untrackedArguments
+        $script:PendingChangelogRustDiff = Start-PendingGit -GitArguments @(
+            "--no-literal-pathspecs", "diff", "--raw", "--no-abbrev", "--no-renames", "-z", "--no-relative", "HEAD", "--",
+            ":(top,literal)src", ":(top,literal)CHANGELOG.md", ":(top,literal).github/internal-refactor.json"
+        )
         # The content policy always reads the index, including on clean trees.
         # Overlap that read with discovery without changing its verdict.
         $script:PendingChangelogBlob = Start-PendingGit -GitArguments @("show", ":CHANGELOG.md")
@@ -218,6 +180,7 @@ function Start-WorktreePolicyQueries {
 
 function Start-StagedPolicyQueries {
     try {
+        $script:PendingChangelogFiles = Start-PendingGit -GitArguments @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB")
         $script:PendingChangelogBlob = Start-PendingGit -GitArguments @("show", ":CHANGELOG.md")
         $script:PendingChangelogRustDiff = Start-PendingGit -GitArguments @("diff", "--raw", "--no-abbrev", "--no-renames", "-z", "--cached", "HEAD", "--", "*.rs")
     } catch {
@@ -228,13 +191,17 @@ function Start-StagedPolicyQueries {
 }
 
 if (-not $SourceOnly) {
-    $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
-    Set-Location $script:RepoRoot
     $script:InspectWorktree = [bool]$Worktree
-    if ($script:InspectWorktree) {
-        Start-WorktreePolicyQueries
-    } else {
-        Start-StagedPolicyQueries
+    try {
+        if ($script:InspectWorktree) { Start-WorktreePolicyQueries }
+        $script:RepoRoot = (Invoke-Git -Arguments @("rev-parse", "--show-toplevel")).Stdout.Trim()
+        Set-Location $script:RepoRoot
+        [Environment]::CurrentDirectory = $script:RepoRoot
+        if (-not $script:InspectWorktree) { Start-StagedPolicyQueries }
+    } catch {
+        $startupError = $_
+        try { Remove-PreCommitPendingGit } catch { }
+        throw $startupError
     }
 }
 
@@ -353,6 +320,7 @@ function Get-WorktreeChangedFiles {
     $script:StagedChangedFileSet.Clear()
     $script:WorktreeChangedFileSet.Clear()
     $script:WorktreeUntrackedFileSet.Clear()
+    $script:WorktreeRustEntries.Clear()
     $script:WorktreeHasStructuralChanges = $false
 
     # Two concurrent queries replace one full status walk: the tracked
@@ -366,8 +334,8 @@ function Get-WorktreeChangedFiles {
     # hook already relies on this parity for its worktree preflight.
     # Policy checks only need the current paths, so skip rename similarity
     # detection. Git will report those changes as delete/add records instead.
-    $statusArguments = @("status", "--porcelain=v1", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--") + $Pathspecs
-    $untrackedArguments = @("ls-files", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
+    $statusArguments = @("status", "--porcelain=v2", "-z", "--untracked-files=no", "--ignored=no", "--no-renames", "--") + $Pathspecs
+    $untrackedArguments = @("ls-files", "--full-name", "--others", "--exclude-standard", "-z", "--") + $Pathspecs
     $statusResult = $null
     $statusError = $null
     try {
@@ -398,35 +366,46 @@ function Get-WorktreeChangedFiles {
             $skipRenameSource = $false
             continue
         }
-        if ($record.Length -lt 4 -or $record[2] -ne " ") {
+        $recordType = $record.Substring(0, 1)
+        if ($recordType -ceq '#') { continue }
+        $fieldCount = switch ($recordType) {
+            '1' { 9 }
+            '2' { 10 }
+            'u' { 11 }
+            '?' { throw "Unexpected untracked record from tracked git status query: $record" }
+            default { throw "Unable to parse git status porcelain record: $record" }
+        }
+        $fields = $record.Split([char]' ', $fieldCount)
+        if ($fields.Length -ne $fieldCount -or $fields[1].Length -ne 2 -or $fields[-1].Length -eq 0) {
             throw "Unable to parse git status porcelain record: $record"
         }
-
-        $indexStatus = [string]$record[0]
-        $worktreeStatus = [string]$record[1]
-        $path = $record.Substring(3)
-        if ($indexStatus -eq "?" -or $worktreeStatus -eq "?") {
-            # Unreachable with --untracked-files=no; reaching it means the
-            # tracked query argv drifted and untracked discovery is no longer
-            # owned by the sibling walk, so fail closed instead of silently
-            # double-owning the classification.
-            throw "Unexpected untracked record from tracked git status query: $record"
+        $indexStatus = [string]$fields[1][0]
+        $worktreeStatus = [string]$fields[1][1]
+        $path = $fields[-1]
+        if ($recordType -ceq '1' -and $fields[2] -ceq 'N...' -and $path.EndsWith('.rs', [StringComparison]::Ordinal)) {
+            # Porcelain v2 carries the HEAD object and the actual worktree mode.
+            # Match old blobs against this discovery result before reuse.
+            $script:WorktreeRustEntries[$path] = @{
+                Old = $fields[6]
+                New = $null
+                Reject = $fields[3] -cne $fields[5] -or $fields[3] -cnotin @('100644', '100755')
+            }
         }
         if ($seenPaths.Add($path)) {
             [void]$orderedPaths.Add($path)
         }
 
-        if ($indexStatus -ne " ") {
+        if ($indexStatus -ne ".") {
             [void]$script:StagedChangedFileSet.Add($path)
         }
-        if ($worktreeStatus -ne " ") {
+        if ($worktreeStatus -ne ".") {
             [void]$script:WorktreeChangedFileSet.Add($path)
         }
 
-        if ($indexStatus -cnotin @(" ", "M") -or $worktreeStatus -cnotin @(" ", "M")) {
+        if ($indexStatus -cnotin @(".", "M") -or $worktreeStatus -cnotin @(".", "M")) {
             $script:WorktreeHasStructuralChanges = $true
         }
-        $skipRenameSource = $indexStatus -in @("R", "C") -or $worktreeStatus -in @("R", "C")
+        $skipRenameSource = $recordType -ceq '2'
     }
 
     foreach ($path in $untrackedResult.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)) {
@@ -639,51 +618,81 @@ function Read-AsciiLineFromBytes {
     $line
 }
 
-function Get-BoundedIndexBlobBytes {
+function Get-BoundedIndexBlobTexts {
     param([string[]]$ObjectIds, [switch]$AllowBudgetMiss)
 
-    $startInfo = New-NativeProcessStartInfo -FileName 'git' -Arguments @('cat-file', '--batch-command') -RedirectStandardInput
+    $startInfo = New-NativeProcessStartInfo -FileName 'git' -Arguments @('cat-file', '--batch') -RedirectStandardInput
+    foreach ($objectId in $ObjectIds) {
+        if ($objectId -cnotmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') { throw 'Invalid Git object id in blob batch' }
+    }
+
     $process = [Diagnostics.Process]::Start($startInfo)
-    $stdoutStream = [IO.MemoryStream]::new()
-    $stdoutTask = $null
+    $stdin = $null
+    $stdout = $null
+    $stderr = $null
     $stderrTask = $null
+    $write = $null
     try {
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stdin = $process.StandardInput
+        $stdout = [IO.BinaryReader]::new([IO.BufferedStream]::new($process.StandardOutput.BaseStream))
+        $stderr = $process.StandardError
+        $stderrTask = $stderr.ReadToEndAsync()
+        $texts = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+        # SHA-256 ID, type, signed 64-bit size, and separators fit in 96 bytes.
+        $headerBytes = [byte[]]::new(96)
+        $utf8 = [Text.UTF8Encoding]::new($false)
         $totalBytes = [long]0
+        $stdin.AutoFlush = $true
+        # Drain output while Git reads requests so neither pipe can block the other.
+        $write = $stdin.WriteAsync(($ObjectIds -join "`n") + "`n")
         foreach ($objectId in $ObjectIds) {
-            if ($objectId -cnotmatch '^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$') { throw 'Invalid Git object id in blob batch' }
-            $process.StandardInput.WriteLine("info $objectId")
-            $process.StandardInput.Flush()
-            $header = $process.StandardOutput.ReadLineAsync().GetAwaiter().GetResult()
-            if ($null -eq $header) { throw 'git cat-file --batch-command ended before size information' }
+            $length = 0
+            while (($value = $stdout.ReadByte()) -ne 10) {
+                if ($value -lt 0 -or $length -eq $headerBytes.Length) { throw 'Unexpected git cat-file --batch size header' }
+                $headerBytes[$length++] = [byte]$value
+            }
+            $header = [Text.Encoding]::ASCII.GetString($headerBytes, 0, $length)
             $fields = $header.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
             if ($fields.Count -ne 3 -or $fields[1] -cne 'blob' -or -not [StringComparer]::OrdinalIgnoreCase.Equals($fields[0], $objectId)) {
-                throw "Unexpected git cat-file --batch-command size header: $header"
+                throw "Unexpected git cat-file --batch size header: $header"
             }
             $size = [long]::Parse($fields[2], [Globalization.CultureInfo]::InvariantCulture)
             if ($size -lt 0 -or $size -gt $script:MaxBatchedBlobBytes - $totalBytes) {
                 if ($AllowBudgetMiss) { return $null }
                 throw "Staged blob batch is above the $script:MaxBatchedBlobBytes byte pre-commit limit."
             }
+            # Check Git's size header before allocating or retaining the body.
+            $bytes = $stdout.ReadBytes([int]$size)
+            if ($bytes.Length -ne $size) { throw "git cat-file --batch returned truncated content for $objectId" }
+            if ($stdout.ReadByte() -ne 10) { throw "git cat-file --batch returned no terminator for $objectId" }
+            $texts[$objectId] = $utf8.GetString($bytes)
             $totalBytes += $size
         }
-        # No contents exist in the reader buffer: only info commands were sent.
-        $stdoutTask = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
-        foreach ($objectId in $ObjectIds) { $process.StandardInput.WriteLine("contents $objectId") }
-        $process.StandardInput.Close()
+        [void]$write.GetAwaiter().GetResult()
+        $stdin.Close()
         $process.WaitForExit()
-        [void]$stdoutTask.GetAwaiter().GetResult()
-        $stderr = $stderrTask.GetAwaiter().GetResult()
-        if ($process.ExitCode -ne 0) { throw "git cat-file --batch-command failed:`n$stderr" }
-        [pscustomobject]@{ ExitCode = 0; StdoutBytes = $stdoutStream.ToArray(); Output = $stderr }
+        if ($process.ExitCode -ne 0) { throw "git cat-file --batch failed: $($stderrTask.GetAwaiter().GetResult())" }
+        $texts
     } finally {
         try {
-            $process.StandardInput.Close()
+            # A Git launcher can leave a child writing the refused body.
+            if (-not $process.HasExited) {
+                try { $process.Kill($true) } catch { if (-not $process.HasExited) { throw } }
+            }
+            if ($null -ne $stdout) {
+                $stdout.Dispose()
+                $stdout = $null
+            }
+            if ($null -ne $write) {
+                try { [void]$write.GetAwaiter().GetResult() } catch { }
+            }
             $process.WaitForExit()
-            if ($null -ne $stdoutTask) { [void]$stdoutTask.GetAwaiter().GetResult() }
             if ($null -ne $stderrTask) { [void]$stderrTask.GetAwaiter().GetResult() }
         } finally {
-            $stdoutStream.Dispose()
+            # Close the input pipe without flushing a failed write again.
+            if ($null -ne $stdin) { $stdin.BaseStream.Dispose() }
+            if ($null -ne $stdout) { $stdout.Dispose() }
+            if ($null -ne $stderr) { $stderr.Dispose() }
             $process.Dispose()
         }
     }
@@ -710,8 +719,7 @@ function Get-IndexBlobTexts {
     }
 
     if ($SingleProcess) {
-        $result = Get-BoundedIndexBlobBytes -ObjectIds $orderedObjectIds.ToArray() -AllowBudgetMiss:$AllowBudgetMiss
-        if ($null -eq $result) { return $null }
+        return Get-BoundedIndexBlobTexts -ObjectIds $orderedObjectIds.ToArray() -AllowBudgetMiss:$AllowBudgetMiss
     } else {
         $batchInput = ($orderedObjectIds -join "`n") + "`n"
         $sizeCheck = Invoke-NativeWithInput -FileName "git" -Arguments @("cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)") -InputText $batchInput
@@ -1700,6 +1708,12 @@ function Repair-DocVersionsIfNeeded {
     }
 
     if ($repaired.Count -gt 0) {
+        if (-not $script:InspectWorktree -and $null -ne $script:PendingChangelogFiles) {
+            # A re-staged repair can remove a path from the changelog input.
+            $pending = $script:PendingChangelogFiles
+            $script:PendingChangelogFiles = $null
+            Remove-PendingGit -Pending $pending
+        }
         Pass "Doc version sync (auto-repaired: $($repaired -join ', '))"
     } else {
         Pass "Doc version sync"
@@ -1732,9 +1746,14 @@ function Get-ChangelogGateChangedFiles {
         return ,([string[]]@($script:StagedFiles))
     }
 
-    $result = Invoke-Git -Arguments @(
-        "diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB"
-    )
+    $arguments = @("diff", "--cached", "--name-only", "-z", "--diff-filter=ACMRTUXB")
+    $pending = $script:PendingChangelogFiles
+    $script:PendingChangelogFiles = $null
+    $result = if ($null -eq $pending) {
+        Invoke-Git -Arguments $arguments
+    } else {
+        Wait-PendingGit -Pending $pending -GitArguments $arguments
+    }
     if ([string]::IsNullOrEmpty($result.Stdout)) {
         return ,([string[]]@())
     }
@@ -1758,60 +1777,115 @@ function Test-ChangelogGateInternalPath {
 
 . (Join-Path $PSScriptRoot "rust-documentation.ps1")
 
+$script:PrefetchedWorktreeRustBlobs = $null
+
+function ConvertFrom-ChangelogRawDiff {
+    param([string]$RawDiff)
+
+    $entries = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
+    $records = $RawDiff.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries)
+    if ($records.Length % 2 -ne 0) { throw "Incomplete raw Git diff" }
+    for ($index = 0; $index -lt $records.Length; $index += 2) {
+        $fields = $records[$index].TrimStart(':').Split(' ', [StringSplitOptions]::RemoveEmptyEntries)
+        if ($fields.Length -ne 5) { throw "Invalid raw Git diff record" }
+        $entries.Add($records[$index + 1], @{
+            Old = $fields[2]
+            New = $fields[3]
+            Reject = $fields[0] -cne $fields[1] -or $fields[0] -cnotin @('100644', '100755')
+        })
+    }
+    $entries
+}
+
+function Initialize-WorktreeRustChangelog {
+    $pending = $script:PendingChangelogRustDiff
+    $script:PendingChangelogRustDiff = $null
+    $raw = Wait-PendingGit -Pending $pending -GitArguments @('diff', '--raw', 'HEAD') -AllowFailure
+    if ($raw.ExitCode -ne 0) { return }
+
+    try {
+        $entries = ConvertFrom-ChangelogRawDiff -RawDiff $raw.Stdout
+        if ($entries.ContainsKey('CHANGELOG.md') -or $entries.ContainsKey('.github/internal-refactor.json')) { return }
+
+        # Read only immutable HEAD blobs before worktree discovery finishes.
+        # The gate still reads the selected worktree files from disk.
+        $objectIds = [System.Collections.Generic.List[string]]::new()
+        foreach ($path in $entries.Keys) {
+            $entry = $entries[$path]
+            if (-not $entry.Reject -and $path.EndsWith('.rs', [StringComparison]::Ordinal) -and
+                -not (Test-ChangelogGateInternalPath -Path $path)) {
+                $objectIds.Add($entry.Old)
+            }
+        }
+        if ($objectIds.Count -ge 3) {
+            $script:PrefetchedWorktreeRustBlobs = Get-IndexBlobTexts -ObjectIds $objectIds.ToArray() -SingleProcess -AllowBudgetMiss
+        }
+    } catch {
+        # The regular gate still checks any path that did not get cached.
+    }
+}
+
 function Get-ChangelogRustTextCache {
     param([AllowEmptyCollection()][string[]]$Paths)
 
-    $cache = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $cache = [System.Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     if ($Paths.Count -lt 3) { return $cache }
     try {
-        $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
-        $arguments = @("diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $Paths
-        $pending = $script:PendingChangelogRustDiff
-        $script:PendingChangelogRustDiff = $null
-        $raw = if ($null -eq $pending) {
-            Invoke-Native -FileName git -Arguments $arguments
-        } else {
-            Wait-PendingGit -Pending $pending -GitArguments $arguments -AllowFailure
+        $entriesByPath = if ($script:InspectWorktree -and $script:WorktreeRustEntries.Count -gt 0) { $script:WorktreeRustEntries } else { $null }
+        if ($null -eq $entriesByPath) {
+            $diffArgs = if ($script:InspectWorktree) { @() } else { @("--cached") }
+            $arguments = @("--literal-pathspecs", "diff", "--raw", "--no-abbrev", "--no-renames", "-z") + $diffArgs + @("HEAD", "--") + $Paths
+            $pending = $script:PendingChangelogRustDiff
+            $script:PendingChangelogRustDiff = $null
+            $raw = if ($null -eq $pending) {
+                Invoke-Native -FileName git -Arguments $arguments
+            } else {
+                Wait-PendingGit -Pending $pending -GitArguments $arguments -AllowFailure
+            }
+            if ($raw.ExitCode -ne 0) { return $cache }
+            $entriesByPath = ConvertFrom-ChangelogRawDiff -RawDiff $raw.Stdout
         }
-        if ($raw.ExitCode -ne 0) { return $cache }
-        $records = $raw.Stdout.Split([char]0, [System.StringSplitOptions]::RemoveEmptyEntries)
+
         $entries = [System.Collections.Generic.List[object]]::new()
         $objects = [System.Collections.Generic.List[string]]::new()
-        for ($index = 0; $index + 1 -lt $records.Length; $index += 2) {
-            $fields = $records[$index].TrimStart(':').Split(' ', [System.StringSplitOptions]::RemoveEmptyEntries)
-            if ($fields.Length -ne 5) { return $cache }
-            $path = $records[$index + 1]
-            if ($Paths -cnotcontains $path) { continue }
-            if ($fields[0] -cne $fields[1] -or $fields[0] -cnotin @('100644', '100755')) {
+        foreach ($path in $Paths) {
+            if (-not $entriesByPath.ContainsKey($path)) { continue }
+            $entry = $entriesByPath[$path]
+            if ($entry.Reject) {
                 $cache[$path] = @{ Reject = $true }
                 continue
             }
-            $entry = @{ Path = $path; Old = $fields[2]; New = $fields[3] }
-            $entries.Add($entry)
+            $entries.Add(@{ Path = $path; Old = $entry.Old; New = $entry.New })
             $objects.Add($entry.Old)
             if (-not $script:InspectWorktree) { $objects.Add($entry.New) }
         }
         if ($objects.Count -eq 0) { return $cache }
-        $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray() -SingleProcess
+        $texts = if ($script:InspectWorktree) { $script:PrefetchedWorktreeRustBlobs } else { $null }
+        if ($null -eq $texts -or @($objects | Where-Object { -not $texts.ContainsKey($_) }).Count -gt 0) {
+            $texts = Get-IndexBlobTexts -ObjectIds $objects.ToArray() -SingleProcess
+        }
         $retainedBytes = [long]0
         if ($script:InspectWorktree) {
-            $plannedBytes = [long]0
             foreach ($entry in $entries) {
                 $oldBytes = [Text.Encoding]::UTF8.GetByteCount($texts[$entry.Old])
-                $newBytes = [IO.FileInfo]::new(([IO.Path]::GetFullPath($entry.Path, $script:RepoRoot))).Length
-                if ($oldBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
-                $plannedBytes += $oldBytes
-                if ($newBytes -gt $script:MaxBatchedBlobBytes - $plannedBytes) { $cache.Clear(); return $cache }
-                $plannedBytes += $newBytes
+                if ($oldBytes -gt $script:MaxBatchedBlobBytes - $retainedBytes) { $cache.Clear(); return $cache }
                 $retainedBytes += $oldBytes
             }
         }
         foreach ($entry in $entries) {
-            $newContent = if ($script:InspectWorktree) { [IO.File]::ReadAllText(([IO.Path]::GetFullPath($entry.Path, $script:RepoRoot))) } else { $texts[$entry.New] }
             if ($script:InspectWorktree) {
+                $reader = [IO.File]::OpenText([IO.Path]::GetFullPath($entry.Path, $script:RepoRoot))
+                try {
+                    if ($reader.BaseStream.Length -gt $script:MaxBatchedBlobBytes - $retainedBytes) { $cache.Clear(); return $cache }
+                    $newContent = $reader.ReadToEnd()
+                } finally {
+                    $reader.Dispose()
+                }
                 $newBytes = [Text.Encoding]::UTF8.GetByteCount($newContent)
                 if ($newBytes -gt $script:MaxBatchedBlobBytes - $retainedBytes) { $cache.Clear(); return $cache }
                 $retainedBytes += $newBytes
+            } else {
+                $newContent = $texts[$entry.New]
             }
             $cache[$entry.Path] = @{ Reject = $false; Old = $texts[$entry.Old]; New = $newContent }
         }
@@ -2110,7 +2184,8 @@ function Test-ChangelogGate {
             $offenders,
             "Add a Keep a Changelog entry under '## [Unreleased]' for user-facing impact.",
             "Rust diffs confined to a file's trailing test module (at or after its last top-level #[cfg(test)] line) classify as internal.",
-            "If a path is truly internal, add it to the internal-path lists in scripts/check-doc-consistency.sh and this hook."
+            "For reviewed internal changes such as dev-only allocation probes, declare the exact before and after blobs in .github/internal-refactor.json.",
+            "See docs/development.md#internal-refactors-without-release-notes."
         ) -join "`n")
 }
 
@@ -2239,6 +2314,7 @@ $changedFilesTimer = if ($script:InspectWorktree) {
     [System.Diagnostics.Stopwatch]::StartNew()
 }
 try {
+    if ($script:InspectWorktree) { Initialize-WorktreeRustChangelog }
     $allChangedFiles = [string[]]@(if ($script:InspectWorktree) {
             Get-WorktreeChangedFiles -Pathspecs $script:WorktreePolicyPathspecs
         } else {

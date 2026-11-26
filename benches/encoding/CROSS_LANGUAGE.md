@@ -41,6 +41,11 @@ server throughput or network latency measurements.
 
 ## Contracts and controls
 
+The recorded source manifest pins every harness input. `Cargo.lock` and
+`cross_language.py` are provenance only: a dependency patch update or a verifier
+fix records a new hash without failing historical replay. Wire agreement runs
+against the current graph, so a lock refresh cannot hide an encoding change.
+
 The runner checks source lengths and hashes against the corpus manifest. Each
 language checks logical values and coordinate/velocity float64 bits, including
 negative zero. The independent Python oracle checks all twenty cells and their

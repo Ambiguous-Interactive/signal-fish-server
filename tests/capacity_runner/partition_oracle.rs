@@ -163,8 +163,7 @@ pub(super) fn evaluate_rooms(
                 foreign,
             )
         };
-        let (mut result, mut raw_positions) = summarize_room(None);
-        let mut foreign = None;
+        let (mut result, mut raw_positions, mut room_histogram) = summarize_room(None);
         if !result.valid {
             if records
                 .sent
@@ -187,8 +186,8 @@ pub(super) fn evaluate_rooms(
                 }
             }
             if !requests.is_empty() {
-                foreign = Some(read_foreign_timings(replay, room_rows, requests)?);
-                (result, raw_positions) = summarize_room(foreign.as_ref());
+                let foreign = read_foreign_timings(replay, room_rows, requests)?;
+                (result, raw_positions, room_histogram) = summarize_room(Some(&foreign));
             }
             result.reasons.drain(..records.faults.len());
             raw_faults.take_room_reasons(
@@ -232,10 +231,8 @@ pub(super) fn evaluate_rooms(
         summary.totals.outstanding += result.totals.outstanding;
         summary.latency_us.max_us = summary.latency_us.max_us.max(result.latency_us.max_us);
         summary.per_recipient.extend(result.per_recipient);
-        let samples = oracle::latency_pairs_with_foreign(&records, foreign.as_ref())
-            .map(|(_, latency)| latency);
         histogram
-            .add(oracle::latency_histogram(samples))
+            .add(room_histogram)
             .map_err(|error| format!("merge latency histogram: {error}"))?;
         if summary.generator_lag_us.max_us <= MAX_LAG_BUCKET_US {
             for event in &records.sent {
