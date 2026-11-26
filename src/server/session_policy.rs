@@ -492,7 +492,7 @@ impl SessionPlanProjection<'_> {
             .addressed_seats
             .binary_search_by_key(&player_id, |(seat, _)| seat.player_id)
             .ok()?;
-        let format = self.addressed_seats[index].1;
+        let format = self.addressed_seats.get(index)?.1;
         Some(
             self.addressed_seats
                 .iter()
