@@ -73,7 +73,7 @@ test-group = 'powershell-subprocess'
 
 # Retain the cold and warm task-registry evidence for the allocation investigation.
 [[profile.default.overrides]]
-filter = 'test(runtime_registry_warmup_retains_exact_spawn_cost)'
+filter = 'test(runtime_registry_warmup_retains_exact_spawn_cost) or binary(spectator_join_allocations)'
 success-output = "immediate"
 
 # CI-specific profile — reserved for future per-job tuning.
