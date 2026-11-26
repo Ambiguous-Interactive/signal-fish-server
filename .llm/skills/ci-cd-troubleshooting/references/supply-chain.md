@@ -285,6 +285,8 @@ Treat `rustfmt` failures on doc snippets as **warnings**, not hard errors.
 
 ## Related Skills
 
+- [Every Dependabot PR Red on Dependency Audit](dependabot-audit.md) — Stale audited lockfiles
+
 - [CI CD Troubleshooting Ecosystem](ecosystem-and-toolchains.md) — Language mismatch, cache, toolchain
 - [CI CD Troubleshooting Linting](linting-and-documentation.md) — Clippy, typos, markdown
 - [CI CD Troubleshooting Scripts](scripts-and-tests.md) — Shell scripts, Miri, test filtering

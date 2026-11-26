@@ -21789,10 +21789,11 @@ fn test_standalone_dependabot_jobs_reaching_root_inherit_all_root_holds() {
 #[test]
 fn test_dependabot_cargo_directories_cover_every_automated_package() {
     // These are exact-release interoperability fixtures, not independently
-    // evolving products. Their dependency graphs move only when the pinned
-    // released client/Godot fixture is deliberately advanced and its
-    // interoperability cell is requalified.
-    const EXCLUDED_FIXTURES: &[(&str, &str)] = &[
+    // evolving products. Their manifests stay pinned, but CI audits their
+    // Cargo.lock graphs. Without `lockfile-only` Dependabot coverage, one new
+    // transitive advisory leaves `Dependency Audit` red and blocks every other
+    // Dependabot pull request (url RUSTSEC-2026-0592).
+    const PINNED_MANIFEST_FIXTURES: &[(&str, &str)] = &[
         (
             "third_party/webrtc/Cargo.toml",
             "published WebRTC wrapper with a qualified lifecycle patch; issue #919",
@@ -21827,36 +21828,47 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
         panic!("dependabot.yml updates must be a sequence");
     };
 
-    let configured: Vec<String> = updates
-        .iter()
-        .filter(|entry| {
-            entry
-                .as_mapping_get("package-ecosystem")
-                .and_then(Yaml::as_str)
-                == Some("cargo")
-        })
-        .map(|entry| {
-            let directory = entry
-                .as_mapping_get("directory")
-                .and_then(Yaml::as_str)
-                .unwrap_or_else(|| panic!("every Dependabot Cargo entry must define `directory`"));
-            assert!(
-                directory == "/"
-                    || (directory.starts_with('/')
-                        && !directory.ends_with('/')
-                        && !directory.contains("//")),
-                "Dependabot Cargo directory `{directory}` must be a canonical absolute \
-                 repository path (exactly `/` or `/path` with no trailing slash)"
-            );
-            directory.to_string()
-        })
-        .collect();
-    let configured_set: BTreeSet<String> = configured.iter().cloned().collect();
-    assert_eq!(
-        configured.len(),
-        configured_set.len(),
-        "Dependabot Cargo directories must be unique; configured {configured:?}"
-    );
+    let mut configured_set: BTreeSet<String> = BTreeSet::new();
+    let mut lockfile_only_set: BTreeSet<String> = BTreeSet::new();
+    for entry in updates.iter().filter(|entry| {
+        entry
+            .as_mapping_get("package-ecosystem")
+            .and_then(Yaml::as_str)
+            == Some("cargo")
+    }) {
+        let directory = entry
+            .as_mapping_get("directory")
+            .and_then(Yaml::as_str)
+            .unwrap_or_else(|| panic!("every Dependabot Cargo entry must define `directory`"));
+        assert!(
+            directory == "/"
+                || (directory.starts_with('/')
+                    && !directory.ends_with('/')
+                    && !directory.contains("//")),
+            "Dependabot Cargo directory `{directory}` must be a canonical absolute \
+             repository path (exactly `/` or `/path` with no trailing slash)"
+        );
+        assert!(
+            configured_set.insert(directory.to_string()),
+            "Dependabot Cargo directories must be unique; configured {configured_set:?}"
+        );
+        let holds = entry
+            .as_mapping_get("ignore")
+            .and_then(Yaml::as_sequence)
+            .map_or(0, Vec::len);
+        assert_eq!(
+            holds, 0,
+            "Dependabot Cargo directory `{directory}` must not hold dependency versions; a \
+             pinned fixture keeps its manifest fixed through `versioning-strategy: lockfile-only`"
+        );
+        if entry
+            .as_mapping_get("versioning-strategy")
+            .and_then(Yaml::as_str)
+            == Some("lockfile-only")
+        {
+            lockfile_only_set.insert(directory.to_string());
+        }
+    }
 
     let manifests: BTreeSet<String> = tracked_package_manifests(&root)
         .into_iter()
@@ -21866,28 +21878,30 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
                 .any(|line| line.trim() == "[package]")
         })
         .collect();
-    let excluded: BTreeSet<&str> = EXCLUDED_FIXTURES
+    let pinned_directories: BTreeSet<String> = PINNED_MANIFEST_FIXTURES
         .iter()
         .map(|(manifest, reason)| {
             assert!(
                 !reason.trim().is_empty(),
-                "Dependabot exclusion `{manifest}` must have a documented rationale"
+                "Pinned fixture `{manifest}` must have a documented rationale"
             );
             assert!(
                 manifests.contains(*manifest),
-                "Dependabot exclusion `{manifest}` does not name a tracked Cargo package"
+                "Pinned fixture `{manifest}` does not name a tracked Cargo package"
             );
-            *manifest
+            match manifest.rsplit_once('/') {
+                Some((directory, "Cargo.toml")) => format!("/{directory}"),
+                _ => panic!("tracked package manifest has an unexpected path: {manifest}"),
+            }
         })
         .collect();
     assert_eq!(
-        excluded.len(),
-        EXCLUDED_FIXTURES.len(),
-        "Dependabot package exclusions must be unique"
+        pinned_directories.len(),
+        PINNED_MANIFEST_FIXTURES.len(),
+        "Pinned fixture entries must be unique"
     );
     let expected: BTreeSet<String> = manifests
         .iter()
-        .filter(|manifest| !excluded.contains(manifest.as_str()))
         .map(|manifest| match manifest.rsplit_once('/') {
             Some((directory, "Cargo.toml")) => format!("/{directory}"),
             None if manifest == "Cargo.toml" => "/".to_string(),
@@ -21896,9 +21910,14 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
         .collect();
 
     assert_eq!(
+        lockfile_only_set, pinned_directories,
+        "Every pinned exact-release fixture must use `versioning-strategy: lockfile-only` so \
+         Dependabot refreshes only its audited lockfile and never edits the pinned manifest."
+    );
+
+    assert_eq!(
         configured_set, expected,
-        "Dependabot Cargo coverage must equal the tracked package inventory minus the explicit \
-         exact-release fixture exclusions.\n\
+        "Dependabot Cargo coverage must equal the tracked package inventory.\n\
          Expected directories: {expected:?}\n\
          Configured directories: {configured_set:?}\n\
          Fix: remove stale entries and add one Cargo update entry for every newly evolving \
