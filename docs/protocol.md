@@ -880,8 +880,8 @@ admission. If the recipient leaves during delivery, the old membership's
 pending delivery is discarded. Spectators are outside this route.
 
 An ordinary broadcast reaches the existing recipients in the existing wire
-shape. A directed delivery uses byte `0x01` followed by the v3 MessagePack
-map described above. In that map `epoch` names the sender's seated
+shape. The server's internal `AddressedGameDataBinary` message writes byte
+`0x01` followed by the v3 MessagePack map described above. In that map `epoch` names the sender's seated
 incarnation, and `seq` is an independent sender-socket receipt ID. Directed
 IDs may be sparse because other peers see only their own addressed deliveries.
 They do not contribute to `DeliveryReport` broadcast gap ranges, the
