@@ -214,6 +214,8 @@ updates:
       - "wallstop"
     rebase-strategy: "auto"
     versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     commit-message:
       prefix: "chore(webrtc-fixture)"
       include: "scope"
@@ -235,6 +237,8 @@ updates:
       - "wallstop"
     rebase-strategy: "auto"
     versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     commit-message:
       prefix: "chore(rtc-fixture)"
       include: "scope"
@@ -256,6 +260,8 @@ updates:
       - "wallstop"
     rebase-strategy: "auto"
     versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     commit-message:
       prefix: "chore(rtc-sctp-fixture)"
       include: "scope"
@@ -277,6 +283,8 @@ updates:
       - "wallstop"
     rebase-strategy: "auto"
     versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     commit-message:
       prefix: "chore(fortress-fixture)"
       include: "scope"
@@ -298,6 +306,8 @@ updates:
       - "wallstop"
     rebase-strategy: "auto"
     versioning-strategy: "lockfile-only"
+    allow:
+      - dependency-type: "all"
     commit-message:
       prefix: "chore(fortress-wasm-fixture)"
       include: "scope"
