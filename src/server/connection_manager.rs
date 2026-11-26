@@ -59,6 +59,9 @@ pub(crate) struct ClientConnection {
     /// operation envelopes. Preserved across a successful reconnect identity
     /// swap because the WebSocket connection itself survives that swap.
     pub room_operation_ids: bool,
+    /// Negotiated framing and private delivery receipt counter for this socket.
+    addressed_binary: bool,
+    addressed_receipt: u64,
     /// Last data-path transport state this client reported via
     /// [`ClientMessage::TransportStatus`](crate::protocol::ClientMessage::TransportStatus)
     /// (v3 only), tagged with the room/spectator membership generation in which
@@ -679,6 +682,8 @@ impl ConnectionManager {
             reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
             room_operation_ids: false,
+            addressed_binary: false,
+            addressed_receipt: 0,
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
@@ -829,6 +834,8 @@ impl ConnectionManager {
             reconnection_identity: None,
             protocol: NegotiatedProtocol::default(),
             room_operation_ids: false,
+            addressed_binary: false,
+            addressed_receipt: 0,
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
@@ -974,6 +981,92 @@ impl ConnectionManager {
             .get(player_id)
             .map(|connection| connection.room_operation_ids)
             .unwrap_or(false)
+    }
+
+    pub(super) fn set_addressed_binary(&self, player_id: &PlayerId, enabled: bool) {
+        if let Some(mut client) = self.clients.get_mut(player_id) {
+            client.addressed_binary = enabled;
+        }
+    }
+
+    pub(super) fn supports_addressed_binary(&self, player_id: &PlayerId) -> bool {
+        self.clients
+            .get(player_id)
+            .is_some_and(|client| client.addressed_binary)
+    }
+
+    pub(super) fn addressed_plan_seat(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) -> Option<(GameDataEncoding, u32)> {
+        let (sender, format, epoch) = {
+            let client = self.clients.get(player_id)?;
+            if !client.addressed_binary
+                || client.protocol.version < 3
+                || client.game_data_format == GameDataEncoding::Json
+                || client.room_id != Some(*room_id)
+                || client.game_data_epoch == 0
+            {
+                return None;
+            }
+            (
+                client.sender.clone(),
+                client.game_data_format,
+                client.game_data_epoch,
+            )
+        };
+        // A prepared transition updates ClientConnection before the queue scope.
+        // Keep connection registry reads independent of the queue lock.
+        if !sender.has_active_room_scope(*room_id) {
+            return None;
+        }
+        let client = self.clients.get(player_id)?;
+        (client.sender.same_channel(&sender)
+            && client.room_id == Some(*room_id)
+            && client.game_data_epoch == epoch
+            && client.game_data_format == format
+            && client.addressed_binary
+            && client.close.requested_reason().is_none())
+        .then_some((format, epoch))
+    }
+
+    pub(super) fn addressed_target_generation(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        encoding: GameDataEncoding,
+    ) -> Option<Uuid> {
+        let client = self.clients.get(player_id)?;
+        (client.addressed_binary
+            && client.game_data_format == encoding
+            && client.room_id == Some(*room_id)
+            && client.close.requested_reason().is_none())
+        .then_some(client.membership_generation)
+    }
+
+    pub(super) fn next_addressed_receipt(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+        source: &Arc<ClientLifecycle>,
+    ) -> Option<RelayStamp> {
+        let mut client = self.clients.get_mut(player_id)?;
+        if !client.addressed_binary
+            || client.room_id != Some(*room_id)
+            || !Arc::ptr_eq(source, &client.lifecycle)
+        {
+            return None;
+        }
+        let client = client.value_mut();
+        let receipt = client.addressed_receipt.checked_add(1)?;
+        client.close.commit_if_open(|| {
+            client.addressed_receipt = receipt;
+            RelayStamp {
+                seq: receipt,
+                epoch: client.game_data_epoch,
+            }
+        })
     }
 
     /// Read an owned negotiation snapshot with the complete capability lists.
@@ -1487,6 +1580,8 @@ impl ConnectionManager {
             reconnection_identity: old_connection.reconnection_identity,
             protocol: old_connection.protocol,
             room_operation_ids: old_connection.room_operation_ids,
+            addressed_binary: old_connection.addressed_binary,
+            addressed_receipt: old_connection.addressed_receipt,
             // Preserve any roomless transient-socket status only as rollback
             // state. Advancing the membership generation below makes it
             // ineligible for reconnect deduplication, so the restored player
@@ -1562,6 +1657,8 @@ impl ConnectionManager {
             reconnection_identity: reassigned_connection.reconnection_identity,
             protocol: reassigned_connection.protocol,
             room_operation_ids: reassigned_connection.room_operation_ids,
+            addressed_binary: reassigned_connection.addressed_binary,
+            addressed_receipt: reassigned_connection.addressed_receipt,
             transport_status: reassigned_connection.transport_status,
             membership_generation,
             prior_membership_generation: None,

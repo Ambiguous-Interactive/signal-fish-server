@@ -213,6 +213,7 @@ async fn authenticate_for_message_pack(
     sender: &mut WsSink,
     receiver: &mut WsReceiver,
     protocol_version: Option<u16>,
+    addressed: bool,
 ) {
     let auth = ClientMessage::Authenticate {
         app_id: "binary-e2e-app".to_string(),
@@ -223,7 +224,7 @@ async fn authenticate_for_message_pack(
         protocol_version,
         supported_transports: None,
         supported_topologies: None,
-        requested_capabilities: None,
+        requested_capabilities: addressed.then(|| vec!["addressed_binary_game_data".into()]),
     };
 
     let json = serde_json::to_string(&auth).expect("auth serializes");
@@ -243,6 +244,13 @@ async fn authenticate_for_message_pack(
                 "server must advertise message_pack support: {info:?}"
             );
             assert_eq!(info.protocol_version, protocol_version);
+            assert_eq!(
+                info.capabilities
+                    .iter()
+                    .any(|item| item == "addressed_binary_game_data"),
+                addressed && protocol_version == Some(3),
+                "addressed binary support must be explicitly negotiated"
+            );
         }
         other => panic!("expected ProtocolInfo after auth, got {other:?}"),
     }
@@ -737,6 +745,124 @@ async fn relay_transport_hint_does_not_change_websocket_game_data_fanout() {
 }
 
 #[tokio::test]
+async fn addressed_binary_game_data_preserves_legacy_broadcast_sequence() {
+    let running_server = start_test_server().await;
+    let addr = running_server.addr();
+    let mut peers = Vec::new();
+    for (name, room, addressed) in [
+        ("Sender", "ADDR01", true),
+        ("Target", "ADDR01", true),
+        ("Bystander", "ADDR01", false),
+        ("Other room", "ADDR02", true),
+    ] {
+        let (mut send, mut receive) = connect_client(addr, "/v2/ws").await;
+        authenticate_for_message_pack(&mut send, &mut receive, Some(3), addressed).await;
+        let join = ClientMessage::JoinRoom {
+            game_name: "addressed_binary_e2e".into(),
+            room_code: Some(room.into()),
+            player_name: name.into(),
+            max_players: Some(3),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: None,
+        };
+        let response = send_and_receive(&mut send, &mut receive, join)
+            .await
+            .unwrap();
+        let ServerMessage::RoomJoined(joined) = response else {
+            panic!("Expected RoomJoined for {name}, got {response:?}");
+        };
+        peers.push((send, receive, joined.player_id));
+    }
+    let [(mut source, mut source_inbox, sender_id), (_, mut target, target_id), (mut legacy_source, mut bystander, legacy_id), (_, _, outside_id)] =
+        peers
+            .try_into()
+            .unwrap_or_else(|_| panic!("expected four peers"));
+
+    let directed = |recipient: PlayerId, payload: &[u8]| {
+        let mut frame = vec![1];
+        frame.extend_from_slice(recipient.as_bytes());
+        frame.extend_from_slice(payload);
+        Message::Binary(frame.into())
+    };
+
+    for n in 1_u8..=4 {
+        if n == 4 {
+            for rejected in [
+                directed(sender_id, &[99]),
+                directed(legacy_id, &[99]),
+                directed(outside_id, &[99]),
+                Message::Binary(vec![1, 8, 9].into()),
+                Message::Binary(vec![2, 9].into()),
+            ] {
+                source.send(rejected).await.unwrap();
+                loop {
+                    if let ServerMessage::Error { error_code, .. } =
+                        receive_server_message(&mut source_inbox).await
+                    {
+                        assert_eq!(error_code, Some(ErrorCode::InvalidInput));
+                        break;
+                    }
+                }
+            }
+        }
+        let private = [0, n, 0xc1];
+        source.send(directed(target_id, &private)).await.unwrap();
+        source
+            .send(Message::Binary(vec![0, 1, n].into()))
+            .await
+            .unwrap();
+
+        let wire = receive_binary_game_data_wire_frame(&mut target, u64::from(n)).await;
+        assert_eq!(
+            wire.first(),
+            Some(&1),
+            "directed frame must use the addressed lane"
+        );
+        let expected = V3BinaryGameDataFrame {
+            from_player: sender_id,
+            encoding: GameDataEncoding::MessagePack,
+            payload: private.to_vec(),
+            seq: u64::from(n),
+            epoch: 1,
+        };
+        assert_eq!(decode_v3_binary_game_data(&wire[1..]).unwrap(), expected);
+
+        for receiver in [&mut target, &mut bystander] {
+            let wire = receive_binary_game_data_wire_frame(receiver, u64::from(n)).await;
+            let frame = decode_v3_binary_game_data(&wire).expect("ordinary v3 broadcast");
+            assert_eq!(
+                frame,
+                V3BinaryGameDataFrame {
+                    payload: vec![1, n],
+                    ..expected
+                },
+                "directed traffic cannot consume a broadcast sequence or reach the bystander"
+            );
+        }
+    }
+    let legacy_payload = vec![1, 0, 0xc1];
+    legacy_source
+        .send(Message::Binary(legacy_payload.clone().into()))
+        .await
+        .unwrap();
+    let wire = receive_binary_game_data_wire_frame(&mut target, 1).await;
+    assert_eq!(
+        decode_v3_binary_game_data(&wire).unwrap(),
+        V3BinaryGameDataFrame {
+            from_player: legacy_id,
+            encoding: GameDataEncoding::MessagePack,
+            payload: legacy_payload,
+            seq: 1,
+            epoch: 1,
+        },
+        "unnegotiated opcodes are ordinary payload bytes"
+    );
+    running_server.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
     for protocol_version in [None, Some(3)] {
         // Keep the server handle's metrics so the relay's delivery-conservation
@@ -752,8 +878,8 @@ async fn test_binary_game_data_broadcasting_preserves_v2_and_stamps_v3() {
         let (mut sender1, mut receiver1) = connect_client(addr, "/v2/ws").await;
         let (mut sender2, mut receiver2) = connect_client(addr, "/v2/ws").await;
 
-        authenticate_for_message_pack(&mut sender1, &mut receiver1, protocol_version).await;
-        authenticate_for_message_pack(&mut sender2, &mut receiver2, protocol_version).await;
+        authenticate_for_message_pack(&mut sender1, &mut receiver1, protocol_version, false).await;
+        authenticate_for_message_pack(&mut sender2, &mut receiver2, protocol_version, false).await;
 
         let join_msg = ClientMessage::JoinRoom {
             game_name: "binary_data_test".to_string(),

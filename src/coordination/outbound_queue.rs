@@ -247,6 +247,13 @@ impl OutboundData {
         Self { delivery, metadata }
     }
 
+    fn room_id(&self) -> Option<RoomId> {
+        match self.delivery.message() {
+            ServerMessage::AddressedGameDataBinary { room_id, .. } => Some(*room_id),
+            _ => self.metadata.map(|metadata| metadata.room_id),
+        }
+    }
+
     fn class(&self) -> DeliveryClass {
         self.metadata
             .map_or(DeliveryClass::Reliable, |metadata| metadata.class)
@@ -270,6 +277,9 @@ impl OutboundData {
                 }
                 ServerMessage::GameDataBinary { seq, epoch, .. } => {
                     seq.is_none() && epoch.is_none()
+                }
+                ServerMessage::AddressedGameDataBinary { receipt, epoch, .. } => {
+                    *receipt != 0 && *epoch != 0
                 }
                 _ => false,
             };
@@ -1148,6 +1158,11 @@ impl OutboundSender {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
+    pub(super) fn has_active_room_scope(&self, generation: u64, room_id: RoomId) -> bool {
+        let state = self.shared.state();
+        state.accepting() && scope_matches(&state, generation, Some(room_id))
+    }
+
     #[cfg(test)]
     pub fn is_closed(&self) -> bool {
         !self.shared.state().accepting()
@@ -1251,7 +1266,7 @@ impl OutboundSender {
         data: OutboundData,
         generation: u64,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
-        let room_id = data.metadata.map(|metadata| metadata.room_id);
+        let room_id = data.room_id();
         self.try_enqueue_data_inner(data, Some((generation, room_id)), None)
     }
 
@@ -1262,7 +1277,7 @@ impl OutboundSender {
         witness: &CapacityReleaseWitness,
         deadline: Instant,
     ) -> Result<EnqueueOutcome, TryEnqueueError<OutboundData>> {
-        let room_id = data.metadata.map(|metadata| metadata.room_id);
+        let room_id = data.room_id();
         self.try_enqueue_data_inner(data, Some((generation, room_id)), Some((witness, deadline)))
     }
 
@@ -2809,10 +2824,12 @@ pub(super) fn correlated_transition_cases(
     ]
 }
 
-fn is_data_message(message: &ServerMessage) -> bool {
+pub(super) fn is_data_message(message: &ServerMessage) -> bool {
     matches!(
         message,
-        ServerMessage::GameData { .. } | ServerMessage::GameDataBinary { .. }
+        ServerMessage::GameData { .. }
+            | ServerMessage::GameDataBinary { .. }
+            | ServerMessage::AddressedGameDataBinary { .. }
     )
 }
 

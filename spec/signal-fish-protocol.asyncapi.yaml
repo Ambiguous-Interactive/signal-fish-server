@@ -7,8 +7,8 @@
 # `#[serde(tag = "type", content = "data")]`). Variants WITHOUT a payload
 # (e.g. LeaveRoom, Ping, RoomLeft, Pong) are sent as `{ "type": <Variant> }`
 # with no `data` field. Binary frames are modeled explicitly below: the core
-# server-to-client `GameDataBinary` delivery and the negotiated token-binding-v2
-# client envelope that carries an existing binary payload plus its proof.
+# server-to-client ordinary and addressed game data, and the negotiated
+# token-binding-v2 client envelope that carries a binary payload and its proof.
 #
 # It models EVERY `ClientMessage` (send / client -> server) and `ServerMessage`
 # (receive / server -> client) variant from `src/protocol/messages.rs`, plus the
@@ -128,6 +128,7 @@ channels:
       ServerGameData: { $ref: '#/components/messages/ServerGameData' }
       GameDataBinary: { $ref: '#/components/messages/GameDataBinary' }
       V2RawGameDataBinary: { $ref: '#/components/messages/V2RawGameDataBinary' }
+      AddressedGameDataBinary: { $ref: '#/components/messages/AddressedGameDataBinary' }
       AuthorityChanged: { $ref: '#/components/messages/AuthorityChanged' }
       AuthorityResponse: { $ref: '#/components/messages/AuthorityResponse' }
       LobbyStateChanged: { $ref: '#/components/messages/LobbyStateChanged' }
@@ -191,6 +192,7 @@ operations:
       - { $ref: '#/channels/signaling/messages/ServerGameData' }
       - { $ref: '#/channels/signaling/messages/GameDataBinary' }
       - { $ref: '#/channels/signaling/messages/V2RawGameDataBinary' }
+      - { $ref: '#/channels/signaling/messages/AddressedGameDataBinary' }
       - { $ref: '#/channels/signaling/messages/AuthorityChanged' }
       - { $ref: '#/channels/signaling/messages/AuthorityResponse' }
       - { $ref: '#/channels/signaling/messages/LobbyStateChanged' }
@@ -382,6 +384,24 @@ components:
         oneOf:
           - { $ref: '#/components/schemas/V2BinaryGameDataEnvelope' }
           - { $ref: '#/components/schemas/V3BinaryGameDataEnvelope' }
+    AddressedGameDataBinary:
+      title: Addressed binary game data
+      contentType: application/octet-stream
+      summary: >-
+        Physical binary WebSocket delivery to one v3 seat that negotiated
+        addressed_binary_game_data.
+      x-rust-server-variant: AddressedGameDataBinary
+      x-websocket-binary-envelope: addressed-messagepack
+      x-addressed-prefix: 1
+      x-addressed-envelope: { $ref: '#/components/schemas/V3BinaryGameDataEnvelope' }
+      payload:
+        type: string
+        format: binary
+        x-protocol-version: 3
+        description: >-
+          Byte 0x01 followed by a canonical v3 MessagePack envelope. Its seq is
+          a sparse addressed receipt and is separate from ordinary broadcast
+          delivery sequence numbers.
     V2RawGameDataBinary:
       title: Raw v2 binary game data
       contentType: application/octet-stream
@@ -1953,6 +1973,24 @@ components:
                 Server-decided offerer flag (glare resolution). Clients MUST NOT
                 recompute it. On NewPeer, additively connect to the new peer.
       required: [type, data]
+    AddressedBinaryPeers:
+      type: array
+      maxItems: 254
+      uniqueItems: true
+      description: >-
+        Present on plans for opted-in seats. Lists the other live same-format
+        seats that negotiated addressed binary delivery. Each player_id must
+        occur once and the sequence of player_id values must strictly increase.
+      items:
+        type: object
+        additionalProperties: false
+        required: [player_id, epoch]
+        properties:
+          player_id: { $ref: '#/components/schemas/PlayerId' }
+          epoch:
+            type: integer
+            minimum: 1
+            maximum: 4294967295
     SessionPlan:
       type: object
       description: >-
@@ -1979,6 +2017,7 @@ components:
                   type: array
                   maxItems: 0
                   items: { $ref: '#/components/schemas/IceServer' }
+                addressed_binary_peers: { $ref: '#/components/schemas/AddressedBinaryPeers' }
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
@@ -1996,6 +2035,7 @@ components:
                   type: array
                   maxItems: 0
                   items: { $ref: '#/components/schemas/IceServer' }
+                addressed_binary_peers: { $ref: '#/components/schemas/AddressedBinaryPeers' }
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
@@ -2011,6 +2051,7 @@ components:
                 ice_servers:
                   type: array
                   items: { $ref: '#/components/schemas/IceServer' }
+                addressed_binary_peers: { $ref: '#/components/schemas/AddressedBinaryPeers' }
                 fallback: { const: relay }
             - type: object
               additionalProperties: false
@@ -2025,6 +2066,7 @@ components:
                 ice_servers:
                   type: array
                   items: { $ref: '#/components/schemas/IceServer' }
+                addressed_binary_peers: { $ref: '#/components/schemas/AddressedBinaryPeers' }
                 fallback: { const: relay }
       required: [type, data]
     Pong:

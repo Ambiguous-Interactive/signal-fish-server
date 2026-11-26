@@ -539,6 +539,7 @@ fn session_plan_mesh_wire_shape_and_tokens() {
             credential: Some("pass".to_string()),
         }],
         fallback: Transport::Relay,
+        addressed_binary_peers: None,
     }));
 
     let value = serde_json::to_value(&msg).unwrap();
@@ -587,6 +588,7 @@ fn session_plan_host_some_is_present_on_wire() {
         peers: vec![],
         ice_servers: vec![],
         fallback: Transport::Relay,
+        addressed_binary_peers: None,
     }));
 
     let value = serde_json::to_value(&msg).unwrap();
@@ -645,6 +647,10 @@ fn session_plan_round_trips_json_and_msgpack() {
             credential: Some("c".to_string()),
         }],
         fallback: Transport::Relay,
+        addressed_binary_peers: Some(vec![signal_fish_server::protocol::AddressedBinaryPeer {
+            player_id: peer,
+            epoch: 2,
+        }]),
     };
     let msg = ServerMessage::SessionPlan(Box::new(original));
 
@@ -748,6 +754,7 @@ fn assert_session_plan_eq(expected: &ServerMessage, actual: &ServerMessage) {
             assert_eq!(a.host, b.host);
             assert_eq!(a.direct_endpoint, b.direct_endpoint);
             assert_eq!(a.fallback, b.fallback);
+            assert_eq!(a.addressed_binary_peers, b.addressed_binary_peers);
             assert_eq!(a.peers.len(), b.peers.len());
             for (pa, pb) in a.peers.iter().zip(b.peers.iter()) {
                 assert_eq!(pa.player_id, pb.player_id);

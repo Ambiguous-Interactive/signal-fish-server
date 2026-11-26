@@ -1770,6 +1770,19 @@ impl EnhancedGameServer {
             .supports_room_operation_ids(player_id)
     }
 
+    pub(crate) fn set_client_addressed_binary(&self, player_id: &PlayerId, enabled: bool) {
+        self.connection_manager
+            .set_addressed_binary(player_id, enabled);
+    }
+
+    pub(crate) fn supports_addressed_game_data(&self) -> bool {
+        self.message_coordinator.supports_addressed_game_data()
+    }
+
+    pub(crate) fn client_supports_addressed_binary(&self, player_id: &PlayerId) -> bool {
+        self.connection_manager.supports_addressed_binary(player_id)
+    }
+
     /// Fetch the negotiated protocol capabilities for a client (defaults to v2 relay-only).
     pub(crate) fn client_protocol(&self, player_id: &PlayerId) -> NegotiatedProtocol {
         self.connection_manager.protocol(player_id)
@@ -3475,6 +3488,23 @@ impl InMemoryMessageCoordinator {
         let Some(players) = room_players.get(room_id) else {
             return StartedDeliveries::default();
         };
+        if let ServerMessage::AddressedGameDataBinary { recipient, .. } = &message {
+            // Routes and generation-scoped handles are captured under the
+            // same locks as broadcast. No other recipient starts delivery.
+            let recipient = *recipient;
+            let handle = clients.get(&recipient).filter(|_| {
+                players.contains(&recipient)
+                    && Some(&recipient) != except_player
+                    && !self.is_spectator_route(&recipient)
+            });
+            let Some(handle) = handle else {
+                return StartedDeliveries::default();
+            };
+            let delivery =
+                crate::coordination::outbound_queue::DeliveryMessage::new(Arc::new(message));
+            return self
+                .start_deliveries([(recipient, handle)], Some(*room_id), |_| delivery.clone());
+        }
         let (projection_work_repeats, all_recipients_are_classified) = relay_projection_summary(
             players
                 .iter()
@@ -5167,6 +5197,10 @@ impl InMemoryMessageCoordinator {
 
 #[async_trait::async_trait]
 impl MessageCoordinator for InMemoryMessageCoordinator {
+    fn supports_addressed_game_data(&self) -> bool {
+        true
+    }
+
     async fn lock_room_event_mutation(&self, room_id: &RoomId) -> RoomEventMutationGuard {
         self.room_event_sequencer.lock(*room_id).await
     }

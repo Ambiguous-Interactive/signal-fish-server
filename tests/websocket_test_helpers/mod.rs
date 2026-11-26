@@ -346,6 +346,7 @@ fn server_message_name(message: &ServerMessage) -> &'static str {
         ServerMessage::PlayerLeft { .. } => "PlayerLeft",
         ServerMessage::GameData { .. } => "GameData",
         ServerMessage::GameDataBinary { .. } => "GameDataBinary",
+        ServerMessage::AddressedGameDataBinary { .. } => "AddressedGameDataBinary",
         ServerMessage::AuthorityChanged { .. } => "AuthorityChanged",
         ServerMessage::AuthorityResponse { .. } => "AuthorityResponse",
         ServerMessage::LobbyStateChanged { .. } => "LobbyStateChanged",

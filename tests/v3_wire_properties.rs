@@ -188,6 +188,7 @@ fn arb_session_plan() -> impl Strategy<Value = SessionPlanPayload> {
                     peers,
                     ice_servers,
                     fallback,
+                    addressed_binary_peers: None,
                 }
             },
         )

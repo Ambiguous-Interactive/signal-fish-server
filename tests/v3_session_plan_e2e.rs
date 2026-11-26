@@ -15,8 +15,8 @@ mod websocket_test_helpers;
 use futures_util::SinkExt;
 use signal_fish_server::config::{AppRegistrationEntry, SessionConfig, TurnConfig};
 use signal_fish_server::protocol::{
-    ClientMessage, ConnectionInfo, DirectEndpoint, ErrorCode, IceServer, PlayerId, RoomId,
-    ServerMessage, Topology, Transport,
+    ClientMessage, ConnectionInfo, DirectEndpoint, ErrorCode, GameDataEncoding, IceServer,
+    PlayerId, RoomId, ServerMessage, Topology, Transport,
 };
 use signal_fish_server::server::{EnhancedGameServer, ServerConfig};
 use signal_fish_server::websocket::{create_router, websocket_route_v3};
@@ -76,11 +76,19 @@ fn mesh_session_config() -> SessionConfig {
 /// block (TURN disabled, but the default public STUN advertised), exercising the
 /// production default ICE wiring end to end.
 async fn start_server_with_session(session: SessionConfig) -> RunningTestServer {
+    start_server_with_session_formats(session, false).await
+}
+
+async fn start_server_with_session_formats(
+    session: SessionConfig,
+    enable_rkyv_game_data: bool,
+) -> RunningTestServer {
     let mut server_config: ServerConfig = test_server_config();
     server_config.app_id_allowlist_enabled = true;
 
     let mut protocol_config = test_protocol_config();
     protocol_config.sdk_compatibility.enforce = false;
+    protocol_config.enable_rkyv_game_data = enable_rkyv_game_data;
 
     let game_server = EnhancedGameServer::new(
         server_config,
@@ -202,13 +210,23 @@ async fn join_room(
     room_code: Option<String>,
     player_name: &str,
 ) -> (RoomId, String, PlayerId) {
+    let joined = join_room_with_size(ws, room_code, player_name, 2).await;
+    (joined.room_id, joined.room_code, joined.player_id)
+}
+
+async fn join_room_with_size(
+    ws: &mut WsStream,
+    room_code: Option<String>,
+    player_name: &str,
+    max_players: u8,
+) -> Box<signal_fish_server::protocol::RoomJoinedPayload> {
     send(
         ws,
         &ClientMessage::JoinRoom {
             game_name: "plan-game".to_string(),
             room_code,
             player_name: player_name.to_string(),
-            max_players: Some(2),
+            max_players: Some(max_players),
             supports_authority: Some(false),
             relay_transport: None,
 
@@ -223,7 +241,7 @@ async fn join_room(
         SERVER_MESSAGE_TIMEOUT,
         "room join response",
         |message| match message {
-            ServerMessage::RoomJoined(p) => Some((p.room_id, p.room_code, p.player_id)),
+            ServerMessage::RoomJoined(p) => Some(p),
             ServerMessage::RoomJoinFailed { reason, error_code } => {
                 panic!("room join failed: {reason} ({error_code:?})")
             }
@@ -316,6 +334,338 @@ async fn read_finalization(ws: &mut WsStream) -> Finalization {
         session_plan,
         skipped_after_game_starting,
     }
+}
+
+const ADDRESSED_BINARY: &str = "addressed_binary_game_data";
+
+async fn authenticate_addressed_plan(ws: &mut WsStream, format: GameDataEncoding, addressed: bool) {
+    send(
+        ws,
+        &ClientMessage::Authenticate {
+            app_id: APP_ID.to_string(),
+            connect_token: None,
+            sdk_version: None,
+            platform: None,
+            game_data_format: Some(format),
+            protocol_version: Some(3),
+            supported_transports: None,
+            supported_topologies: None,
+            requested_capabilities: addressed.then(|| vec![ADDRESSED_BINARY.into()]),
+        },
+    )
+    .await;
+    assert!(matches!(
+        next_server_message(ws).await,
+        ServerMessage::Authenticated { .. }
+    ));
+    let ServerMessage::ProtocolInfo(info) = next_server_message(ws).await else {
+        panic!("expected ProtocolInfo");
+    };
+    assert_eq!(info.protocol_version, Some(3));
+    assert!(info.game_data_formats.contains(&format));
+    assert_eq!(
+        info.capabilities.iter().any(|c| c == ADDRESSED_BINARY),
+        addressed
+    );
+}
+
+#[tokio::test]
+async fn addressed_binary_plan_lists_only_opted_same_format_seats() {
+    use GameDataEncoding::{MessagePack, Rkyv};
+    for configurations in [
+        &[
+            (MessagePack, true),
+            (MessagePack, true),
+            (MessagePack, true),
+        ][..],
+        &[
+            (MessagePack, true),
+            (MessagePack, true),
+            (MessagePack, false),
+            (Rkyv, true),
+        ][..],
+    ] {
+        let running_server =
+            start_server_with_session_formats(SessionConfig::default(), true).await;
+        let max_players = u8::try_from(configurations.len()).unwrap();
+        let mut seats = Vec::new();
+        let mut room_code = None;
+        for (index, (format, addressed)) in configurations.iter().copied().enumerate() {
+            let mut ws = connect(running_server.addr()).await;
+            authenticate_addressed_plan(&mut ws, format, addressed).await;
+            let joined = join_room_with_size(
+                &mut ws,
+                room_code.clone(),
+                &format!("Peer{index}"),
+                max_players,
+            )
+            .await;
+            room_code = Some(joined.room_code);
+            seats.push((ws, joined.player_id));
+        }
+        let mut observer = connect(running_server.addr()).await;
+        authenticate_addressed_plan(&mut observer, MessagePack, true).await;
+        send(
+            &mut observer,
+            &ClientMessage::JoinAsSpectator {
+                game_name: "plan-game".into(),
+                room_code: room_code.expect("seated room code"),
+                spectator_name: "Observer".into(),
+                password: None,
+            },
+        )
+        .await;
+        next_matching_server_message_within(
+            &mut observer,
+            SERVER_MESSAGE_TIMEOUT,
+            "addressed observer join",
+            |message| match message {
+                ServerMessage::SpectatorJoined(_) => Some(()),
+                ServerMessage::SpectatorJoinFailed { reason, error_code } => {
+                    panic!("observer join failed: {reason} ({error_code:?})")
+                }
+                _ => None,
+            },
+        )
+        .await;
+        for ready_index in 0..seats.len() {
+            ready(&mut seats[ready_index].0).await;
+            for (ws, _) in &mut seats {
+                await_ready_count(ws, ready_index + 1).await;
+            }
+        }
+        send(&mut seats[0].0, &ClientMessage::StartGame).await;
+        let ids: Vec<_> = seats.iter().map(|(_, id)| *id).collect();
+        for (index, ((ws, id), (format, addressed))) in seats
+            .iter_mut()
+            .zip(configurations.iter().copied())
+            .enumerate()
+        {
+            let plan = read_finalization(ws)
+                .await
+                .expect_session_plan("addressed seat");
+            assert_eq!(plan.topology, Topology::Relay);
+            assert!(plan.peers.is_empty());
+            let wire = serde_json::to_value(plan).unwrap();
+            if !addressed {
+                assert!(
+                    wire.get("addressed_binary_peers").is_none(),
+                    "unnegotiated plan preserves legacy wire shape"
+                );
+                continue;
+            }
+            let mut expected: Vec<_> = ids
+                .iter()
+                .copied()
+                .zip(configurations.iter().copied())
+                .filter_map(|(peer, (peer_format, peer_addressed))| {
+                    (peer != *id && peer_addressed && peer_format == format).then_some(peer)
+                })
+                .collect();
+            expected.sort_unstable();
+            let expected = expected
+                .into_iter()
+                .map(|peer| serde_json::json!({"player_id": peer, "epoch": 1}))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                wire.get("addressed_binary_peers"),
+                Some(&serde_json::json!(expected)),
+                "eligible addressed seats for seat {index}"
+            );
+        }
+        next_matching_server_message_within(
+            &mut observer,
+            SERVER_MESSAGE_TIMEOUT,
+            "observer game start",
+            |message| match message {
+                ServerMessage::GameStarting { .. } => Some(()),
+                ServerMessage::SessionPlan(_) => panic!("an opted-in observer received a plan"),
+                _ => None,
+            },
+        )
+        .await;
+        send(&mut observer, &ClientMessage::Ping).await;
+        next_matching_server_message_within(
+            &mut observer,
+            SERVER_MESSAGE_TIMEOUT,
+            "observer control barrier",
+            |message| match message {
+                ServerMessage::Pong => Some(()),
+                ServerMessage::SessionPlan(_) => panic!("an opted-in observer received a plan"),
+                _ => None,
+            },
+        )
+        .await;
+        running_server.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn addressed_binary_plan_tracks_reconnect_and_finalized_seat_fill() {
+    use GameDataEncoding::MessagePack;
+
+    let running_server = start_server_with_session(SessionConfig::default()).await;
+    let addr = running_server.addr();
+    let mut incumbent = connect(addr).await;
+    authenticate_addressed_plan(&mut incumbent, MessagePack, true).await;
+    let original = join_room_with_size(&mut incumbent, None, "Incumbent", 2).await;
+    let mut guest = connect(addr).await;
+    authenticate_addressed_plan(&mut guest, MessagePack, true).await;
+    let joined =
+        join_room_with_size(&mut guest, Some(original.room_code.clone()), "Reconnect", 2).await;
+
+    ready(&mut incumbent).await;
+    await_ready_count(&mut incumbent, 1).await;
+    await_ready_count(&mut guest, 1).await;
+    ready(&mut guest).await;
+    await_ready_count(&mut incumbent, 2).await;
+    await_ready_count(&mut guest, 2).await;
+    send(&mut incumbent, &ClientMessage::StartGame).await;
+    let (incumbent_start, guest_start) = tokio::join!(
+        read_finalization(&mut incumbent),
+        read_finalization(&mut guest)
+    );
+    let initial = incumbent_start.expect_session_plan("incumbent");
+    guest_start.expect_session_plan("guest");
+    let before = serde_json::to_value(initial).unwrap();
+    assert_eq!(
+        before.get("addressed_binary_peers"),
+        Some(&serde_json::json!([{"player_id": joined.player_id, "epoch": 1}]))
+    );
+
+    guest.close(None).await.unwrap();
+    next_matching_server_message_within(
+        &mut incumbent,
+        SERVER_MESSAGE_TIMEOUT,
+        "guest departed",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == joined.player_id => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let mut replacement = connect(addr).await;
+    authenticate_addressed_plan(&mut replacement, MessagePack, true).await;
+    send(
+        &mut replacement,
+        &ClientMessage::Reconnect {
+            player_id: joined.player_id,
+            room_id: joined.room_id,
+            auth_token: joined
+                .reconnection_token
+                .expect("v3 reconnect token at join"),
+        },
+    )
+    .await;
+    let restored = next_matching_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "reconnected baseline",
+        |message| match message {
+            ServerMessage::Reconnected(payload) => Some(payload),
+            ServerMessage::ReconnectionFailed { reason, error_code } => {
+                panic!("reconnect failed: {reason} ({error_code:?})")
+            }
+            ServerMessage::SessionPlan(_) => panic!("received plan before reconnect baseline"),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(restored.player_id, joined.player_id);
+
+    expect_addressed_plan(&mut incumbent, joined.player_id, 2).await;
+    expect_addressed_plan(&mut replacement, original.player_id, 1).await;
+
+    send(&mut replacement, &ClientMessage::LeaveRoom).await;
+    next_matching_server_message_within(
+        &mut replacement,
+        SERVER_MESSAGE_TIMEOUT,
+        "reconnected leaver's RoomLeft",
+        |message| matches!(message, ServerMessage::RoomLeft).then_some(()),
+    )
+    .await;
+    next_matching_server_message_within(
+        &mut incumbent,
+        SERVER_MESSAGE_TIMEOUT,
+        "old occupant's PlayerLeft",
+        |message| match message {
+            ServerMessage::PlayerLeft { player_id, .. } if player_id == joined.player_id => {
+                Some(())
+            }
+            _ => None,
+        },
+    )
+    .await;
+    let mut late = connect(addr).await;
+    authenticate_addressed_plan(&mut late, MessagePack, true).await;
+    send(
+        &mut late,
+        &ClientMessage::JoinRoom {
+            game_name: "plan-game".into(),
+            room_code: Some(original.room_code),
+            player_name: "Seat filler".into(),
+            max_players: Some(2),
+            supports_authority: Some(false),
+            relay_transport: None,
+            password: None,
+            join_only: Some(true),
+        },
+    )
+    .await;
+    let filled = next_matching_server_message_within(
+        &mut late,
+        SERVER_MESSAGE_TIMEOUT,
+        "finalized seat fill baseline",
+        |message| match message {
+            ServerMessage::RoomJoined(payload) => Some(payload),
+            ServerMessage::RoomJoinFailed { reason, error_code } => {
+                panic!("late join failed: {reason} ({error_code:?})")
+            }
+            ServerMessage::SessionPlan(_) => panic!("received plan before late join baseline"),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(filled.room_id, joined.room_id);
+    assert_eq!(
+        filled.lobby_state,
+        signal_fish_server::protocol::LobbyState::Finalized
+    );
+    assert_ne!(filled.player_id, joined.player_id);
+    next_matching_server_message_within(
+        &mut incumbent,
+        SERVER_MESSAGE_TIMEOUT,
+        "incumbent seat fill lifecycle",
+        |message| match message {
+            ServerMessage::PlayerJoined { player } if player.id == filled.player_id => Some(()),
+            ServerMessage::SessionPlan(_) => panic!("received plan before seat fill lifecycle"),
+            _ => None,
+        },
+    )
+    .await;
+    expect_addressed_plan(&mut late, original.player_id, 1).await;
+    expect_addressed_plan(&mut incumbent, filled.player_id, 1).await;
+    running_server.shutdown().await;
+}
+
+async fn expect_addressed_plan(socket: &mut WsStream, expected_peer: PlayerId, epoch: u32) {
+    let plan = next_matching_server_message_within(
+        socket,
+        SERVER_MESSAGE_TIMEOUT,
+        "refresh addressed plan",
+        |message| match message {
+            ServerMessage::SessionPlan(plan) => Some(plan),
+            _ => None,
+        },
+    )
+    .await;
+    let wire = serde_json::to_value(plan).unwrap();
+    assert_eq!(
+        wire.get("addressed_binary_peers"),
+        Some(&serde_json::json!([{"player_id": expected_peer, "epoch": epoch}]))
+    );
 }
 
 #[tokio::test]

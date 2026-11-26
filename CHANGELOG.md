@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Let v3 binary clients negotiate gameplay delivery to one seated peer (#1803).
+- Tell opted-in clients which seats can receive addressed gameplay (#1803).
 - Report accepted and rejected remote browser channels to diagnose stalled P2P connections (#853, #889).
 - Report SCTP credit, send windows, queued DATA, and TSN ownership to diagnose stalled native P2P transfers (#1319).
 - Report session metrics scan and capture times in trace logs.
@@ -17,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Add the socket-only `ServerMessage::AddressedGameDataBinary` variant to the Rust server API.
 - Reduce server memory used by WebSocket connections (#775).
 - Publish new Signal Fish Server versions weekly when unreleased changes are ready (#1676).
 - **Breaking:** Require custom coordination locks to leave no lease behind when a pending `try_acquire` is canceled.

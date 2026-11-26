@@ -145,6 +145,13 @@ pub struct SessionPeer {
     pub initiate: bool,
 }
 
+/// A current seat that can receive addressed binary gameplay from this client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AddressedBinaryPeer {
+    pub player_id: PlayerId,
+    pub epoch: u32,
+}
+
 /// The per-recipient authoritative session directive (v3 only).
 ///
 /// Initial emission follows `GameStarting`; membership refreshes and Direct
@@ -184,6 +191,10 @@ pub struct SessionPlanPayload {
     pub ice_servers: Vec<IceServer>,
     /// The universal fallback transport — always [`Transport::Relay`], the floor.
     pub fallback: Transport,
+    /// Other active seats with the same addressed binary format, sorted by id.
+    /// Present only for a recipient that negotiated addressed binary delivery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub addressed_binary_peers: Option<Vec<AddressedBinaryPeer>>,
 }
 
 /// Legacy, self-declared peer metadata carried in v2 room snapshots and
@@ -414,6 +425,8 @@ pub const PROTOCOL_INFO_TRANSPORT_WEBSOCKET: &str = "websocket";
 pub const ROOM_OPERATION_IDS_CAPABILITY: &str = "room_operation_ids";
 /// Server support for live, read-only spectator relay after a fenced snapshot.
 pub const SPECTATOR_RELAY_CAPABILITY: &str = "spectator_relay";
+/// Opt-in game-data framing for private deliveries to one current room seat.
+pub const ADDRESSED_BINARY_GAME_DATA_CAPABILITY: &str = "addressed_binary_game_data";
 
 /// Describes negotiated protocol capabilities for a specific SDK.
 #[derive(Debug, Clone, Serialize, Deserialize)]
