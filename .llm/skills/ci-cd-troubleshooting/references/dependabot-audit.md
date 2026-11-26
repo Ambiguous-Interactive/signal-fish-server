@@ -23,38 +23,37 @@ dependency bump there used to fail `--verify-recorded` replay.
 
 ## Diagnosis
 
-```bash
-# Which graphs still hold the vulnerable version?
-for f in $(git ls-files | grep 'Cargo.lock$'); do
-  echo "== $f"; grep -A1 '^name = "<crate>"$' "$f"
-done
-cargo audit --file Cargo.lock
-```
+List the tracked lockfiles with `git ls-files -- Cargo.lock ':(glob)**/Cargo.lock'`.
+This includes both Fortress clients. Check which lockfiles contain the affected
+crate and version.
 
 ## Fix
 
-1. Update the advisory in every audited lockfile. Run
-   `cargo update -p <crate> --precise <fixed>` in `/`, `clients/native`,
-   `fuzz`, `third_party/webrtc`, `third_party/rtc`, and `third_party/rtc-sctp`.
-2. Keep the fixture lockfiles on Dependabot with
-   `versioning-strategy: lockfile-only`. It refreshes transitive locks and
-   never edits the pinned fixture manifest.
-3. Keep `Cargo.lock` and `cross_language.py` as provenance during cohort
-   replay. Wire agreement still runs against the current graph.
+1. For each affected lockfile, run
+   `cargo update --manifest-path path/to/Cargo.toml -p crate@affected --precise fixed`.
+   Use the manifest next to the lockfile and substitute the crate and versions.
+2. Keep `versioning-strategy: lockfile-only` and `allow: [{dependency-type: all}]`
+   on exact-release fixtures. This lets Dependabot update transitive lock
+   entries and keeps the manifests pinned.
+3. Replay saved encoding samples against their recorded Rust wire output. Run
+   the live encoding check to verify wire agreement with current dependencies.
 
 ## Verify
 
 ```bash
-for f in Cargo.lock clients/native/Cargo.lock fuzz/Cargo.lock \
-  third_party/webrtc/Cargo.lock third_party/rtc/Cargo.lock \
-  third_party/rtc-sctp/Cargo.lock; do
-  cargo audit --file "$f"
-done
-cargo deny --manifest-path Cargo.toml --all-features check
+(
+  set -eo pipefail
+  git ls-files -- Cargo.lock ':(glob)**/Cargo.lock' |
+    while IFS= read -r lockfile; do
+      cargo audit --file "$lockfile"
+    done
+  cargo deny --manifest-path Cargo.toml --all-features check
+)
 ```
 
-Tests: `test_dependabot_cargo_directories_cover_every_automated_package`, and
-`python3 benches/encoding/cross_language.py --verify-recorded <cohort>`.
+The audit block stops on the first failed check. Run the live encoding check
+with `python3 benches/encoding/cross_language.py --check` and replay a saved
+cohort with `python3 benches/encoding/cross_language.py --verify-recorded <cohort>`.
 
 ## Related
 

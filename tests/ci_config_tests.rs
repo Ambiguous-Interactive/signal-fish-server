@@ -21866,6 +21866,20 @@ fn test_dependabot_cargo_directories_cover_every_automated_package() {
             .and_then(Yaml::as_str)
             == Some("lockfile-only")
         {
+            let transitive_updates_allowed = entry
+                .as_mapping_get("allow")
+                .and_then(Yaml::as_sequence)
+                .is_some_and(|rules| {
+                    rules.iter().any(|rule| {
+                        rule.as_mapping_get("dependency-type")
+                            .and_then(Yaml::as_str)
+                            == Some("all")
+                    })
+                });
+            assert!(
+                transitive_updates_allowed,
+                "Lockfile-only Cargo directory `{directory}` must allow transitive updates"
+            );
             lockfile_only_set.insert(directory.to_string());
         }
     }
