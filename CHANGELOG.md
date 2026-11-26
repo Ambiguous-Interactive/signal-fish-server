@@ -91,6 +91,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Upgrade `url` to 2.5.9 across every audited dependency graph.
 - Accept null authority and response reason fields in the protocol schema (#826).
 - Accept null WebRTC SDP in the protocol schema for room joins and game starts (#826).
 - Describe raw v2 protobuf and rkyv gameplay frames in the protocol schema (#826).
