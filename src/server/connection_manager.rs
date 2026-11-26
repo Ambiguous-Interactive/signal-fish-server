@@ -995,6 +995,42 @@ impl ConnectionManager {
             .is_some_and(|client| client.addressed_binary)
     }
 
+    pub(super) fn addressed_plan_seat(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) -> Option<(GameDataEncoding, u32)> {
+        let (sender, format, epoch) = {
+            let client = self.clients.get(player_id)?;
+            if !client.addressed_binary
+                || client.protocol.version < 3
+                || client.game_data_format == GameDataEncoding::Json
+                || client.room_id != Some(*room_id)
+                || client.game_data_epoch == 0
+            {
+                return None;
+            }
+            (
+                client.sender.clone(),
+                client.game_data_format,
+                client.game_data_epoch,
+            )
+        };
+        // A prepared transition updates ClientConnection before the queue scope.
+        // Keep connection registry reads independent of the queue lock.
+        if !sender.has_active_room_scope(*room_id) {
+            return None;
+        }
+        let client = self.clients.get(player_id)?;
+        (client.sender.same_channel(&sender)
+            && client.room_id == Some(*room_id)
+            && client.game_data_epoch == epoch
+            && client.game_data_format == format
+            && client.addressed_binary
+            && client.close.requested_reason().is_none())
+        .then_some((format, epoch))
+    }
+
     pub(super) fn addressed_target_generation(
         &self,
         player_id: &PlayerId,

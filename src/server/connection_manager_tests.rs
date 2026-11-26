@@ -2324,6 +2324,75 @@ async fn test_concurrent_release_ip_slot_no_underflow() {
     }
 }
 
+#[tokio::test]
+async fn addressed_plan_seat_requires_the_current_published_room_queue() {
+    let manager = Arc::new(ConnectionManager::new(
+        usize::MAX,
+        4,
+        Arc::new(ServerMetrics::new()),
+        Arc::new(TestCoordinator::default()),
+        false,
+        (2, tokio::time::Duration::from_secs(60)),
+    ));
+    let (sender, _receiver) = crate::coordination::outbound_queue::channel(4, 4);
+    let player_id = manager
+        .register_classified_client(
+            DeliverySender::classified(sender.clone()),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:5046".parse().unwrap(),
+            Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+    manager.set_protocol(
+        &player_id,
+        NegotiatedProtocol {
+            version: 3,
+            ..NegotiatedProtocol::default()
+        },
+    );
+    manager.set_game_data_format(&player_id, GameDataEncoding::MessagePack);
+    manager.set_addressed_binary(&player_id, true);
+
+    let room_id = RoomId::new_v4();
+    let joined = Arc::new(ServerMessage::RoomJoined(Box::new(
+        crate::protocol::RoomJoinedPayload {
+            room_id,
+            room_code: "ABCD".to_string(),
+            player_id,
+            game_name: "addressed".to_string(),
+            max_players: 2,
+            supports_authority: false,
+            current_players: Vec::new(),
+            is_authority: false,
+            lobby_state: crate::protocol::LobbyState::Waiting,
+            ready_players: Vec::new(),
+            relay_type: "websocket".to_string(),
+            current_spectators: Vec::new(),
+            ice_servers: Vec::new(),
+            reconnection_token: None,
+        },
+    )));
+
+    for epoch in [1, 2] {
+        let (_, stamp) = manager.prepare_client_to_room(&player_id, room_id).unwrap();
+        assert_eq!(stamp.epoch, epoch);
+        assert_eq!(
+            manager.addressed_plan_seat(&player_id, &room_id),
+            None,
+            "prepared generation {epoch} is another incarnation even with the same room and UUID"
+        );
+        let enqueued = sender
+            .try_enqueue_transition(Arc::clone(&joined), u64::from(epoch))
+            .unwrap();
+        assert!(enqueued.enqueued);
+        assert_eq!(
+            manager.addressed_plan_seat(&player_id, &room_id),
+            Some((GameDataEncoding::MessagePack, epoch))
+        );
+    }
+}
+
 /// Keep connection liveness updates independent of a blocked metrics queue read.
 #[tokio::test]
 #[cfg_attr(miri, ignore)]

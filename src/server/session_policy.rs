@@ -48,10 +48,12 @@ use crate::coordination::{
     RoomRecipientMessages, StartGamePublication, StartGamePublicationBuilder,
 };
 use crate::protocol::{
-    ConnectionInfo, DirectEndpoint, IceServer, LobbyState, PlayerId, PlayerInfo, Room, RoomId,
-    ServerMessage, SessionGeneration, SessionPeer, SessionPlanPayload, Topology, Transport,
+    AddressedBinaryPeer, ConnectionInfo, DirectEndpoint, GameDataEncoding, IceServer, LobbyState,
+    PlayerId, PlayerInfo, Room, RoomId, ServerMessage, SessionGeneration, SessionPeer,
+    SessionPlanPayload, Topology, Transport,
 };
 
+use super::connection_manager::ConnectionManager;
 use super::signaling::sorted_routed_player_ids;
 use super::{EnhancedGameServer, NegotiatedProtocol};
 
@@ -437,6 +439,7 @@ impl SessionPlanDecision {
     pub(super) fn projection(&self) -> SessionPlanProjection<'_> {
         SessionPlanProjection {
             decision: self,
+            addressed_seats: Vec::new(),
             mesh_peer_capacity: if self.topology == Topology::Mesh {
                 self.members
                     .iter()
@@ -456,11 +459,50 @@ impl SessionPlanDecision {
 /// Reuse the host and exact mesh peer capacity for a complete publication.
 pub(super) struct SessionPlanProjection<'a> {
     decision: &'a SessionPlanDecision,
+    addressed_seats: Vec<(AddressedBinaryPeer, GameDataEncoding)>,
     mesh_peer_capacity: usize,
     host: Option<&'a SessionMember>,
 }
 
 impl SessionPlanProjection<'_> {
+    pub(super) fn with_addressed_seats(
+        mut self,
+        connections: &ConnectionManager,
+        room_id: &RoomId,
+    ) -> Self {
+        self.addressed_seats = self
+            .decision
+            .members
+            .iter()
+            .filter_map(|member| {
+                let player_id = member.player_id;
+                let (format, epoch) = connections.addressed_plan_seat(&player_id, room_id)?;
+                Some((AddressedBinaryPeer { player_id, epoch }, format))
+            })
+            .collect();
+        self.addressed_seats
+            .sort_unstable_by_key(|(seat, _)| seat.player_id);
+        self.addressed_seats
+            .dedup_by_key(|(seat, _)| seat.player_id);
+        self
+    }
+
+    fn addressed_peers_for(&self, player_id: PlayerId) -> Option<Vec<AddressedBinaryPeer>> {
+        let index = self
+            .addressed_seats
+            .binary_search_by_key(&player_id, |(seat, _)| seat.player_id)
+            .ok()?;
+        let format = self.addressed_seats[index].1;
+        Some(
+            self.addressed_seats
+                .iter()
+                .filter_map(|(seat, peer_format)| {
+                    (seat.player_id != player_id && *peer_format == format).then_some(*seat)
+                })
+                .collect(),
+        )
+    }
+
     /// Build a plan for a member borrowed from this decision's roster.
     pub(super) fn plan_for_member(
         &self,
@@ -515,6 +557,8 @@ impl SessionPlanProjection<'_> {
             peers,
             ice_servers,
             fallback: Transport::Relay,
+            addressed_binary_peers: member
+                .and_then(|member| self.addressed_peers_for(member.player_id)),
         }
     }
 
@@ -695,7 +739,9 @@ impl EnhancedGameServer {
             let now_unix = decision
                 .uses_webrtc_signaling()
                 .then(|| jiff::Timestamp::now().as_second());
-            let projection = decision.projection();
+            let projection = decision
+                .projection()
+                .with_addressed_seats(&connection_manager, &room_id);
             let mut turn_credentials_issued = 0u64;
             let recipient_messages = decision
                 .members
@@ -1360,7 +1406,9 @@ impl EnhancedGameServer {
         let now_unix = decision
             .uses_webrtc_signaling()
             .then(|| jiff::Timestamp::now().as_second());
-        let projection = decision.projection();
+        let projection = decision
+            .projection()
+            .with_addressed_seats(&self.connection_manager, room_id);
         let mut turn_credentials_issued = 0_u64;
         let recipient_messages: Vec<_> = decision
             .members

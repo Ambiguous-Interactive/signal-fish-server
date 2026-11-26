@@ -7452,6 +7452,7 @@ mod tests {
                     peers: Vec::new(),
                     ice_servers: Vec::new(),
                     fallback: Transport::Relay,
+                    addressed_binary_peers: None,
                 })),
             ),
             (

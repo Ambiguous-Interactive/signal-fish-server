@@ -521,7 +521,7 @@ fn spec_models_both_negotiated_token_binding_client_envelopes() {
 #[test]
 fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     use signal_fish_server::protocol::{
-        DirectEndpoint, ServerMessage, SessionPlanPayload, Topology, Transport,
+        AddressedBinaryPeer, DirectEndpoint, ServerMessage, SessionPlanPayload, Topology, Transport,
     };
     use uuid::Uuid;
 
@@ -600,6 +600,12 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
             mapping_path(branch, &["properties", "generation", "$ref"]).and_then(Yaml::as_str),
             Some("#/components/schemas/SessionGeneration")
         );
+        assert!(!required.contains("addressed_binary_peers"));
+        assert_eq!(
+            mapping_path(branch, &["properties", "addressed_binary_peers", "$ref"])
+                .and_then(Yaml::as_str),
+            Some("#/components/schemas/AddressedBinaryPeers")
+        );
     }
 
     let direct_branch = branches
@@ -647,8 +653,9 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
         peers: Vec::new(),
         ice_servers: Vec::new(),
         fallback: Transport::Relay,
+        addressed_binary_peers: None,
     }));
-    let serialized = serde_json::to_value(message).expect("serialize Direct SessionPlan");
+    let mut serialized = serde_json::to_value(message).expect("serialize Direct SessionPlan");
     assert_eq!(serialized["type"], "SessionPlan");
     assert_eq!(serialized["data"]["topology"], "host");
     assert_eq!(serialized["data"]["transport"], "direct");
@@ -656,6 +663,20 @@ fn direct_session_plan_serialization_matches_the_executable_schema_branch() {
     assert_eq!(serialized["data"]["direct_endpoint"]["host"], "192.0.2.10");
     assert_eq!(serialized["data"]["direct_endpoint"]["port"], 7777);
     assert!(serialized["data"].get("ice_servers").is_none());
+    assert!(serialized["data"].get("addressed_binary_peers").is_none());
+    assert!(schema_shape_matches(root, schema, &serialized["data"]));
+
+    serialized["data"]["addressed_binary_peers"] = serde_json::to_value([AddressedBinaryPeer {
+        player_id: Uuid::from_u128(11),
+        epoch: 2,
+    }])
+    .expect("serialize addressed seat");
+    assert!(schema_shape_matches(root, schema, &serialized["data"]));
+    serialized["data"]["addressed_binary_peers"][0]
+        .as_object_mut()
+        .expect("addressed seat object")
+        .remove("epoch");
+    assert!(!schema_shape_matches(root, schema, &serialized["data"]));
 }
 
 #[test]
@@ -1130,6 +1151,44 @@ fn spec_models_disjoint_v2_and_v3_physical_binary_envelopes() {
         mapping_path(v3, &["properties", "epoch", "maximum"]).and_then(Yaml::as_integer),
         Some(u32::MAX.into())
     );
+}
+
+#[test]
+fn spec_models_the_addressed_binary_prefix_and_envelope() {
+    let text = spec_text();
+    let docs = Yaml::load_from_str(&text).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+    let message = mapping_path(root, &["components", "messages", "AddressedGameDataBinary"])
+        .expect("addressed binary physical message");
+    assert_eq!(
+        message
+            .as_mapping_get("x-addressed-prefix")
+            .and_then(Yaml::as_integer),
+        Some(1)
+    );
+    assert_eq!(
+        mapping_path(message, &["x-addressed-envelope", "$ref"]).and_then(Yaml::as_str),
+        Some("#/components/schemas/V3BinaryGameDataEnvelope")
+    );
+    let payload = outbound_schemas(root)
+        .into_iter()
+        .find_map(|(name, payload)| (name == "AddressedGameDataBinary").then_some(payload))
+        .expect("reachable addressed binary payload");
+    assert_eq!(
+        payload
+            .as_mapping_get("x-protocol-version")
+            .and_then(Yaml::as_integer),
+        Some(3)
+    );
+    assert_eq!(
+        payload.as_mapping_get("format").and_then(Yaml::as_str),
+        Some("binary")
+    );
+    assert!(!schema_shape_matches(
+        root,
+        payload,
+        &serde_json::json!({"type": "AddressedGameDataBinary", "data": {}})
+    ));
 }
 
 #[test]
@@ -1822,12 +1881,16 @@ fn outbound_schemas<'doc, 'input>(root: &'doc Yaml<'input>) -> Vec<(String, &'do
                 .as_mapping_get("x-rust-server-variant")
                 .and_then(Yaml::as_str)
             {
-                // Binary game data has two physical messages and one Rust variant.
-                assert_eq!(physical, "GameDataBinary");
-                let content_type = match message_ref {
-                    "#/components/messages/GameDataBinary" => "application/msgpack",
-                    "#/components/messages/V2RawGameDataBinary" => "application/octet-stream",
-                    _ => panic!("unexpected binary message {message_ref}"),
+                let content_type = match (message_ref, physical) {
+                    ("#/components/messages/GameDataBinary", "GameDataBinary") => {
+                        "application/msgpack"
+                    }
+                    ("#/components/messages/V2RawGameDataBinary", "GameDataBinary")
+                    | (
+                        "#/components/messages/AddressedGameDataBinary",
+                        "AddressedGameDataBinary",
+                    ) => "application/octet-stream",
+                    _ => panic!("unexpected physical message {message_ref} ({physical})"),
                 };
                 assert_eq!(
                     message.as_mapping_get("contentType").and_then(Yaml::as_str),
@@ -1973,7 +2036,9 @@ fn outbound_schema_accepts_canonical_server_samples() {
     let mut expected: BTreeSet<_> = enum_variants(&source, "ServerMessage")
         .into_iter()
         .collect();
-    expected.remove("GameDataBinary"); // Separate physical frame controls.
+    // These two variants use separate physical frame controls instead of JSON samples.
+    assert!(expected.remove("GameDataBinary"));
+    assert!(expected.remove("AddressedGameDataBinary"));
     assert_eq!(
         covered, expected,
         "canonical outbound sample inventory drifted"

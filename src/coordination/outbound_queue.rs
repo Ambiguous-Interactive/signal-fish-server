@@ -1158,6 +1158,11 @@ impl OutboundSender {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
 
+    pub(super) fn has_active_room_scope(&self, generation: u64, room_id: RoomId) -> bool {
+        let state = self.shared.state();
+        state.accepting() && scope_matches(&state, generation, Some(room_id))
+    }
+
     #[cfg(test)]
     pub fn is_closed(&self) -> bool {
         !self.shared.state().accepting()

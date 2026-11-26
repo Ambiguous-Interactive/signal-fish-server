@@ -712,7 +712,10 @@ impl EnhancedGameServer {
                             .iter()
                             .map(|member| member.player_id)
                             .collect();
-                        let projection = resolved.decision.projection();
+                        let projection = resolved
+                            .decision
+                            .projection()
+                            .with_addressed_seats(&server.connection_manager, &room_id);
                         let mut turn_credentials_issued = 0_u64;
                         let mut joiner_has_plan = false;
                         let recipient_messages: Vec<RoomRecipientMessages> = resolved

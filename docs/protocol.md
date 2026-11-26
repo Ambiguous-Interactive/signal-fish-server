@@ -887,6 +887,16 @@ IDs may be sparse because other peers see only their own addressed deliveries.
 They do not contribute to `DeliveryReport` broadcast gap ranges, the
 broadcast membership baseline, or the broadcast terminal watermark.
 
+Finalized `SessionPlan` messages to seated clients that negotiated this
+capability carry `addressed_binary_peers`. Each entry has `player_id` and
+`epoch`. The list contains other currently routed seats that negotiated the
+same binary format and the capability. UUIDs are unique and sorted. An empty
+list means no eligible seat. Older or unnegotiated connections omit the field.
+
+This list is independent of P2P `peers`. It is a snapshot for the current
+plan. Retire an entry when the seat leaves or reconnects. Use the next plan
+to discover its new route. Every addressed send passes current seat checks.
+
 Both lanes use the reliable gameplay queue. An addressed message cannot pass
 an earlier message from the same sender to the same recipient. Queue
 pressure follows the same timeout and recipient-close rules as broadcast.

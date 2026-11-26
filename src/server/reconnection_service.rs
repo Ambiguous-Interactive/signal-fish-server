@@ -2414,7 +2414,10 @@ impl EnhancedGameServer {
                             .decision
                             .uses_webrtc_signaling()
                             .then(|| jiff::Timestamp::now().as_second());
-                        let projection = resolved.decision.projection();
+                        let projection = resolved.decision.projection().with_addressed_seats(
+                            &server_for_publication.connection_manager,
+                            &room_id_for_publication,
+                        );
                         let mut turn_credentials_issued = 0_u64;
                         let mut reconnector_has_plan = false;
                         let recipient_messages: Vec<_> = resolved

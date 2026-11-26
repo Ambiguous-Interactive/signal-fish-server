@@ -995,6 +995,16 @@ impl DeliverySender {
         Some((sender.supports_v3(), sender.game_data_format()))
     }
 
+    /// Whether the room transition for this physical queue generation committed.
+    pub(crate) fn has_active_room_scope(&self, room_id: RoomId) -> bool {
+        match &self.0 {
+            DeliverySenderKind::Classified { sender, generation } => {
+                sender.has_active_room_scope(*generation, room_id)
+            }
+            DeliverySenderKind::Legacy(_) => false,
+        }
+    }
+
     /// Whether two handles address the same physical queue generation.
     pub(crate) fn same_channel(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
