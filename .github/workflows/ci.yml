@@ -310,52 +310,6 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: bash scripts/check-no-panics.sh
 
-  refused-start-platforms:
-    name: Refused StartGame qualification (${{ matrix.os }})
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/1650-refused-start-allocation'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: 1.94.0
-      - uses: Swatinem/rust-cache@v2.9.3
-        with:
-          save-if: "false"
-      - uses: taiki-e/install-action@v2.90.6
-        with:
-          tool: cargo-nextest@0.9.149
-      - name: Run exact allocation profiles
-        run: >-
-          cargo nextest run --profile ci --locked --all-features --cargo-profile ci
-          --test session_plan_allocations --test-threads 1 --no-tests fail --success-output immediate
-          -E 'test(=unready_start_skips_player_metadata) | test(=runtime_registry_warmup_retains_exact_spawn_cost)'
-
-  refused-start-legacy-trace:
-    name: Refused StartGame legacy trace
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'test/1650-refused-start-allocation'
-    runs-on: macos-26
-    timeout-minutes: 15
-    steps:
-      - name: Checkout the trace driver
-        uses: actions/checkout@v7.0.1
-      - name: Checkout the pinned legacy source
-        uses: actions/checkout@v7.0.1
-        with:
-          ref: 770c674e817fb3dbc35027d4603881140c63adf6
-          path: trace-source
-      - name: Install pinned Rust
-        uses: dtolnay/rust-toolchain@v1
-        with:
-          toolchain: 1.94.0
-      - name: Collect legacy cells and allocation sites
-        run: python3 .github/scripts/trace-refused-start.py trace-source
-
   nextest:
     name: Nextest (${{ matrix.os }})
     needs: [verified-head-guard, quick-check, ci-matrix]

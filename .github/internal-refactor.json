@@ -1,7 +1,12 @@
 {
   "base": "eed6020717fd9bf2a30d13364d3a4692483cc7e9",
-  "reason": "Warm the exact close watch only in the allocation-tracking fixture. The shipped runtime, public protocol, and client behavior are unchanged.",
+  "reason": "Warm the exact close watch only in the allocation-tracking fixture. Exclude its dev-only helper from the library mutation inventory. The shipped runtime, public protocol, and client behavior are unchanged.",
   "files": [
+    {
+      "path": ".cargo/mutants.toml",
+      "before": "0ce40f1bf44369ed96f9a1dfb6e1c1ee833c614b",
+      "after": "7526f6448cb34c774850058811037b85168dbfd0"
+    },
     {
       "path": "src/coordination/mod.rs",
       "before": "ec45374237d5b9a363009c9f57b9a10ad22a885c",
