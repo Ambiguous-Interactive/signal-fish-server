@@ -63,11 +63,11 @@ function Get-InternalRefactorExemptions {
     if ($Mode -eq "Staged") {
         $indexEntry = Invoke-Native -FileName "git" -Arguments @("ls-files", "--stage", "-z", "--", $declarationPath)
         if ($indexEntry.ExitCode -ne 0) { throw "Cannot inspect declaration file mode" }
-        if ($indexEntry.Stdout.Length -gt 0 -and $indexEntry.Stdout -cnotmatch '^100(644|755) [0-9a-f]{40} 0\t\.github/internal-refactor\.json\x00$') {
+        if ($indexEntry.Stdout.Length -eq 0) { return ,([string[]]@()) }
+        if ($indexEntry.Stdout -cnotmatch '^100(644|755) ([0-9a-f]{40}) 0\t\.github/internal-refactor\.json\x00$') {
             throw "Internal-refactor declaration is not one regular staged file"
         }
-        $blob = Invoke-Native -FileName "git" -Arguments @("show", ":$declarationPath")
-        if ($blob.ExitCode -ne 0) { return ,([string[]]@()) }
+        $blob = Invoke-Git -Arguments @("cat-file", "blob", $Matches[2])
         $text = $blob.Stdout
     } else {
         $declarationItem = Get-Item -LiteralPath $declarationPath -Force -ErrorAction SilentlyContinue
@@ -121,11 +121,39 @@ function Get-InternalRefactorExemptions {
         ConvertFrom-RefactorBlobList -Result $result -Pattern $Pattern
     }
     $treePattern = '^100(644|755) blob ([0-9a-f]{40})\t(.+)$'
-    # Read the immutable base tree while Git validates its ancestry.
     $beforeArguments = @("ls-tree", "-z", $declaration.base, "--") + $declaredPaths
-    $pendingBefore = Start-PendingGit -GitArguments $beforeArguments
+    $ancestorArguments = @("merge-base", "--is-ancestor", $declaration.base, "HEAD")
+    $pendingBefore = $null
+    $pendingAncestor = $null
     try {
-        $ancestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, "HEAD")
+        # The current content reads do not depend on the immutable base tree.
+        $pendingBefore = Start-PendingGit -GitArguments $beforeArguments
+        $pendingAncestor = Start-PendingGit -GitArguments $ancestorArguments
+        if ($Mode -eq "Staged") {
+            $afterBlobs = Read-RefactorBlobs @("ls-files", "--stage", "-z") '^100(644|755) ([0-9a-f]{40}) 0\t(.+)$'
+        } else {
+            $afterBlobs = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+            $presentPaths = [string[]]@($declaredPaths | Where-Object { Test-Path -LiteralPath $_ })
+            foreach ($path in $presentPaths) {
+                $item = Get-Item -LiteralPath $path -Force
+                if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+                    throw "Refactor current path is not a regular file"
+                }
+            }
+            if ($presentPaths.Count -gt 0) {
+                $hashes = Invoke-Native -FileName "git" -Arguments (@("hash-object", "--") + $presentPaths)
+                if ($hashes.ExitCode -ne 0) { throw "Cannot hash current refactor files" }
+                $values = [string[]]@($hashes.Stdout.TrimEnd().Split("`n"))
+                if ($values.Count -ne $presentPaths.Count) { throw "Missing refactor file hashes" }
+                for ($index = 0; $index -lt $presentPaths.Count; $index++) {
+                    $afterBlobs.Add($presentPaths[$index], $values[$index].TrimEnd("`r"))
+                }
+            }
+        }
+
+        $pending = $pendingAncestor
+        $pendingAncestor = $null
+        $ancestor = Wait-PendingGit -Pending $pending -GitArguments $ancestorArguments -AllowFailure
         if ($ancestor.ExitCode -ne 0) { throw "Internal-refactor base is not an ancestor of HEAD" }
         if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
             $baseAncestor = Invoke-Native -FileName "git" -Arguments @("merge-base", "--is-ancestor", $declaration.base, $comparisonBase)
@@ -135,33 +163,16 @@ function Get-InternalRefactorExemptions {
         $pendingBefore = $null
         $beforeResult = Wait-PendingGit -Pending $pending -GitArguments $beforeArguments -AllowFailure
     } finally {
-        if ($null -ne $pendingBefore) { Remove-PendingGit -Pending $pendingBefore }
+        try {
+            if ($null -ne $pendingBefore) { Remove-PendingGit -Pending $pendingBefore }
+        } finally {
+            if ($null -ne $pendingAncestor) { Remove-PendingGit -Pending $pendingAncestor }
+        }
     }
     $beforeBlobs = ConvertFrom-RefactorBlobList -Result $beforeResult -Pattern $treePattern
     $comparisonBlobs = if ($null -ne $comparisonBase -and $comparisonBase -cne $declaration.base) {
         Read-RefactorBlobs @("ls-tree", "-z", $comparisonBase) $treePattern
     } else { $null }
-    if ($Mode -eq "Staged") {
-        $afterBlobs = Read-RefactorBlobs @("ls-files", "--stage", "-z") '^100(644|755) ([0-9a-f]{40}) 0\t(.+)$'
-    } else {
-        $afterBlobs = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-        $presentPaths = [string[]]@($declaredPaths | Where-Object { Test-Path -LiteralPath $_ })
-        foreach ($path in $presentPaths) {
-            $item = Get-Item -LiteralPath $path -Force
-            if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-                throw "Refactor current path is not a regular file"
-            }
-        }
-        if ($presentPaths.Count -gt 0) {
-            $hashes = Invoke-Native -FileName "git" -Arguments (@("hash-object", "--") + $presentPaths)
-            if ($hashes.ExitCode -ne 0) { throw "Cannot hash current refactor files" }
-            $values = [string[]]@($hashes.Stdout.TrimEnd().Split("`n"))
-            if ($values.Count -ne $presentPaths.Count) { throw "Missing refactor file hashes" }
-            for ($index = 0; $index -lt $presentPaths.Count; $index++) {
-                $afterBlobs.Add($presentPaths[$index], $values[$index].TrimEnd("`r"))
-            }
-        }
-    }
     $committedBlobs = if ($null -ne $comparisonHead) {
         Read-RefactorBlobs @("ls-tree", "-z", $comparisonHead) $treePattern
     } else { $null }

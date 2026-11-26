@@ -5,7 +5,7 @@
 # remaining acceptance: representative macOS and Windows measurements).
 #
 # Zero standing allocation: this workflow has NO schedule trigger. It runs
-# manually (workflow_dispatch) and on pull requests that touch this file only,
+# manually (workflow_dispatch) and on pull requests that change its definition or fixture,
 # so a baseline refresh costs one short, three-OS job set per deliberate run.
 # The measured wall-clock numbers are evidence for docs/issue records — never
 # a hosted pass/fail threshold (per the no-flaky doctrine, wall-clock totals
@@ -28,6 +28,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/hook-baselines.yml"
+      - ".github/test-fixtures/profile-internal-refactor.ps1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.event_name == 'push' && github.ref || github.run_id }}
@@ -59,6 +60,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Record runner provenance
         shell: pwsh
@@ -133,6 +136,14 @@ jobs:
           $median = $sorted[$idx]
           "staged_totals=" + ($totals -join ",") | Out-File -Append $Env:GITHUB_ENV
           "staged_median_warm=$median" | Out-File -Append $Env:GITHUB_ENV
+
+      - name: Verify exact-blob policy
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File .github/test-fixtures/test-internal-refactor.ps1 -RepositoryRoot .
+
+      - name: Profile the exact-blob refactor workload
+        shell: pwsh
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File .github/test-fixtures/profile-internal-refactor.ps1 -Fetch
 
       - name: Report baseline summary
         if: always()
