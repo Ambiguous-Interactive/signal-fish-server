@@ -520,14 +520,31 @@ mod handler_honesty {
         join(target, "target").await;
         assert_eq!(server.get_client_room(&target).await, Some(room));
         for receiver in [&mut source_rx, &mut target_rx, &mut bystander_rx] {
-            while receiver.try_recv().is_ok() {}
+            loop {
+                let received = receiver.try_recv();
+                match received {
+                    Ok(message) => assert!(
+                        matches!(
+                            message.as_ref(),
+                            ServerMessage::RoomLeft
+                                | ServerMessage::RoomJoined(_)
+                                | ServerMessage::PlayerLeft { .. }
+                                | ServerMessage::PlayerJoined { .. }
+                                | ServerMessage::LobbyStateChanged { .. }
+                        ),
+                        "unexpected rejoin traffic: {message:?}"
+                    ),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        panic!("rejoin closed the queue")
+                    }
+                }
+            }
         }
         drop(order);
         stale.await;
-        assert!(matches!(
-            target_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        let pending = target_rx.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
 
         for payload in 1..=16 {
             send(payload).await;
@@ -543,10 +560,8 @@ mod handler_honesty {
         );
         tokio::pin!(broadcast);
         assert!(futures_util::poll!(&mut broadcast).is_pending());
-        assert!(matches!(
-            bystander_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        let pending = bystander_rx.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
 
         tokio::join!(parked, broadcast, async {
             for n in 1..=17_u8 {
@@ -587,10 +602,8 @@ mod handler_honesty {
                 ..
             }
         ));
-        assert!(matches!(
-            bystander_rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Empty)
-        ));
+        let pending = bystander_rx.try_recv();
+        assert!(matches!(pending, Err(mpsc::error::TryRecvError::Empty)));
     }
 
     /// #826: The router has already refreshed activity when JSON relay
