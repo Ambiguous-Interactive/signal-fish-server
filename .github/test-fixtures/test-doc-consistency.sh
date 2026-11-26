@@ -138,6 +138,14 @@ INTERNAL_PATHS=(
     "clients/native/tests/interop_e2e.rs"
     "clients/fortress/tests/multiprocess.rs"
     "clients/fortress-wasm/tests/deep/fixtures/control.json"
+    # Standalone fixture lockfiles
+    "clients/native/Cargo.lock"
+    "clients/fortress/Cargo.lock"
+    "clients/fortress-wasm/Cargo.lock"
+    "fuzz/Cargo.lock"
+    "third_party/rtc-sctp/Cargo.lock"
+    "third_party/rtc/Cargo.lock"
+    "third_party/webrtc/Cargo.lock"
     # Standalone compatibility fixture source roots (publish = false)
     "clients/fortress/src/main.rs"
     "clients/fortress/src/nested/peer.rs"
@@ -255,6 +263,8 @@ NON_INTERNAL_PATHS=(
     "third_party/webrtc/src_like/queue_test.rs"
     "third_party/webrtc/Cargo.toml"
     "third_party/rtc-other/src/queue_test.rs"
+    "third_party/rtc-other/Cargo.lock"
+    "third_party/webrtc/Cargo.lock.bak"
     # Production source code
     "src/main.rs"
     "clients/native/src/client.rs"

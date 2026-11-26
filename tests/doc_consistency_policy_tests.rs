@@ -179,6 +179,11 @@ fn test_ci_dependency_detection_classifies_cargo_npm_and_mixed_changes() {
         ("encoding-plus-server", "Cargo.lock\nbenches/encoding/support/model.rs\nsrc/server.rs\n", false),
         ("encoding-near-prefix", "Cargo.lock\nbenches/encoding-extra/runtime.rs\n", false),
         ("encoding-uppercase", "Cargo.lock\nbenches/Encoding/support/model.rs\n", false),
+        ("rtc-sctp-lockfile", "third_party/rtc-sctp/Cargo.lock\n", true),
+        ("rtc-lockfile", "third_party/rtc/Cargo.lock\n", true),
+        ("webrtc-lockfile", "third_party/webrtc/Cargo.lock\n", true),
+        ("vendored-manifest", "third_party/webrtc/Cargo.lock\nthird_party/webrtc/Cargo.toml\n", false),
+        ("vendored-lockfile-lookalike", "third_party/rtc-other/Cargo.lock\n", false),
         ("npm-root", "package.json\npackage-lock.json\n", true),
         (
             "npm-browser",

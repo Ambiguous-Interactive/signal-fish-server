@@ -95,6 +95,8 @@ The following paths are classified as internal (no CHANGELOG entry required):
 - **Dev/build directories:** `scripts/`, `tests/`, `test-fixtures/`, `target/`, `progress/`, `tools/repo-checks/`
 - **Extracted Rust tests:** `*_tests.rs`, `*_test.rs`, and nested `tests.rs`
   under `src/` or `clients/native/src/`; these files contain test code only.
+- **Fixture lockfiles:** `Cargo.lock` in `fuzz`, `clients/native`, `clients/fortress`,
+  `clients/fortress-wasm`, `third_party/rtc-sctp`, `third_party/rtc`, and `third_party/webrtc`.
 - **Standalone files:** `Cargo.lock`, root tooling `package.json`/`package-lock.json`,
   `PLAN.md`, `AGENTS.md`, `pre-push.txt`, `logs_*.zip`
 - **Lint/tool configs:** `.rumdl.toml`, `.rumdl-version`, legacy `.markdownlint*`,
