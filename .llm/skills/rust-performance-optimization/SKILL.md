@@ -79,6 +79,10 @@ let name: Arc<str> = "room_alpha".into();  // One fewer indirection vs Arc<Strin
 Use `tracing`/`log` macros (format lazily) instead of `format!()` in log calls.
 See [Observability And Logging](../observability-and-logging/SKILL.md).
 
+For exact allocation tests on a Tokio runtime, let startup tasks run before
+opening the measurement region. When the clock is paused, check that it did
+not advance during the region. Tokio can advance a paused clock while idle.
+
 ---
 
 ## Hashing Alternatives

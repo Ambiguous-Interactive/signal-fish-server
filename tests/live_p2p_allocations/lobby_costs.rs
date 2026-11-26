@@ -33,10 +33,12 @@ async fn server() -> Arc<EnhancedGameServer> {
 
 pub(crate) fn unready_start_skips_player_metadata() {
     allocation_harness::block_on(async {
-        // Dashboard refresh can otherwise run inside the measured StartGame await.
+        // Start the periodic workers on paused time before measuring refusals.
         tokio::time::pause();
         allocation_harness::warm_current_thread_runtime().await;
         let server = server().await;
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
         let mut receivers = Vec::new();
         for index in 1..=2 {
             let id = Uuid::from_u128(index);
@@ -126,9 +128,15 @@ async fn refused_start_cost(
     room: Uuid,
     receivers: &mut [tokio::sync::mpsc::Receiver<Arc<ServerMessage>>],
 ) -> stats_alloc::Stats {
+    let before = tokio::time::Instant::now();
     let region = stats_alloc::Region::new(ALLOCATOR);
     server.handle_start_game(&actor).await;
     let stats = region.change();
+    assert_eq!(
+        tokio::time::Instant::now(),
+        before,
+        "refused StartGame must finish before paused time advances"
+    );
     let reply = receivers[0].try_recv().unwrap();
     assert!(
         matches!(
