@@ -95,7 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Restore the previous room, relay state, and coordinator route when `assign_client_to_room` cannot
-  publish the assignment (#1826).
+  publish an assignment, without reusing a relay stamp (#1826).
 - Reject addressed binary game data to a target without a committed room route and return an invalid-input error (#1823).
 - Upgrade `url` to 2.5.9 across every audited dependency graph.
 - Accept null token-binding fingerprints in the protocol schema and remove a misleading nullable shutdown retry hint

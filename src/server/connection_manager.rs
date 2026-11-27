@@ -85,6 +85,10 @@ pub(crate) struct ClientConnection {
     /// A later transition supersedes it; replacements are collision-resistant
     /// UUIDs explicitly distinct from the current and retained-status tokens.
     pub prior_membership_generation: Option<Uuid>,
+    /// Epoch of an `assign_client_to_room` transition that is prepared but not
+    /// published. Relay stamp allocation refuses while set, so a failed
+    /// publication cannot reuse a stamp that reached recipients.
+    pub pending_room_assignment: Option<u32>,
     /// Last relay sequence number stamped on this client's outbound game data
     /// (protocol v3): the per-(sender, room) counter behind
     /// [`ServerMessage::GameData::seq`](crate::protocol::ServerMessage). `0`
@@ -141,6 +145,7 @@ struct RoomAssignmentSnapshot {
     game_data_epoch: u32,
     membership_generation: Uuid,
     prior_membership_generation: Option<Uuid>,
+    pending_room_assignment: Option<u32>,
     delivery: ClientDeliveryHandle,
 }
 
@@ -152,6 +157,7 @@ impl RoomAssignmentSnapshot {
             game_data_epoch: client.game_data_epoch,
             membership_generation: client.membership_generation,
             prior_membership_generation: client.prior_membership_generation,
+            pending_room_assignment: client.pending_room_assignment,
             delivery: client.delivery_handle(),
         }
     }
@@ -170,9 +176,9 @@ struct PreparedRoomAssignment {
 /// Restore an unpublished [`PreparedRoomAssignment`] on error or cancellation.
 ///
 /// Local state is restored before the guard returns, so a canceled caller
-/// never observes ghost membership. The prior coordinator route is then
-/// republished under the connection lifecycle gate. The assignment gate stays
-/// held across that compensation, so a newer assignment cannot race it.
+/// never observes ghost membership. An owned task then republishes the prior
+/// coordinator route after taking the lifecycle gate and the assignment gate,
+/// in that order, so a newer assignment cannot race or deadlock with it.
 struct RoomAssignmentRollback {
     manager: Arc<ConnectionManager>,
     player_id: PlayerId,
@@ -184,38 +190,9 @@ struct RoomAssignmentRollback {
 
 impl RoomAssignmentRollback {
     fn commit(mut self) {
-        self.prepared = None;
-    }
-
-    /// Restore local state and the prior route before returning to the caller.
-    /// The caller still holds the lifecycle gate, so compensation must not
-    /// acquire it.
-    async fn rollback_after_error(mut self) {
-        let Some(prepared) = self.prepared.take() else {
-            return;
-        };
-        let _gate = self.gate.take();
-        let previous_room = prepared.previous.room_id;
-        let previous_delivery = prepared.previous.delivery.clone();
-        if !self
-            .manager
-            .restore_uncommitted_room_assignment(&self.player_id, prepared)
-        {
-            return;
-        }
-        if let Err(err) = self
-            .manager
-            .message_coordinator
-            .register_local_client(self.player_id, previous_room, previous_delivery)
-            .await
-        {
-            warn!(
-                player_id = %self.player_id,
-                %err,
-                "Failed to restore the prior coordinator route after a room assignment error"
-            );
+        if let Some(prepared) = self.prepared.take() {
             self.manager
-                .request_close_for(&self.player_id, CloseReason::Unregistered);
+                .commit_prepared_room_assignment(&self.player_id, prepared.epoch);
         }
     }
 }
@@ -228,6 +205,12 @@ impl Drop for RoomAssignmentRollback {
         let Some(gate) = self.gate.take() else {
             return;
         };
+        if !self
+            .manager
+            .lifecycle_matches(&self.player_id, &self.lifecycle)
+        {
+            return;
+        }
         let previous = prepared.previous.clone();
         let previous_room = previous.room_id;
         let previous_delivery = previous.delivery.clone();
@@ -841,6 +824,7 @@ impl ConnectionManager {
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
+            pending_room_assignment: None,
             game_data_seq: 0,
             game_data_epoch: 0,
             error_reply_gate: std::sync::Mutex::new(self.new_error_reply_gate()),
@@ -994,6 +978,7 @@ impl ConnectionManager {
             transport_status: None,
             membership_generation: Uuid::nil(),
             prior_membership_generation: None,
+            pending_room_assignment: None,
             game_data_seq: 0,
             game_data_epoch: 0,
             error_reply_gate: std::sync::Mutex::new(self.new_error_reply_gate()),
@@ -1074,7 +1059,6 @@ impl ConnectionManager {
                 %err,
                 "Failed to update coordinator membership when assigning client to room"
             );
-            rollback.rollback_after_error().await;
             return;
         }
         rollback.commit();
@@ -1090,6 +1074,9 @@ impl ConnectionManager {
         room_id: RoomId,
     ) -> Option<(ClientDeliveryHandle, RelayStamp)> {
         let mut client = self.clients.get_mut(player_id)?;
+        // Joins publish through the coordinator's atomic initial-message path,
+        // so they never retain a pending assignment marker.
+        client.pending_room_assignment = None;
         Some(Self::prepare_client_to_room_locked(
             player_id,
             room_id,
@@ -1109,6 +1096,7 @@ impl ConnectionManager {
         let previous = RoomAssignmentSnapshot::capture(&client);
         let (delivery, stamp) =
             Self::prepare_client_to_room_locked(player_id, room_id, &mut client);
+        client.pending_room_assignment = Some(stamp.epoch);
         let prepared = PreparedRoomAssignment {
             room_id,
             epoch: stamp.epoch,
@@ -1164,6 +1152,7 @@ impl ConnectionManager {
         if client.room_id != Some(prepared.room_id)
             || client.game_data_epoch != prepared.epoch
             || client.membership_generation != prepared.membership_generation
+            || client.pending_room_assignment != Some(prepared.epoch)
         {
             return false;
         }
@@ -1172,8 +1161,19 @@ impl ConnectionManager {
         client.game_data_epoch = prepared.previous.game_data_epoch;
         client.membership_generation = prepared.previous.membership_generation;
         client.prior_membership_generation = prepared.previous.prior_membership_generation;
+        client.pending_room_assignment = prepared.previous.pending_room_assignment;
         client.sender = prepared.previous.delivery.sender;
         true
+    }
+
+    /// Mark a prepared room assignment as published so relay stamps may
+    /// advance. Only the expected epoch clears the marker.
+    fn commit_prepared_room_assignment(&self, player_id: &PlayerId, expected_epoch: u32) {
+        if let Some(mut client) = self.clients.get_mut(player_id) {
+            if client.pending_room_assignment == Some(expected_epoch) {
+                client.pending_room_assignment = None;
+            }
+        }
     }
 
     /// Whether a canceled assignment's compensation still owns the restored
@@ -1521,6 +1521,7 @@ impl ConnectionManager {
                 epoch: client.game_data_epoch,
             };
             client.room_id = None;
+            client.pending_room_assignment = None;
             Self::advance_membership_generation(&mut client);
             // Membership ended: the next room (same or different) starts a
             // fresh stamp stream (see the `game_data_seq` field doc).
@@ -1613,6 +1614,7 @@ impl ConnectionManager {
     ) -> Option<RelayStamp> {
         let mut client = self.clients.get_mut(player_id)?;
         if client.room_id != Some(*expected_room)
+            || client.pending_room_assignment.is_some()
             || source_lifecycle.is_some_and(|source| !Arc::ptr_eq(source, &client.lifecycle))
         {
             return None;
@@ -1878,6 +1880,7 @@ impl ConnectionManager {
             transport_status: old_connection.transport_status,
             membership_generation,
             prior_membership_generation: Some(prior_membership_generation),
+            pending_room_assignment: None,
             // Restart-on-rejoin: a reconnecting sender's relay stamp
             // stream starts over at 1; recipients treat its
             // `PlayerReconnected` as a seq reset (field doc above).
@@ -1952,6 +1955,7 @@ impl ConnectionManager {
             transport_status: reassigned_connection.transport_status,
             membership_generation,
             prior_membership_generation: None,
+            pending_room_assignment: None,
             game_data_seq: 0,
             game_data_epoch: 0,
             error_reply_gate: reassigned_connection.error_reply_gate,
