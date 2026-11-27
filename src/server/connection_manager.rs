@@ -47,6 +47,10 @@ pub(crate) struct ClientConnection {
     /// disconnects, server-side eviction). Paired with `sender`: together they
     /// form the connection's [`ClientDeliveryHandle`].
     pub close: ConnectionCloseSignal,
+    /// Serializes room-assignment publication and its compensating rollback.
+    /// Held through the coordinator await so a canceled caller cannot race a
+    /// newer assignment against the restored prior route.
+    pub assignment_gate: Arc<tokio::sync::Mutex<()>>,
     pub client_addr: SocketAddr,
     pub game_data_format: GameDataEncoding,
     pub app_context: Option<AppContext>,
@@ -137,7 +141,7 @@ struct RoomAssignmentSnapshot {
     game_data_epoch: u32,
     membership_generation: Uuid,
     prior_membership_generation: Option<Uuid>,
-    sender: DeliverySender,
+    delivery: ClientDeliveryHandle,
 }
 
 impl RoomAssignmentSnapshot {
@@ -148,7 +152,7 @@ impl RoomAssignmentSnapshot {
             game_data_epoch: client.game_data_epoch,
             membership_generation: client.membership_generation,
             prior_membership_generation: client.prior_membership_generation,
-            sender: client.sender.clone(),
+            delivery: client.delivery_handle(),
         }
     }
 }
@@ -165,35 +169,100 @@ struct PreparedRoomAssignment {
 
 /// Restore an unpublished [`PreparedRoomAssignment`] on error or cancellation.
 ///
-/// The guard restores local state only. A coordinator that failed after its
-/// effect retains its own route; that adapter owns the route cleanup, matching
-/// the admission rollback contract.
-struct RoomAssignmentRollback<'a> {
-    manager: &'a ConnectionManager,
+/// Local state is restored before the guard returns, so a canceled caller
+/// never observes ghost membership. The prior coordinator route is then
+/// republished under the connection lifecycle gate. The assignment gate stays
+/// held across that compensation, so a newer assignment cannot race it.
+struct RoomAssignmentRollback {
+    manager: Arc<ConnectionManager>,
     player_id: PlayerId,
+    lifecycle: Arc<ClientLifecycle>,
     prepared: Option<PreparedRoomAssignment>,
+    gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
 
-impl RoomAssignmentRollback<'_> {
+impl RoomAssignmentRollback {
     fn commit(mut self) {
         self.prepared = None;
     }
-}
 
-impl Drop for RoomAssignmentRollback<'_> {
-    fn drop(&mut self) {
+    /// Restore local state and the prior route before returning to the caller.
+    /// The caller still holds the lifecycle gate, so compensation must not
+    /// acquire it.
+    async fn rollback_after_error(mut self) {
         let Some(prepared) = self.prepared.take() else {
             return;
         };
+        let _gate = self.gate.take();
+        let previous_room = prepared.previous.room_id;
+        let previous_delivery = prepared.previous.delivery.clone();
         if !self
             .manager
             .restore_uncommitted_room_assignment(&self.player_id, prepared)
         {
+            return;
+        }
+        if let Err(err) = self
+            .manager
+            .message_coordinator
+            .register_local_client(self.player_id, previous_room, previous_delivery)
+            .await
+        {
             warn!(
                 player_id = %self.player_id,
-                "Failed to restore room assignment after an uncommitted publication"
+                %err,
+                "Failed to restore the prior coordinator route after a room assignment error"
             );
+            self.manager
+                .request_close_for(&self.player_id, CloseReason::Unregistered);
         }
+    }
+}
+
+impl Drop for RoomAssignmentRollback {
+    fn drop(&mut self) {
+        let Some(prepared) = self.prepared.take() else {
+            return;
+        };
+        let Some(gate) = self.gate.take() else {
+            return;
+        };
+        let previous_room = prepared.previous.room_id;
+        let previous_delivery = prepared.previous.delivery.clone();
+        if !self
+            .manager
+            .restore_uncommitted_room_assignment(&self.player_id, prepared)
+        {
+            return;
+        }
+        // Cancellation drops the caller's lifecycle guard after this future.
+        // Own the compensation so the route restore cannot be stranded, and
+        // keep the assignment gate until it finishes.
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let manager = Arc::clone(&self.manager);
+        let player_id = self.player_id;
+        let lifecycle = Arc::clone(&self.lifecycle);
+        runtime.spawn(async move {
+            let _gate = gate;
+            let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            if !manager.lifecycle_matches(&player_id, &lifecycle) {
+                return;
+            }
+            if let Err(err) = manager
+                .message_coordinator
+                .register_local_client(player_id, previous_room, previous_delivery)
+                .await
+            {
+                warn!(
+                    %player_id,
+                    %err,
+                    "Failed to restore the prior coordinator route after a canceled room assignment"
+                );
+                manager.request_close_for(&player_id, CloseReason::Unregistered);
+            }
+        });
     }
 }
 
@@ -746,6 +815,7 @@ impl ConnectionManager {
             last_heartbeat_update: None,
             sender: sender.clone(),
             close: close.clone(),
+            assignment_gate: Arc::new(tokio::sync::Mutex::new(())),
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_context: None,
@@ -898,6 +968,7 @@ impl ConnectionManager {
             last_heartbeat_update: None,
             sender: sender.clone(),
             close: close.clone(),
+            assignment_gate: Arc::new(tokio::sync::Mutex::new(())),
             client_addr,
             game_data_format: GameDataEncoding::Json,
             app_context: None,
@@ -945,19 +1016,36 @@ impl ConnectionManager {
     /// Assign a connected client to a room and publish its coordinator route.
     ///
     /// The local room transition is prepared before the coordinator call. If
-    /// that call fails or the caller is canceled, the drop guard restores the
-    /// exact previous room, relay stamp, membership generation and sender
-    /// generation, so no ghost membership survives.
-    pub async fn assign_client_to_room(&self, player_id: &PlayerId, room_id: RoomId) {
+    /// that call fails or the caller is canceled, the rollback restores the
+    /// exact previous room, relay stamp, membership generation, sender
+    /// generation and coordinator route, so no ghost membership survives.
+    pub async fn assign_client_to_room(self: &Arc<Self>, player_id: &PlayerId, room_id: RoomId) {
+        let Some(lifecycle) = self.client_lifecycle(player_id) else {
+            return;
+        };
+        let Some(gate) = self
+            .clients
+            .get(player_id)
+            .map(|client| Arc::clone(&client.assignment_gate))
+        else {
+            return;
+        };
+        let gate = gate.lock_owned().await;
+        // A removal or reconnect identity swap may win before the gate lands.
+        if !self.lifecycle_matches(player_id, &lifecycle) {
+            return;
+        }
         let Some((delivery, _stamp, prepared)) =
             self.prepare_client_to_room_with_rollback(player_id, room_id)
         else {
             return;
         };
         let rollback = RoomAssignmentRollback {
-            manager: self,
+            manager: Arc::clone(self),
             player_id: *player_id,
+            lifecycle,
             prepared: Some(prepared),
+            gate: Some(gate),
         };
         if let Err(err) = self
             .message_coordinator
@@ -970,6 +1058,7 @@ impl ConnectionManager {
                 %err,
                 "Failed to update coordinator membership when assigning client to room"
             );
+            rollback.rollback_after_error().await;
             return;
         }
         rollback.commit();
@@ -1067,7 +1156,7 @@ impl ConnectionManager {
         client.game_data_epoch = prepared.previous.game_data_epoch;
         client.membership_generation = prepared.previous.membership_generation;
         client.prior_membership_generation = prepared.previous.prior_membership_generation;
-        client.sender = prepared.previous.sender;
+        client.sender = prepared.previous.delivery.sender;
         true
     }
 
@@ -1740,6 +1829,7 @@ impl ConnectionManager {
             last_heartbeat_update: None, // Reset on reconnection, will update immediately
             sender: delivery.sender.clone(),
             close: delivery.close.clone(),
+            assignment_gate: Arc::clone(&old_connection.assignment_gate),
             client_addr: old_connection.client_addr,
             game_data_format: old_connection.game_data_format,
             app_context: old_connection.app_context,
@@ -1817,6 +1907,7 @@ impl ConnectionManager {
             last_heartbeat_update: None,
             sender: delivery.sender.clone(),
             close: delivery.close.clone(),
+            assignment_gate: Arc::clone(&reassigned_connection.assignment_gate),
             client_addr: reassigned_connection.client_addr,
             game_data_format: reassigned_connection.game_data_format,
             app_context: reassigned_connection.app_context,

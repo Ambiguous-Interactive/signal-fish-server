@@ -1874,14 +1874,14 @@ async fn stale_terminal_unroute_preserves_new_room_route() {
         Duration::from_secs(1),
         Arc::clone(&metrics),
     ));
-    let connections = ConnectionManager::new(
+    let connections = Arc::new(ConnectionManager::new(
         usize::MAX,
         8,
         metrics,
         coordinator.clone(),
         false,
         (u32::MAX, Duration::from_secs(60)),
-    );
+    ));
     let player_id = PlayerId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0023);
     let room_a = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0024);
     let room_b = RoomId::from_u128(0x660B_70BA_DA11_4CE1_8168_DA1A_D311_0025);
