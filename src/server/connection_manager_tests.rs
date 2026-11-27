@@ -807,6 +807,413 @@ async fn ordinary_admission_callback_error_keeps_existing_acceptance_policy() {
     }
 }
 
+#[derive(Debug)]
+struct ConnectionSnapshot {
+    room_id: Option<RoomId>,
+    game_data_seq: u64,
+    game_data_epoch: u32,
+    membership_generation: Uuid,
+    prior_membership_generation: Option<Uuid>,
+    pending_room_assignment: Option<u32>,
+    sender: DeliverySender,
+}
+
+fn connection_snapshot(manager: &ConnectionManager, player: &PlayerId) -> ConnectionSnapshot {
+    let client = manager.clients.get(player).expect("registered client");
+    ConnectionSnapshot {
+        room_id: client.room_id,
+        game_data_seq: client.game_data_seq,
+        game_data_epoch: client.game_data_epoch,
+        membership_generation: client.membership_generation,
+        prior_membership_generation: client.prior_membership_generation,
+        pending_room_assignment: client.pending_room_assignment,
+        sender: client.sender.clone(),
+    }
+}
+
+fn assert_connection_snapshot(
+    manager: &ConnectionManager,
+    player: &PlayerId,
+    expected: &ConnectionSnapshot,
+) {
+    let actual = connection_snapshot(manager, player);
+    assert_eq!(actual.room_id, expected.room_id, "room assignment");
+    assert_eq!(
+        actual.game_data_seq, expected.game_data_seq,
+        "relay sequence"
+    );
+    assert_eq!(actual.game_data_epoch, expected.game_data_epoch, "epoch");
+    assert_eq!(
+        actual.membership_generation, expected.membership_generation,
+        "membership generation"
+    );
+    assert_eq!(
+        actual.prior_membership_generation, expected.prior_membership_generation,
+        "prior membership generation"
+    );
+    assert_eq!(
+        actual.pending_room_assignment, expected.pending_room_assignment,
+        "pending room assignment"
+    );
+    assert!(
+        actual.sender.same_channel(&expected.sender),
+        "sender generation"
+    );
+}
+
+async fn registration_count(coordinator: &TestCoordinator) -> usize {
+    coordinator.registrations.lock().await.len()
+}
+
+async fn wait_for_compensating_registration(
+    coordinator: &TestCoordinator,
+    expected: (PlayerId, Option<RoomId>),
+    minimum_count: usize,
+) {
+    tokio::time::timeout(tokio::time::Duration::from_secs(5), async {
+        loop {
+            let registrations = coordinator.registrations.lock().await;
+            if registrations.len() >= minimum_count && registrations.last() == Some(&expected) {
+                return;
+            }
+            drop(registrations);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("compensating route registration");
+}
+
+async fn classified_assignment_manager(
+    behavior: AdmissionBehavior,
+    after_effect: bool,
+) -> (
+    Arc<ConnectionManager>,
+    Arc<TestCoordinator>,
+    Arc<AdmissionFault>,
+    PlayerId,
+) {
+    let (manager, coordinator, fault) = admission_fault_manager(behavior, after_effect);
+    fault.armed.store(false, Ordering::Release);
+    let (sender, _receiver) = crate::coordination::outbound_queue::channel(4, 4);
+    let player = manager
+        .register_classified_client(
+            DeliverySender::classified(sender),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:5050".parse().unwrap(),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("classified registration succeeds");
+    (manager, coordinator, fault, player)
+}
+
+/// A failed coordinator registration must not leave local ghost membership.
+/// The connection was prepared for a room the coordinator never routes.
+#[tokio::test]
+async fn failed_room_assignment_restores_the_previous_connection_state() {
+    for after_effect in [false, true] {
+        let (manager, coordinator, fault, player) =
+            classified_assignment_manager(AdmissionBehavior::Error, after_effect).await;
+        let previous = connection_snapshot(&manager, &player);
+        let registrations_before = registration_count(&coordinator).await;
+        fault.armed.store(true, Ordering::Release);
+
+        manager
+            .assign_client_to_room(&player, RoomId::new_v4())
+            .await;
+
+        assert_connection_snapshot(&manager, &player, &previous);
+        assert_eq!(
+            manager.get_client_room(&player),
+            None,
+            "a failed coordinator registration must not leave ghost room membership"
+        );
+        assert!(
+            manager.assigned_room_candidates().is_empty(),
+            "a failed assignment must not advertise a cleanup candidate"
+        );
+        wait_for_compensating_registration(&coordinator, (player, None), registrations_before + 1)
+            .await;
+    }
+}
+
+/// Cancellation after the local prepare must restore the same snapshot as an
+/// ordinary coordinator error, including when the coordinator effect landed.
+#[tokio::test]
+async fn canceled_room_assignment_restores_the_previous_connection_state() {
+    for after_effect in [false, true] {
+        let (manager, coordinator, fault, player) =
+            classified_assignment_manager(AdmissionBehavior::Park, after_effect).await;
+        let previous = connection_snapshot(&manager, &player);
+        let registrations_before = registration_count(&coordinator).await;
+        fault.armed.store(true, Ordering::Release);
+        let room_id = RoomId::new_v4();
+        let manager_for_caller = Arc::clone(&manager);
+        let caller = tokio::spawn(async move {
+            manager_for_caller
+                .assign_client_to_room(&player, room_id)
+                .await;
+        });
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            fault.entered.notified(),
+        )
+        .await
+        .expect("coordinator registration parked");
+        caller.abort();
+        assert!(caller
+            .await
+            .expect_err("assignment caller canceled")
+            .is_cancelled());
+
+        assert_connection_snapshot(&manager, &player, &previous);
+        assert!(
+            manager.assigned_room_candidates().is_empty(),
+            "a canceled assignment must not advertise a cleanup candidate"
+        );
+        wait_for_compensating_registration(&coordinator, (player, None), registrations_before + 1)
+            .await;
+    }
+}
+
+/// A prepared assignment must not issue relay stamps before its route is
+/// published. A failed attempt must not make a later attempt reuse a stamp
+/// that reached recipients.
+#[tokio::test]
+async fn pending_room_assignment_refuses_relay_stamps() {
+    let (manager, coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Park, false).await;
+    let registrations_before = registration_count(&coordinator).await;
+    let room_id = RoomId::new_v4();
+    fault.armed.store(true, Ordering::Release);
+    let manager_for_caller = Arc::clone(&manager);
+    let caller = tokio::spawn(async move {
+        manager_for_caller
+            .assign_client_to_room(&player, room_id)
+            .await;
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        fault.entered.notified(),
+    )
+    .await
+    .expect("coordinator registration parked");
+
+    assert_eq!(
+        manager
+            .clients
+            .get(&player)
+            .unwrap()
+            .pending_room_assignment,
+        Some(1),
+        "the prepared assignment owns the first epoch"
+    );
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &room_id),
+        None,
+        "an unpublished assignment must not issue a relay stamp"
+    );
+
+    caller.abort();
+    assert!(caller
+        .await
+        .expect_err("assignment caller canceled")
+        .is_cancelled());
+    wait_for_compensating_registration(&coordinator, (player, None), registrations_before + 1)
+        .await;
+    assert_eq!(
+        manager
+            .clients
+            .get(&player)
+            .unwrap()
+            .pending_room_assignment,
+        None,
+        "rollback clears the pending marker"
+    );
+
+    manager.assign_client_to_room(&player, room_id).await;
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &room_id),
+        Some(RelayStamp { seq: 1, epoch: 1 }),
+        "a later assignment reuses epoch 1 only because no stamp was issued"
+    );
+}
+
+/// A new wrapper-style assignment holds the lifecycle gate before calling the
+/// manager. Its lock order must not deadlock with a canceled assignment's
+/// compensation, which also needs the lifecycle gate.
+#[tokio::test]
+async fn canceled_room_assignment_compensation_does_not_block_a_new_assignment() {
+    let (manager, _coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Park, true).await;
+    let lifecycle = manager.client_lifecycle(&player).expect("client lifecycle");
+    fault.armed.store(true, Ordering::Release);
+    let manager_for_canceled = Arc::clone(&manager);
+    let canceled = tokio::spawn(async move {
+        manager_for_canceled
+            .assign_client_to_room(&player, RoomId::new_v4())
+            .await;
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        fault.entered.notified(),
+    )
+    .await
+    .expect("coordinator registration parked");
+    // Match EnhancedGameServer::assign_client_to_room: the caller owns the
+    // lifecycle gate across the manager call. Hold it before cancellation so
+    // the compensation task cannot finish first.
+    let lifecycle_guard = lifecycle.lock_owned().await;
+    canceled.abort();
+    assert!(canceled
+        .await
+        .expect_err("assignment caller canceled")
+        .is_cancelled());
+
+    let new_room = RoomId::new_v4();
+    let new_assignment = manager.assign_client_to_room(&player, new_room);
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(5), new_assignment).await;
+    drop(lifecycle_guard);
+    outcome.expect("a new assignment must not deadlock with route compensation");
+
+    assert_eq!(manager.get_client_room(&player), Some(new_room));
+    assert_eq!(manager.assigned_room_candidates(), vec![(new_room, player)]);
+}
+
+/// A failed reassignment must restore the prior room, advanced relay seq and
+/// the exact membership and sender generations.
+#[tokio::test]
+async fn failed_room_reassignment_restores_the_previous_room_and_stamp() {
+    let (manager, coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Error, false).await;
+    let previous_room = RoomId::new_v4();
+    manager.assign_client_to_room(&player, previous_room).await;
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &previous_room),
+        Some(RelayStamp { seq: 1, epoch: 1 })
+    );
+    let previous = connection_snapshot(&manager, &player);
+    assert_eq!(previous.room_id, Some(previous_room));
+    assert_eq!(previous.game_data_seq, 1);
+    let registrations_before = registration_count(&coordinator).await;
+    fault.armed.store(true, Ordering::Release);
+
+    manager
+        .assign_client_to_room(&player, RoomId::new_v4())
+        .await;
+
+    assert_connection_snapshot(&manager, &player, &previous);
+    assert_eq!(
+        manager.assigned_room_candidates(),
+        vec![(previous_room, player)],
+        "only the prior membership remains after a failed reassignment"
+    );
+    wait_for_compensating_registration(
+        &coordinator,
+        (player, Some(previous_room)),
+        registrations_before + 1,
+    )
+    .await;
+}
+
+/// Cancellation of a reassignment restores the same prior room and stamp.
+#[tokio::test]
+async fn canceled_room_reassignment_restores_the_previous_room_and_stamp() {
+    let (manager, coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Park, false).await;
+    let previous_room = RoomId::new_v4();
+    manager.assign_client_to_room(&player, previous_room).await;
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &previous_room),
+        Some(RelayStamp { seq: 1, epoch: 1 })
+    );
+    let previous = connection_snapshot(&manager, &player);
+    let registrations_before = registration_count(&coordinator).await;
+    fault.armed.store(true, Ordering::Release);
+    let next_room = RoomId::new_v4();
+    let manager_for_caller = Arc::clone(&manager);
+    let caller = tokio::spawn(async move {
+        manager_for_caller
+            .assign_client_to_room(&player, next_room)
+            .await;
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        fault.entered.notified(),
+    )
+    .await
+    .expect("coordinator registration parked");
+    caller.abort();
+    assert!(caller
+        .await
+        .expect_err("reassignment caller canceled")
+        .is_cancelled());
+
+    assert_connection_snapshot(&manager, &player, &previous);
+    assert_eq!(
+        manager.assigned_room_candidates(),
+        vec![(previous_room, player)],
+        "only the prior membership remains after a canceled reassignment"
+    );
+    wait_for_compensating_registration(
+        &coordinator,
+        (player, Some(previous_room)),
+        registrations_before + 1,
+    )
+    .await;
+}
+
+/// A successful assignment commits the prepared state; the rollback guard
+/// must not run on the success path.
+#[tokio::test]
+async fn successful_room_assignment_commits_the_prepared_state() {
+    let (manager, coordinator, _fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Error, false).await;
+    let previous = connection_snapshot(&manager, &player);
+    let registrations_before = registration_count(&coordinator).await;
+    let room_id = RoomId::new_v4();
+
+    manager.assign_client_to_room(&player, room_id).await;
+
+    let after = connection_snapshot(&manager, &player);
+    assert_eq!(after.room_id, Some(room_id));
+    assert_eq!(
+        after.game_data_epoch,
+        previous.game_data_epoch.saturating_add(1),
+        "a successful assignment keeps the advanced epoch"
+    );
+    assert_eq!(after.game_data_seq, 0, "a new membership restarts seq");
+    assert_ne!(
+        after.membership_generation, previous.membership_generation,
+        "a successful assignment keeps the fresh membership generation"
+    );
+    assert!(
+        !after.sender.same_channel(&previous.sender),
+        "a successful assignment keeps the advanced sender generation"
+    );
+    assert_eq!(
+        after.pending_room_assignment, None,
+        "a successful assignment clears the pending marker"
+    );
+    assert_eq!(manager.assigned_room_candidates(), vec![(room_id, player)]);
+    assert_eq!(
+        coordinator.registrations.lock().await.last(),
+        Some(&(player, Some(room_id))),
+        "a successful assignment keeps the new route"
+    );
+    assert_eq!(
+        registration_count(&coordinator).await,
+        registrations_before + 1,
+        "a successful assignment must not run compensation"
+    );
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &room_id),
+        Some(RelayStamp { seq: 1, epoch: 1 }),
+        "a successful assignment allows relay stamps"
+    );
+}
+
 #[tokio::test]
 async fn test_coordinator_uses_unknown_routing_default() {
     let coordinator = TestCoordinator::default();
