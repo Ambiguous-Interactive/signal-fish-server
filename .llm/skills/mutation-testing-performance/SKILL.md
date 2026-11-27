@@ -119,8 +119,8 @@ All levers are centralised in `scripts/run-mutants.sh` so CI and local runs matc
 7. **Shard count sized for serial execution.** `--in-place` runs each shard's
    mutants SERIALLY (one source tree, no `-j`). Measured CI shard 22, the worst
    12-mutant shard, took 310.12s (25.843s/mutant). Adding ~10% headroom and
-   rounding up gives a 29s/mutant budget. The current **41** shards cover 408
-   mutants at ceil(408/41) = 10/shard × 29s = 290s/shard; `timeout-minutes:
+   rounding up gives a 29s/mutant budget. The current **64** shards cover 636
+   mutants at ceil(636/64) = 10/shard × 29s = 290s/shard; `timeout-minutes:
    10`. **Rule:**
    when the mutant count or per-mutant cost changes, re-size N so each serial
    shard still finishes under the 5-minute target with measured headroom.
@@ -133,7 +133,7 @@ Treat these four quantities as one interlocked budget — changing any one witho
 re-checking the others can silently reintroduce the cancellation:
 
 ```text
-{ mutant-count (391), shard-count N, per-shard timeout, per-mutant budget }
+{ mutant-count (636), shard-count N, per-shard timeout, per-mutant budget }
 ```
 
 - **Per-shard target: < 5 min.** `ceil(mutant-count / N) × per-mutant-budget`
