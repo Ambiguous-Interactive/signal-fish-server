@@ -49,10 +49,9 @@ jobs:
           tmp_dir=$(mktemp -d)
           trap 'rm -rf "$tmp_dir"' EXIT
           archive="actionlint_${version}_linux_amd64.tar.gz"
-          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
-            --connect-timeout 20 --output "$tmp_dir/$archive" \
-            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}"
-          printf '%s  %s\n' "$checksum" "$tmp_dir/$archive" | sha256sum -c -
+          bash scripts/download-verified.sh \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/${archive}" \
+            "$checksum" "$tmp_dir/$archive"
           tar -xzf "$tmp_dir/$archive" -C "$tmp_dir" actionlint
           mkdir -p "$RUNNER_TEMP/actionlint-bin"
           install -m 0755 "$tmp_dir/actionlint" "$RUNNER_TEMP/actionlint-bin/actionlint"

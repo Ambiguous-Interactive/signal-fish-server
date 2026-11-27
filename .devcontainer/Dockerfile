@@ -62,9 +62,16 @@ RUN apt-get update -o Acquire::Retries=5 \
     && apt-get autoremove -y && apt-get clean -y \
     && rm -rf /var/lib/apt/lists/*
 
+# Use the shared retrying, checksum-verified downloader for pinned GitHub
+# release assets. It keeps the browser route first and falls back to the
+# official API when GitHub returns a transient error.
+COPY scripts/download-verified.sh /usr/local/bin/download-verified.sh
+RUN chmod 0755 /usr/local/bin/download-verified.sh
+
 # Non-Debian dev tools: install pinned upstream release binaries with checksum
 # verification. This keeps rebuilds fast and supports both linux/amd64 and linux/arm64.
 RUN set -eux; \
+    export SIGNAL_FISH_DOWNLOAD_MAX_TIME=600; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
     amd64) \
     actionlint_arch="amd64"; \
@@ -95,32 +102,26 @@ RUN set -eux; \
     exit 1; \
     ;; \
     esac; \
-    curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20); \
     tmp_dir="$(mktemp -d)"; \
     cd "$tmp_dir"; \
     actionlint_archive="actionlint_${ACTIONLINT_VERSION}_linux_${actionlint_arch}.tar.gz"; \
-    curl -fsSL "${curl_retry_args[@]}" -o "$actionlint_archive" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}"; \
-    echo "${actionlint_sha256}  ${actionlint_archive}" | sha256sum -c -; \
+    download-verified.sh "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${actionlint_archive}" "${actionlint_sha256}" "${actionlint_archive}"; \
     tar -xzf "$actionlint_archive" actionlint; \
     install -m 0755 actionlint /usr/local/bin/actionlint; \
     lychee_archive="lychee-${lychee_target}.tar.gz"; \
     lychee_dir="lychee-${lychee_target}"; \
-    curl -fsSL "${curl_retry_args[@]}" -o "$lychee_archive" "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/${lychee_archive}"; \
-    echo "${lychee_sha256}  ${lychee_archive}" | sha256sum -c -; \
+    download-verified.sh "https://github.com/lycheeverse/lychee/releases/download/lychee-v${LYCHEE_VERSION}/${lychee_archive}" "${lychee_sha256}" "${lychee_archive}"; \
     tar -xzf "$lychee_archive" "${lychee_dir}/lychee"; \
     install -m 0755 "${lychee_dir}/lychee" /usr/local/bin/lychee; \
     github_mcp_archive="github-mcp-server_Linux_${github_mcp_arch}.tar.gz"; \
-    curl -fsSL "${curl_retry_args[@]}" -o "$github_mcp_archive" "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/${github_mcp_archive}"; \
-    echo "${github_mcp_sha256}  ${github_mcp_archive}" | sha256sum -c -; \
+    download-verified.sh "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_VERSION}/${github_mcp_archive}" "${github_mcp_sha256}" "${github_mcp_archive}"; \
     tar -xzf "$github_mcp_archive" github-mcp-server; \
     install -m 0755 github-mcp-server /usr/local/bin/github-mcp-server; \
     yq_binary="yq_linux_${yq_arch}"; \
-    curl -fsSL "${curl_retry_args[@]}" -o "$yq_binary" "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}"; \
-    echo "${yq_sha256}  ${yq_binary}" | sha256sum -c -; \
+    download-verified.sh "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/${yq_binary}" "${yq_sha256}" "${yq_binary}"; \
     install -m 0755 "$yq_binary" /usr/local/bin/yq; \
     powershell_archive="powershell-${POWERSHELL_VERSION}-linux-${powershell_arch}.tar.gz"; \
-    curl -fsSL "${curl_retry_args[@]}" -o "$powershell_archive" "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}"; \
-    echo "${powershell_sha256}  ${powershell_archive}" | sha256sum -c -; \
+    download-verified.sh "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/${powershell_archive}" "${powershell_sha256}" "${powershell_archive}"; \
     mkdir -p /opt/microsoft/powershell/7; \
     tar -xzf "$powershell_archive" -C /opt/microsoft/powershell/7; \
     chmod 0755 /opt/microsoft/powershell/7/pwsh; \

@@ -176,7 +176,11 @@ download_jar() {
     mkdir -p "$CACHE_DIR"
     local tmp_path="${JAR_PATH}.download.$$"
     echo "Downloading tla2tools.jar ${TLA_TOOLS_VERSION} ..." >&2
-    if command -v curl >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1 \
+        && [ -x "${REPO_ROOT}/scripts/download-verified.sh" ]; then
+        bash "${REPO_ROOT}/scripts/download-verified.sh" \
+            "$TLA_TOOLS_URL" "$TLA_TOOLS_SHA256" "$tmp_path"
+    elif command -v curl >/dev/null 2>&1; then
         curl --fail --silent --show-error --location --max-time 300 \
             --output "$tmp_path" "$TLA_TOOLS_URL"
     elif command -v wget >/dev/null 2>&1; then

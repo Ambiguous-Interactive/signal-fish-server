@@ -107,10 +107,13 @@ jobs:
             github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Install pinned Godot
         shell: bash
+        env:
+          SIGNAL_FISH_DOWNLOAD_MAX_TIME: "1200"
         run: |
-          curl --fail --location --retry 3 \
+          bash scripts/download-verified.sh \
             https://github.com/godotengine/godot/releases/download/4.7.2-stable/Godot_v4.7.2-stable_linux.x86_64.zip \
-            --output "$RUNNER_TEMP/godot.zip"
+            9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65 \
+            "$RUNNER_TEMP/godot.zip" https sha512
           unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
           echo "$RUNNER_TEMP/godot" >> "$GITHUB_PATH"
       - name: Install locked TypeScript packages

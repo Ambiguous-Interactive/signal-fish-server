@@ -67,7 +67,10 @@ python3 formal/source-linked/kani/verify.py --mutations
 ```
 
 Lean also needs [elan 4.2.4](https://github.com/leanprover/elan/releases/tag/v4.2.4)
-for the host platform, with `~/.elan/bin` on `PATH`. The scenario
+for the host platform, with `~/.elan/bin` on `PATH`. CI restores the verified
+hax tool cache and runs `scripts/install-hax-tools.sh` before extraction to
+bound Charon and Aeneas download attempts. See the
+[CI bootstrap contract](../../docs/development/ci-bootstrap.md). The scenario
 `lean-toolchain` files select Lean
 4.31.0. `lean/hax.toml` pins Charon `nightly-2026.09.02`, Aeneas
 `build-183e4f0`, and hax's Lean models `v0.3.30`. hax downloads its extraction
