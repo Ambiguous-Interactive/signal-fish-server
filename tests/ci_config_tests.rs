@@ -20039,9 +20039,9 @@ cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
 
 #[test]
 #[cfg(unix)]
-fn test_verified_downloader_rejects_zero_timeout_strings() {
+fn test_verified_downloader_rejects_noncanonical_timeout_strings() {
     let temp = unique_temp_dir("verified-zero-timeout");
-    for value in ["0", "00", "000"] {
+    for value in ["0", "00", "000", "01", "0001"] {
         let output = temp.path().join(format!("zero-{value}.bin"));
         let result = Command::new("bash")
             .arg(repo_root().join("scripts/download-verified.sh"))
@@ -20126,6 +20126,53 @@ fi
             .output()
             .expect("run hax tool installer fixture")
     };
+
+    for invalid in ["0", "00", "08", "01", "-1"] {
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/install-hax-tools.sh"))
+            .arg(&project)
+            .env("PATH", &path)
+            .env("SIGNAL_FISH_HAX_INSTALL_ATTEMPTS", invalid)
+            .env("SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS", "0")
+            .env("HAX_FIXTURE_LOG", &log)
+            .output()
+            .expect("run hax installer with invalid attempts");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "attempts `{invalid}` must fail before cargo"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("canonical positive integer"),
+            "attempts `{invalid}` must name the canonical rule: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    for invalid in ["00", "08", "01", "-1"] {
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/install-hax-tools.sh"))
+            .arg(&project)
+            .env("PATH", &path)
+            .env("SIGNAL_FISH_HAX_INSTALL_ATTEMPTS", "3")
+            .env("SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS", invalid)
+            .env("HAX_FIXTURE_LOG", &log)
+            .output()
+            .expect("run hax installer with invalid delay");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "delay `{invalid}` must fail before cargo"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("canonical non-negative integer"),
+            "delay `{invalid}` must name the canonical rule: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert!(
+        !log.exists(),
+        "invalid settings must fail before cargo is invoked"
+    );
 
     let recovered = run(2);
     assert!(

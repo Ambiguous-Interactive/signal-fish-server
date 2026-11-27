@@ -57,8 +57,8 @@ if [[ ${#expected_digest} -ne $digest_length || ! "$expected_digest" =~ ^[a-f0-9
     exit 2
 fi
 
-if [[ ! "$max_time" =~ ^[0-9]+$ || ! "$max_time" =~ [1-9] ]]; then
-    echo "ERROR: DOWNLOAD_VERIFIED_MAX_TIME must be a positive integer" >&2
+if [[ ! "$max_time" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: DOWNLOAD_VERIFIED_MAX_TIME must be a canonical positive integer" >&2
     exit 2
 fi
 

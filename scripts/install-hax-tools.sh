@@ -12,18 +12,14 @@ project="${1:-${repo_root}/formal/source-linked/lean}"
 attempts="${SIGNAL_FISH_HAX_INSTALL_ATTEMPTS:-3}"
 delay_seconds="${SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS:-5}"
 
-case "$attempts" in
-    "" | *[!0-9]* | 0)
-        echo "ERROR: SIGNAL_FISH_HAX_INSTALL_ATTEMPTS must be a positive integer" >&2
-        exit 2
-        ;;
-esac
-case "$delay_seconds" in
-    "" | *[!0-9]*)
-        echo "ERROR: SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS must be a non-negative integer" >&2
-        exit 2
-        ;;
-esac
+if [[ ! "$attempts" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: SIGNAL_FISH_HAX_INSTALL_ATTEMPTS must be a canonical positive integer" >&2
+    exit 2
+fi
+if [[ ! "$delay_seconds" =~ ^(0|[1-9][0-9]*)$ ]]; then
+    echo "ERROR: SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS must be a canonical non-negative integer" >&2
+    exit 2
+fi
 
 if [[ ! -d "$project" ]]; then
     echo "ERROR: hax project directory not found: $project" >&2
