@@ -495,6 +495,13 @@ mod handler_honesty {
             (bystander, "bystander"),
         ] {
             join(player, name).await;
+            server.set_client_protocol(
+                &player,
+                crate::server::NegotiatedProtocol {
+                    version: 3,
+                    ..crate::server::NegotiatedProtocol::default()
+                },
+            );
             server.set_client_game_data_format(&player, GameDataEncoding::MessagePack);
             server.set_client_addressed_binary(&player, true);
         }
