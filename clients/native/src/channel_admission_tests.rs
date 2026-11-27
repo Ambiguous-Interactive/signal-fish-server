@@ -1,6 +1,14 @@
 use super::*;
 use rtc::data_channel::RTCDataChannelState;
 
+fn assert_event_queue_is_empty(rx: &mut mpsc::UnboundedReceiver<EngineEvent>, context: &str) {
+    match rx.try_recv() {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(error) => panic!("{context}: event queue disconnected: {error:?}"),
+        Ok(_) => panic!("{context}: optional label entered the event queue"),
+    }
+}
+
 // Regression #911: a required label cannot weaken delivery guarantees.
 #[tokio::test]
 async fn required_remote_channels_reject_wrong_delivery_modes() {
@@ -93,6 +101,141 @@ async fn required_remote_channels_reject_wrong_delivery_modes() {
             engine.remove_peer(peer).await.unwrap();
         }
     }
+}
+
+// Regression #870: an optional-label flood cannot consume application state.
+#[tokio::test]
+async fn optional_remote_label_flood_leaves_no_application_state() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut engine = Engine::new(
+        EngineSettings {
+            crippled: true,
+            disable_mdns: true,
+            ..EngineSettings::default()
+        },
+        tx.clone(),
+    )
+    .unwrap();
+    let peer = PlayerId::from_u128(0x870);
+    engine.pair_with(peer, false, &[]).await.unwrap();
+    let link = &engine.peers[&peer];
+    let pc = link.pc.clone();
+    let handler = PeerHandler {
+        peer,
+        generation: link.generation,
+        crippled: true,
+        events: tx,
+        channel_admission: link.channel_admission.clone(),
+        receive_admission: link.receive_admission.clone(),
+    };
+
+    let mut labels = vec![
+        String::new(),
+        "Reliable".to_owned(),
+        "reliable\0".to_owned(),
+        "unreliable\0".to_owned(),
+        "\u{754c}".repeat(4096),
+        format!("optional-{}", "a".repeat(4096)),
+    ];
+    labels.extend((0..128).map(|index| format!("optional-{index}")));
+    assert_eq!(labels.len(), 134);
+
+    for label in &labels {
+        let channel = pc
+            .create_data_channel(
+                label,
+                Some(RTCDataChannelInit {
+                    ordered: true,
+                    ..RTCDataChannelInit::default()
+                }),
+            )
+            .await
+            .unwrap();
+        handler.on_data_channel(channel.clone()).await;
+        assert!(
+            matches!(
+                channel.ready_state().await.unwrap(),
+                RTCDataChannelState::Closing | RTCDataChannelState::Closed
+            ),
+            "optional label remained open: {label:?}"
+        );
+        assert!(
+            engine.peers[&peer].channels.is_empty(),
+            "optional label entered the channel map"
+        );
+        assert!(
+            engine.peers[&peer].channel_tasks.is_empty(),
+            "optional label started a polling task"
+        );
+        assert_event_queue_is_empty(&mut rx, "optional label flood");
+    }
+
+    // The direct storage entrypoint applies the same refusal before retention.
+    let direct = pc
+        .create_data_channel(
+            "direct-optional",
+            Some(RTCDataChannelInit {
+                ordered: true,
+                ..RTCDataChannelInit::default()
+            }),
+        )
+        .await
+        .unwrap();
+    engine
+        .store_remote_channel(peer, "direct-optional".to_owned(), direct.clone())
+        .await;
+    assert!(matches!(
+        direct.ready_state().await.unwrap(),
+        RTCDataChannelState::Closing | RTCDataChannelState::Closed
+    ));
+    assert!(engine.peers[&peer].channels.is_empty());
+    assert!(engine.peers[&peer].channel_tasks.is_empty());
+    assert_event_queue_is_empty(&mut rx, "direct optional channel");
+    {
+        let admission = engine.peers[&peer].channel_admission.lock().await;
+        assert!(
+            admission.reliable.is_none()
+                && admission.unreliable.is_none()
+                && admission.ordered.is_none(),
+            "optional labels reserved required-channel admission slots"
+        );
+    }
+
+    // Required channels still admit after the complete optional-label flood.
+    for label in [RELIABLE_LABEL, UNRELIABLE_LABEL] {
+        let channel = pc
+            .create_data_channel(
+                label,
+                Some(RTCDataChannelInit {
+                    ordered: label == RELIABLE_LABEL,
+                    max_retransmits: (label == UNRELIABLE_LABEL).then_some(0),
+                    ..RTCDataChannelInit::default()
+                }),
+            )
+            .await
+            .unwrap();
+        handler.on_data_channel(channel).await;
+        let EngineEvent::RemoteChannel {
+            label: announced,
+            channel,
+            ..
+        } = rx.recv().await.unwrap()
+        else {
+            panic!("required channel must be announced after the flood");
+        };
+        assert_eq!(announced, label);
+        engine.store_remote_channel(peer, announced, channel).await;
+    }
+    assert_eq!(engine.peers[&peer].channels.len(), 2);
+    assert_eq!(engine.peers[&peer].channel_tasks.len(), 2);
+    {
+        let admission = engine.peers[&peer].channel_admission.lock().await;
+        assert!(admission.reliable.is_some());
+        assert!(admission.unreliable.is_some());
+    }
+
+    engine.remove_peer(peer).await.unwrap();
+    assert!(engine.peers.is_empty());
 }
 
 // Exercise DCEP-decoded properties, rather than only local channel handles.

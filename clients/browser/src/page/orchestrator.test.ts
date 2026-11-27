@@ -1242,6 +1242,8 @@ for (const [initiate, alreadyOpen] of [
         'Reliable',
         'reliable\0',
         '界'.repeat(4096),
+        'a'.repeat(65535),
+        'a'.repeat(65536),
         ...Array.from({ length: 128 }, (_, index) => `optional-${index}`),
       ];
       for (const label of labels) {
