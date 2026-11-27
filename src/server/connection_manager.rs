@@ -134,7 +134,7 @@ pub(crate) struct ClientConnection {
 /// Exact connection state replaced by a room assignment. A failed or canceled
 /// coordinator publication restores this snapshot instead of guessing the
 /// previous room and stamp.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RoomAssignmentSnapshot {
     room_id: Option<RoomId>,
     game_data_seq: u64,
@@ -179,6 +179,7 @@ struct RoomAssignmentRollback {
     lifecycle: Arc<ClientLifecycle>,
     prepared: Option<PreparedRoomAssignment>,
     gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+    gate_handle: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl RoomAssignmentRollback {
@@ -227,8 +228,11 @@ impl Drop for RoomAssignmentRollback {
         let Some(gate) = self.gate.take() else {
             return;
         };
-        let previous_room = prepared.previous.room_id;
-        let previous_delivery = prepared.previous.delivery.clone();
+        let previous = prepared.previous.clone();
+        let previous_room = previous.room_id;
+        let previous_delivery = previous.delivery.clone();
+        let previous_epoch = previous.game_data_epoch;
+        let previous_membership_generation = previous.membership_generation;
         if !self
             .manager
             .restore_uncommitted_room_assignment(&self.player_id, prepared)
@@ -236,18 +240,28 @@ impl Drop for RoomAssignmentRollback {
             return;
         }
         // Cancellation drops the caller's lifecycle guard after this future.
-        // Own the compensation so the route restore cannot be stranded, and
-        // keep the assignment gate until it finishes.
+        // Acquire the lifecycle gate before the assignment gate to keep the
+        // same lock order as a new wrapper assignment.
+        drop(gate);
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
         let manager = Arc::clone(&self.manager);
         let player_id = self.player_id;
         let lifecycle = Arc::clone(&self.lifecycle);
+        let gate = Arc::clone(&self.gate_handle);
         runtime.spawn(async move {
-            let _gate = gate;
             let _lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
             if !manager.lifecycle_matches(&player_id, &lifecycle) {
+                return;
+            }
+            let _gate = gate.lock_owned().await;
+            if !manager.has_restored_room_assignment(
+                &player_id,
+                previous_room,
+                previous_epoch,
+                previous_membership_generation,
+            ) {
                 return;
             }
             if let Err(err) = manager
@@ -1030,6 +1044,7 @@ impl ConnectionManager {
         else {
             return;
         };
+        let gate_handle = Arc::clone(&gate);
         let gate = gate.lock_owned().await;
         // A removal or reconnect identity swap may win before the gate lands.
         if !self.lifecycle_matches(player_id, &lifecycle) {
@@ -1046,6 +1061,7 @@ impl ConnectionManager {
             lifecycle,
             prepared: Some(prepared),
             gate: Some(gate),
+            gate_handle,
         };
         if let Err(err) = self
             .message_coordinator
@@ -1158,6 +1174,23 @@ impl ConnectionManager {
         client.prior_membership_generation = prepared.previous.prior_membership_generation;
         client.sender = prepared.previous.delivery.sender;
         true
+    }
+
+    /// Whether a canceled assignment's compensation still owns the restored
+    /// room, epoch and membership token. A newer assignment changes at least
+    /// one of them and owns its own route.
+    fn has_restored_room_assignment(
+        &self,
+        player_id: &PlayerId,
+        room_id: Option<RoomId>,
+        epoch: u32,
+        membership_generation: Uuid,
+    ) -> bool {
+        self.clients.get(player_id).is_some_and(|client| {
+            client.room_id == room_id
+                && client.game_data_epoch == epoch
+                && client.membership_generation == membership_generation
+        })
     }
 
     /// Undo [`Self::prepare_client_to_room`] when its transition frame never
