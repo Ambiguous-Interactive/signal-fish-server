@@ -23287,10 +23287,7 @@ fn test_ci_safety_miri_lane_filters_cover_every_library_module() {
                 "server::message_coordinator_tests",
             ],
         ),
-        (
-            "metrics",
-            vec!["metrics"],
-        ),
+        ("metrics", vec!["metrics"]),
     ] {
         let matching: Vec<_> = lanes
             .iter()
