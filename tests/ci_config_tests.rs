@@ -2353,7 +2353,7 @@ fn test_actionlint_runs_on_relevant_changes_without_a_static_weekly_rerun() {
         ".devcontainer/Dockerfile",
         "ACTIONLINT_VERSION",
         "ACTIONLINT_AMD64_SHA256",
-        "sha256sum -c",
+        "scripts/download-verified.sh",
         "releases/download",
     ] {
         assert!(
@@ -19450,10 +19450,16 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         "--retry-all-errors",
         "--retry-delay 2",
         "--connect-timeout 20",
-        "--max-time 60",
+        "--max-time \"$max_time\"",
         "--proto \"=${protocol}\"",
         "--tlsv1.2",
-        "sha256sum -c -",
+        "checksum_command=(sha256sum)",
+        "checksum_command=(sha512sum)",
+        "checksum_command=(shasum -a 256)",
+        "checksum_command=(shasum -a 512)",
+        "${checksum_command[@]}\" -c - >/dev/null",
+        "${DOWNLOAD_VERIFIED_MAX_TIME:-60}",
+        "Reusing verified download",
     ] {
         assert!(
             downloader.contains(required),
@@ -19491,6 +19497,45 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         assert!(
             installer.contains(shared_pin) && devcontainer.contains(shared_pin),
             "CI and devcontainer Lychee pins drifted for `{shared_pin}`"
+        );
+    }
+    assert!(
+        devcontainer.contains("download-verified.sh"),
+        "devcontainer builds must use the shared retrying, checksum-verified downloader"
+    );
+}
+
+#[test]
+fn test_ci_release_downloads_use_the_verified_downloader() {
+    let root = repo_root();
+    let mut files = vec![root.join(".devcontainer/Dockerfile")];
+    for directory in [".github/workflows", "scripts"] {
+        let directory = root.join(directory);
+        let mut entries = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        entries.sort();
+        files.extend(entries);
+    }
+    for file in files {
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name == "download-verified.sh" {
+            continue;
+        }
+        let content = read_live_file(&file);
+        if !content.contains("releases/download") {
+            continue;
+        }
+        assert!(
+            content.contains("download-verified.sh"),
+            "{}: every GitHub release download must use scripts/download-verified.sh \
+             so transient release errors can fall back to the official API",
+            file.display()
         );
     }
 }
@@ -19810,8 +19855,370 @@ cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
             String::from_utf8_lossy(&result.stdout),
             String::from_utf8_lossy(&result.stderr)
         );
-        assert_eq!(fs::read(&output).unwrap(), b"verified payload\n");
+        if expected_success {
+            assert_eq!(fs::read(&output).unwrap(), b"verified payload\n");
+        } else {
+            assert!(
+                !output.exists(),
+                "a failed checksum must not leave unverified bytes in the cache"
+            );
+        }
     }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_reuses_only_matching_cached_bytes() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = unique_temp_dir("verified-cache-download");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create fixture binary directory");
+    let requests = temp.path().join("requests.log");
+    let curl = bin.join("curl");
+    write_file(
+        &curl,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf 'request\n' >> "$DOWNLOAD_FIXTURE_LOG"
+if [[ "$DOWNLOAD_FIXTURE_MODE" == "fail" ]]; then
+    exit 22
+fi
+output=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        output="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
+"#,
+    );
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
+        .expect("make fixture curl executable");
+    let payload = temp.path().join("payload.bin");
+    fs::write(&payload, b"verified payload\n").expect("write download payload");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("runner PATH")
+    );
+    let output = temp.path().join("download.bin");
+    let run = |mode: &str| {
+        Command::new("bash")
+            .arg(repo_root().join("scripts/download-verified.sh"))
+            .args([
+                "https://example.invalid/cached.bin",
+                "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc",
+            ])
+            .arg(&output)
+            .env("PATH", &path)
+            .env("DOWNLOAD_FIXTURE_MODE", mode)
+            .env("DOWNLOAD_FIXTURE_LOG", &requests)
+            .env("DOWNLOAD_FIXTURE_PAYLOAD", &payload)
+            .output()
+            .expect("run cached download fixture")
+    };
+
+    fs::write(&output, b"verified payload\n").expect("write matching cached download");
+    let reused = run("fail");
+    assert!(
+        reused.status.success(),
+        "a matching cached download must not touch the network: {}{}",
+        String::from_utf8_lossy(&reused.stdout),
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    assert_eq!(
+        fs::read(&output).expect("read reused download"),
+        b"verified payload\n"
+    );
+    assert!(
+        !requests.exists(),
+        "a verified cache hit must not invoke curl"
+    );
+
+    fs::write(&output, b"corrupted payload\n").expect("write corrupt cached download");
+    let repaired = run("success");
+    assert!(
+        repaired.status.success(),
+        "a changed cached byte must force a verified refresh: {}{}",
+        String::from_utf8_lossy(&repaired.stdout),
+        String::from_utf8_lossy(&repaired.stderr)
+    );
+    assert_eq!(
+        fs::read(&output).expect("read repaired download"),
+        b"verified payload\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&requests)
+            .expect("read download requests")
+            .lines()
+            .count(),
+        1,
+        "the corrupt cache entry must be replaced exactly once"
+    );
+
+    fs::write(&output, b"corrupted payload\n").expect("write second corrupt cached download");
+    let failed = run("fail");
+    assert!(
+        !failed.status.success(),
+        "a failed refresh must not retain unverified stale bytes"
+    );
+    assert!(
+        !output.exists(),
+        "the failed refresh must remove the corrupt cached output"
+    );
+    assert_eq!(
+        fs::read_to_string(&requests)
+            .expect("read failed download requests")
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_accepts_sha512_pins() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = unique_temp_dir("verified-sha512-download");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create sha512 fixture directory");
+    let payload = temp.path().join("payload.bin");
+    fs::write(&payload, b"verified payload\n").expect("write sha512 payload");
+    let curl = bin.join("curl");
+    write_file(
+        &curl,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+output=""
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--output" ]]; then
+        output="$2"
+        shift 2
+    else
+        shift
+    fi
+done
+cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
+"#,
+    );
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o755))
+        .expect("make sha512 curl executable");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("runner PATH")
+    );
+    let output = temp.path().join("download.bin");
+    let digest = "c9d4c28b3df2ef04db66cb84ea2b5c9c395784c00daa0bf181b3c0031dcdf2ab\
+                  0f3dc90cf49f3debe10cf82342d466e1ebfcc51bb86472e7aa573cd7b3e2b122";
+    let result = Command::new("bash")
+        .arg(repo_root().join("scripts/download-verified.sh"))
+        .args(["https://example.invalid/sha512.bin", digest])
+        .arg(&output)
+        .args(["https", "sha512"])
+        .env("PATH", &path)
+        .env("DOWNLOAD_FIXTURE_PAYLOAD", &payload)
+        .output()
+        .expect("run sha512 download fixture");
+    assert!(
+        result.status.success(),
+        "sha512-pinned download failed: {}{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        fs::read(&output).expect("read sha512 download"),
+        b"verified payload\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_rejects_noncanonical_timeout_strings() {
+    let temp = unique_temp_dir("verified-zero-timeout");
+    for value in ["0", "00", "000", "01", "0001"] {
+        let output = temp.path().join(format!("zero-{value}.bin"));
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/download-verified.sh"))
+            .args([
+                "https://example.invalid/never-fetched.bin",
+                "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc",
+            ])
+            .arg(&output)
+            .env("DOWNLOAD_VERIFIED_MAX_TIME", value)
+            .output()
+            .expect("run downloader with a zero timeout");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "zero timeout `{value}` must fail before curl: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("positive integer"),
+            "zero timeout `{value}` must name the positive-integer rule"
+        );
+        assert!(
+            !output.exists(),
+            "a rejected timeout must not create output"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn test_hax_tool_install_retries_and_stops_at_the_bound() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = unique_temp_dir("hax-tool-install");
+    let bin = temp.path().join("bin");
+    fs::create_dir_all(&bin).expect("create hax fixture directory");
+    let cargo = bin.join("cargo");
+    write_file(
+        &cargo,
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$HAX_FIXTURE_LOG"
+if [[ "$*" == "hax tools show" ]]; then
+    exit 0
+fi
+count=0
+if [[ -f "$HAX_FIXTURE_COUNT" ]]; then
+    count=$(cat "$HAX_FIXTURE_COUNT")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$HAX_FIXTURE_COUNT"
+if (( count <= HAX_FIXTURE_FAILURES )); then
+    echo "download timed out" >&2
+    exit 1
+fi
+"#,
+    );
+    fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755))
+        .expect("make fixture cargo executable");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("runner PATH")
+    );
+    let project = temp.path().join("project");
+    fs::create_dir_all(&project).expect("create fixture project");
+    let log = temp.path().join("calls.log");
+    let count = temp.path().join("count");
+    let run = |failures: usize| {
+        let _ = fs::remove_file(&count);
+        let _ = fs::remove_file(&log);
+        Command::new("bash")
+            .arg(repo_root().join("scripts/install-hax-tools.sh"))
+            .arg(&project)
+            .env("PATH", &path)
+            .env("SIGNAL_FISH_HAX_INSTALL_ATTEMPTS", "3")
+            .env("SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS", "0")
+            .env("HAX_FIXTURE_FAILURES", failures.to_string())
+            .env("HAX_FIXTURE_COUNT", &count)
+            .env("HAX_FIXTURE_LOG", &log)
+            .output()
+            .expect("run hax tool installer fixture")
+    };
+
+    for invalid in ["0", "00", "08", "01", "-1"] {
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/install-hax-tools.sh"))
+            .arg(&project)
+            .env("PATH", &path)
+            .env("SIGNAL_FISH_HAX_INSTALL_ATTEMPTS", invalid)
+            .env("SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS", "0")
+            .env("HAX_FIXTURE_LOG", &log)
+            .output()
+            .expect("run hax installer with invalid attempts");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "attempts `{invalid}` must fail before cargo"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("canonical positive integer"),
+            "attempts `{invalid}` must name the canonical rule: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    for invalid in ["00", "08", "01", "-1"] {
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/install-hax-tools.sh"))
+            .arg(&project)
+            .env("PATH", &path)
+            .env("SIGNAL_FISH_HAX_INSTALL_ATTEMPTS", "3")
+            .env("SIGNAL_FISH_HAX_INSTALL_DELAY_SECONDS", invalid)
+            .env("HAX_FIXTURE_LOG", &log)
+            .output()
+            .expect("run hax installer with invalid delay");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "delay `{invalid}` must fail before cargo"
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("canonical non-negative integer"),
+            "delay `{invalid}` must name the canonical rule: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    assert!(
+        !log.exists(),
+        "invalid settings must fail before cargo is invoked"
+    );
+
+    let recovered = run(2);
+    assert!(
+        recovered.status.success(),
+        "a transient hax download failure must recover: {}{}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&count)
+            .expect("read hax install attempts")
+            .trim(),
+        "3"
+    );
+    let calls = fs::read_to_string(&log).expect("read hax install calls");
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "hax tools install")
+            .count(),
+        3
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "hax tools show")
+            .count(),
+        1
+    );
+
+    let exhausted = run(3);
+    assert!(
+        !exhausted.status.success(),
+        "exhausted hax download retries must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&exhausted.stderr).contains("exhausted 3 attempts"),
+        "the bound and final failure must remain visible: {}",
+        String::from_utf8_lossy(&exhausted.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(&count)
+            .expect("read exhausted hax install attempts")
+            .trim(),
+        "3"
+    );
 }
 
 #[test]
@@ -32818,6 +33225,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
             "scripts/download-verified.sh",
+            "scripts/install-hax-tools.sh",
             "src/**",
             "Cargo.toml",
             "Cargo.lock",
@@ -32923,6 +33331,50 @@ fn source_linked_proof_jobs_run_production_checks_and_negative_controls() {
                         .and_then(Yaml::as_bool)
                         == Some(true))
         }));
+    }
+}
+
+#[test]
+fn source_linked_lean_jobs_bound_hax_tool_downloads() {
+    let workflow = read_live_file(&repo_root().join(".github/workflows/formal-verification.yml"));
+    let documents = Yaml::load_from_str(&workflow).expect("valid formal workflow");
+    let jobs = documents[0].as_mapping_get("jobs").expect("formal jobs");
+    for job_name in ["lean-positive", "lean-shards"] {
+        let steps = jobs
+            .as_mapping_get(job_name)
+            .and_then(|job| job.as_mapping_get("steps"))
+            .and_then(Yaml::as_sequence)
+            .expect("Lean job steps");
+        let install = steps
+            .iter()
+            .find(|step| {
+                step.as_mapping_get("name").and_then(Yaml::as_str)
+                    == Some("Install pinned hax tools")
+            })
+            .expect("Lean jobs must bound the hax Charon/Aeneas download");
+        assert_eq!(
+            install.as_mapping_get("run").and_then(Yaml::as_str),
+            Some("bash scripts/install-hax-tools.sh"),
+            "{job_name} must use the shared bounded hax tool installer"
+        );
+        assert!(install.as_mapping_get("if").is_none());
+        assert!(install.as_mapping_get("continue-on-error").is_none());
+        let position = |name: &str| {
+            steps
+                .iter()
+                .position(|step| step.as_mapping_get("name").and_then(Yaml::as_str) == Some(name))
+                .unwrap_or_else(|| panic!("{job_name} is missing {name}"))
+        };
+        assert!(
+            position("Cache extraction tools and Lean dependencies")
+                < position("Install pinned hax tools"),
+            "{job_name} must restore the verified hax cache before installing tools"
+        );
+        assert!(
+            position("Install pinned hax tools")
+                < position("Extract production source and check proofs and negative controls"),
+            "{job_name} must install tools before extraction"
+        );
     }
 }
 
@@ -34410,7 +34862,8 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
     for required in [
         "GODOT_EDITOR_SHA512:",
         "GODOT_TEMPLATES_SHA512:",
-        "sha512sum --check",
+        "download-verified.sh",
+        "DOWNLOAD_VERIFIED_MAX_TIME",
         "cargo +\"$RUST_NIGHTLY\" clippy",
         "actions/upload-artifact@v7.0.2",
         "if: failure()",
@@ -35187,7 +35640,8 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
         "cargo binstall --no-confirm --locked",
         r#"--target "$cargo_binstall_target""#,
         "Acquire::Retries=5",
-        "curl_retry_args=(--retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 20)",
+        "download-verified.sh",
+        "DOWNLOAD_VERIFIED_MAX_TIME=600",
         "ENV CARGO_NET_RETRY=10",
         "ENV CARGO_HTTP_TIMEOUT=120",
         "musl-tools",

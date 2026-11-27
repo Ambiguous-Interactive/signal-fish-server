@@ -83,20 +83,18 @@ jobs:
           key: godot-${{ runner.os }}-${{ env.GODOT_EDITOR_SHA512 }}-${{ env.GODOT_TEMPLATES_SHA512 }}
       - name: Download and verify official Godot archives
         shell: bash
+        env:
+          DOWNLOAD_VERIFIED_MAX_TIME: "1200"
         run: |
           set -euo pipefail
           mkdir -p "$GODOT_DOWNLOADS"
           base="https://github.com/godotengine/godot/releases/download/${GODOT_RELEASE}"
-          if [ ! -f "$GODOT_DOWNLOADS/godot.zip" ]; then
-            curl --fail --location --retry 5 --output "$GODOT_DOWNLOADS/godot.zip" \
-              "$base/Godot_v${GODOT_RELEASE}_linux.x86_64.zip"
-          fi
-          if [ ! -f "$GODOT_DOWNLOADS/templates.tpz" ]; then
-            curl --fail --location --retry 5 --output "$GODOT_DOWNLOADS/templates.tpz" \
-              "$base/Godot_v${GODOT_RELEASE}_export_templates.tpz"
-          fi
-          echo "$GODOT_EDITOR_SHA512  $GODOT_DOWNLOADS/godot.zip" | sha512sum --check
-          echo "$GODOT_TEMPLATES_SHA512  $GODOT_DOWNLOADS/templates.tpz" | sha512sum --check
+          bash scripts/download-verified.sh \
+            "$base/Godot_v${GODOT_RELEASE}_linux.x86_64.zip" \
+            "$GODOT_EDITOR_SHA512" "$GODOT_DOWNLOADS/godot.zip" https sha512
+          bash scripts/download-verified.sh \
+            "$base/Godot_v${GODOT_RELEASE}_export_templates.tpz" \
+            "$GODOT_TEMPLATES_SHA512" "$GODOT_DOWNLOADS/templates.tpz" https sha512
       - name: Install verified Godot editor and templates
         shell: bash
         run: |

@@ -61,6 +61,7 @@ on:
       - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
       - "scripts/download-verified.sh"
+      - "scripts/install-hax-tools.sh"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -180,6 +181,9 @@ jobs:
             formal/source-linked/lean/proofs/negotiation/lean/.lake/packages
           key: ${{ runner.os }}-${{ runner.arch }}-lean-${{ hashFiles('formal/source-linked/lean/hax.toml', 'formal/source-linked/lean/proofs/**/lean-toolchain', 'formal/source-linked/lean/proofs/**/lake-manifest.json') }}
 
+      - name: Install pinned hax tools
+        run: bash scripts/install-hax-tools.sh
+
       - name: Check axiom report handling
         run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
 
@@ -258,6 +262,9 @@ jobs:
             ~/.rustup/toolchains/nightly-2026-08-18-*
             formal/source-linked/lean/proofs/negotiation/lean/.lake/packages
           key: ${{ runner.os }}-${{ runner.arch }}-lean-${{ hashFiles('formal/source-linked/lean/hax.toml', 'formal/source-linked/lean/proofs/**/lean-toolchain', 'formal/source-linked/lean/proofs/**/lake-manifest.json') }}
+
+      - name: Install pinned hax tools
+        run: bash scripts/install-hax-tools.sh
 
       - name: Check axiom report handling
         run: python3 -m unittest discover -s formal/source-linked/lean -p 'test_*.py'
