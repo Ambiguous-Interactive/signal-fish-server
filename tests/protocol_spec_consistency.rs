@@ -263,10 +263,6 @@ fn schema_shape_matches_version(
             .is_some_and(|resolved| schema_shape_matches_version(root, resolved, value, version));
     }
 
-    if value.is_null() && schema.as_mapping_get("nullable").and_then(Yaml::as_bool) == Some(true) {
-        return true;
-    }
-
     if let Some(branches) = schema.as_mapping_get("oneOf").and_then(Yaml::as_sequence) {
         if branches
             .iter()
@@ -516,6 +512,141 @@ fn spec_models_both_negotiated_token_binding_client_envelopes() {
         .and_then(Yaml::as_str);
         assert_eq!(protocol, Some("signalfish.tokenbinding.v2"));
     }
+}
+
+#[test]
+fn optional_wire_fields_use_draft7_null_types_instead_of_legacy_nullable() {
+    use serde_json::{json, Value};
+    use signal_fish_server::protocol::ServerMessage;
+    use signal_fish_server::security::TokenBindingProof;
+
+    let docs = Yaml::load_from_str(&spec_text()).expect("valid protocol YAML");
+    let root = docs.first().expect("protocol document");
+
+    let proof_schema = mapping_path(root, &["components", "schemas", "TokenBindingProof"])
+        .expect("token binding proof schema");
+    let fingerprint = mapping_path(proof_schema, &["properties", "fingerprint"])
+        .expect("token binding fingerprint property");
+    assert_eq!(
+        fingerprint
+            .as_mapping_get("type")
+            .and_then(Yaml::as_sequence)
+            .map(|types| types.iter().map(Yaml::as_str).collect::<BTreeSet<_>>()),
+        Some(BTreeSet::from([Some("string"), Some("null")])),
+        "TokenBindingProof.fingerprint must declare string and null as Draft 7 types"
+    );
+    assert!(
+        fingerprint.as_mapping_get("nullable").is_none(),
+        "TokenBindingProof.fingerprint must not use legacy nullable"
+    );
+
+    let base = json!({
+        "version": 2,
+        "scheme": "server_nonce_hkdf_sha256",
+        "sequence": 1,
+        "signature": "AA=="
+    });
+    let omitted = base.clone();
+    let mut explicit_null = base.clone();
+    explicit_null["fingerprint"] = Value::Null;
+    let mut wrong_type = base.clone();
+    wrong_type["fingerprint"] = json!(17);
+
+    assert!(serde_json::from_value::<TokenBindingProof>(omitted.clone())
+        .expect("omitted fingerprint")
+        .fingerprint
+        .is_none());
+    assert!(
+        serde_json::from_value::<TokenBindingProof>(explicit_null.clone())
+            .expect("explicit null fingerprint")
+            .fingerprint
+            .is_none()
+    );
+    assert!(
+        serde_json::from_value::<TokenBindingProof>(wrong_type.clone()).is_err(),
+        "Rust accepted a non-string fingerprint"
+    );
+    assert!(schema_shape_matches(root, proof_schema, &omitted));
+    assert!(
+        schema_shape_matches(root, proof_schema, &explicit_null),
+        "Draft 7 schema rejected the null fingerprint the server accepts"
+    );
+    assert!(!schema_shape_matches(root, proof_schema, &wrong_type));
+
+    let going_away_schema =
+        mapping_path(root, &["components", "schemas", "GoingAway"]).expect("going away schema");
+    let retry = mapping_path(
+        going_away_schema,
+        &["properties", "data", "properties", "retry_after_secs"],
+    )
+    .expect("going away retry hint");
+    assert_eq!(
+        retry.as_mapping_get("type").and_then(Yaml::as_str),
+        Some("integer")
+    );
+    assert!(
+        retry.as_mapping_get("nullable").is_none(),
+        "GoingAway.retry_after_secs must not use legacy nullable"
+    );
+
+    let without_retry = serde_json::to_value(ServerMessage::GoingAway {
+        deadline_ms: 1,
+        retry_after_secs: None,
+    })
+    .expect("serialize going away without a retry hint");
+    let with_retry = serde_json::to_value(ServerMessage::GoingAway {
+        deadline_ms: 1,
+        retry_after_secs: Some(30),
+    })
+    .expect("serialize going away with a retry hint");
+    assert_eq!(without_retry["data"].get("retry_after_secs"), None);
+    assert_eq!(with_retry["data"]["retry_after_secs"], json!(30));
+    assert!(schema_shape_matches(
+        root,
+        going_away_schema,
+        &without_retry
+    ));
+    assert!(schema_shape_matches(root, going_away_schema, &with_retry));
+    let mut null_retry = with_retry.clone();
+    null_retry["data"]["retry_after_secs"] = Value::Null;
+    assert!(
+        !schema_shape_matches(root, going_away_schema, &null_retry),
+        "GoingAway.retry_after_secs must not claim a null value the server never emits"
+    );
+
+    fn collect_nullable_keys<'a>(
+        node: &'a Yaml<'a>,
+        path: &mut Vec<String>,
+        found: &mut Vec<String>,
+    ) {
+        match node {
+            Yaml::Mapping(mapping) => {
+                for (key, value) in mapping.iter() {
+                    let name = key.as_str().unwrap_or("<non-string>");
+                    path.push(name.to_string());
+                    if name == "nullable" {
+                        found.push(path.join("."));
+                    }
+                    collect_nullable_keys(value, path, found);
+                    path.pop();
+                }
+            }
+            Yaml::Sequence(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    path.push(format!("[{index}]"));
+                    collect_nullable_keys(item, path, found);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut found = Vec::new();
+    collect_nullable_keys(root, &mut Vec::new(), &mut found);
+    assert!(
+        found.is_empty(),
+        "legacy nullable keywords remain in the protocol spec: {found:?}"
+    );
 }
 
 #[test]
