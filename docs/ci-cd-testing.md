@@ -921,11 +921,30 @@ setup and runner variance use the rest of the 45-minute job limit.
 ### Miri Provenance Limit
 
 Existing [#1501](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1501)
-assesses a warning in `parking_lot_core` 0.9.12. Its WordLock
+tracks a warning in `parking_lot_core` 0.9.12. Its WordLock
 `LockState::queue_head` helper converts an integer to a pointer. Miri warns
-that this exposed provenance can hide pointer bugs. A warning-bearing pass
-does not establish strict provenance or absence of undefined behavior in
-untested paths.
+that this exposed provenance can hide pointer bugs.
+
+A fresh replay used the historical source
+`5a356611d34506d4973859501a33dd404efc4c44`, test binary SHA-256
+`d069cdc16aa665c677240d156ff9e3ec181403f6da2da72dfc62b5b6513b6ecf`,
+lockfile SHA-256
+`091accdd9b53cb401cbe1a0c7c4c5bdd2299886734127eb5848a1ec09ac13958`,
+`nightly-2026-08-01`, the `x86_64-unknown-linux-gnu` interpreter target, and
+all 475 exact historical test names. The replay used
+`-Zmiri-disable-isolation -Zmiri-seed=43 -Zmiri-preemption-rate=0.1`. The named
+race test emitted the warning at `word_lock.rs:320`, through
+`WordLock::unlock`, `parking_lot.rs:607` (the hosted sample used 624),
+`DashMap::retain`, and `InMemoryRateLimiter::cleanup`. The selection completed
+459 passed, 16 ignored, and zero failed. Seeds 50 and 60/71/25/42, plus
+shuffle-first controls, did not reach the cast. The schedule values are local
+diagnostics, not CI settings.
+
+The focused strict-provenance run rejected the same cast and exited 1. The
+standard run passed with the warning and exited 0. A warning-bearing pass
+therefore does not establish strict provenance or absence of undefined
+behavior in untested paths. A warning-free seed does not qualify the path
+either; it only missed the cast.
 
 Keep the real lock/race test and its assertions. Keep the current
 `-Zmiri-disable-isolation` flag, which permits host operations and does not
