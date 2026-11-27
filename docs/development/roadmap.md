@@ -526,3 +526,25 @@ The steady-state test retains the first-use samples and the exact delivery
 checks. Restoring generic fan-out for a single recipient still fails the
 two-allocation saving. The existing test passes on Linux, macOS, and Windows.
 [Allocation traces and platform evidence](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1436#issuecomment-7205115936).
+
+## Authorized session 730 evidence
+
+Existing [#1226][i1226] owns the canceled Miri investigation. The original
+Advanced Safety job 121051250380 started at 02:19:00 UTC on 2026-10-25. Its
+test step ran from 02:19:42 to 03:04:15, exactly 44 minutes 33 seconds, and
+ended with "The operation was canceled". No test failed or hung. The workflow
+sets `timeout-minutes: 45`, and the schedule concurrency key includes the run
+ID. The job limit is the only observed cancellation boundary.
+
+Main now runs twelve parallel Miri lanes. Advanced Safety run 45740799990 on
+`df203a1e65` (2026-11-26) passes all twelve lanes and AddressSanitizer. Miri
+job walls are 10.9 to 39.3 minutes; the `remaining` lane is the longest at
+39.3 minutes, inside the 45-minute limit. The existing workflow guards keep
+every library module under one lane, so the split does not remove tests.
+
+`scripts/run-miri-lane.py` now passes `-Z unstable-options --report-time` to
+each exact-name run. Retained `miri-output.txt` files now show elapsed time per
+test. Focused Python tests fail if the timing arguments or exact-name selection
+disappear. Source, runtime, protocol, and client behavior do not change.
+The issue owns final review and delivery. Headroom remains monitored; a future
+lane addition must split again before the longest lane approaches the limit.

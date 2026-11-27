@@ -905,8 +905,8 @@ tracks this dependency watch. This records an analyzer limit, not a demonstrated
 Output artifacts are uploaded even when either gating analyzer reports a
 finding:
 
-- `miri-output-<lane>` — Miri analysis output and selected-test manifest for
-  each workflow lane
+- `miri-output-<lane>` — Miri analysis output, per-test elapsed time, and the
+  selected-test manifest for each workflow lane
 - `asan-output` — AddressSanitizer analysis output
 
 Download these from the workflow run's Artifacts section in GitHub Actions.

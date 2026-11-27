@@ -110,6 +110,7 @@ class MiriLaneTests(unittest.TestCase):
             self.assertEqual(LANE.run_lane("pinned", ["server"], manifest), 17)
             self.assertFalse(manifest.exists())
         self.assertEqual(run.call_count, 1)
+        self.assertNotIn("--report-time", run.call_args_list[0].args[0])
 
     @patch.object(LANE.subprocess, "run")
     def test_exact_selected_paths_and_analyzer_failure_are_preserved(self, run):
@@ -121,7 +122,12 @@ class MiriLaneTests(unittest.TestCase):
             report = json.loads(manifest.read_text())
             self.assertEqual(report["listed_count"], 2)
             self.assertEqual(report["tests"], ["server::tests::one"])
-        self.assertEqual(run.call_args_list[1].args[0][-2:], ["--exact", "server::tests::one"])
+        analyzer = run.call_args_list[1].args[0]
+        self.assertEqual(
+            analyzer[analyzer.index("--exact"):],
+            ["--exact", "server::tests::one", "-Z", "unstable-options", "--report-time"],
+            "the analyzer must retain per-test elapsed time for lane attribution",
+        )
         self.assertNotIn("--ignored", run.call_args_list[1].args[0])
 
     @patch.object(LANE.subprocess, "run")
@@ -137,7 +143,11 @@ class MiriLaneTests(unittest.TestCase):
             self.assertEqual(report["tests"], ["server::tests::two"])
             self.assertEqual(report["exclude_modules"], ["server::session_policy_tests"])
             self.assertEqual(report["module_counts"], {"server": 1})
-        self.assertEqual(run.call_args_list[1].args[0][-2:], ["--exact", "server::tests::two"])
+        analyzer = run.call_args_list[1].args[0]
+        self.assertEqual(
+            analyzer[analyzer.index("--exact"):],
+            ["--exact", "server::tests::two", "-Z", "unstable-options", "--report-time"],
+        )
 
 
 if __name__ == "__main__":

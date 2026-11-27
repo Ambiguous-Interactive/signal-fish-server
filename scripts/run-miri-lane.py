@@ -45,8 +45,9 @@ def select_tests(names, modules, exclude_modules=()):
 
 
 def run_lane(toolchain, modules, manifest, exclude_modules=()):
-    """Preserve listing and analyzer failures; use libtest's exact-name mode."""
+    """Preserve listing and analyzer failures; record per-test time under the exact-name mode."""
     command = ["cargo", f"+{toolchain}", "miri", "test", "--locked", "--lib", "--no-fail-fast", "--"]
+    timing = ["-Z", "unstable-options", "--report-time"]
     listing = subprocess.run([*command, "--list"], text=True, stdout=subprocess.PIPE, check=False)
     if listing.returncode:
         print(listing.stdout, end="", flush=True)
@@ -60,7 +61,9 @@ def run_lane(toolchain, modules, manifest, exclude_modules=()):
                           for module in modules},
     }, indent=2) + "\n")
     print(f"Miri selects {len(selected)} of {len(names)} listed tests for {', '.join(modules)}", flush=True)
-    return subprocess.run([*command, "--exact", *selected], check=False).returncode
+    # Keep the exact selection and preserve each test's elapsed time in the
+    # retained lane log so a near-limit lane can be attributed by test.
+    return subprocess.run([*command, "--exact", *selected, *timing], check=False).returncode
 
 
 def main():
