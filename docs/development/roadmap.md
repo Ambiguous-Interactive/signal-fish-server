@@ -47,8 +47,9 @@ Existing #1441 has new normal-workload measurements below; historical timing out
 Existing #1426 needs a correlated Windows panic capture before an unchanged rerun can resolve attribution.
 Existing #775 refuses its upper retained-record shape before allocation. Largest-cell qualification needs
 streaming work or a provisioned host; the current 31 GiB host cannot hold its required recipient rows.
-Existing #1501 has an upstream assessment below. Re-entry requires a changed warning-path experiment,
-not another unchanged passing run.
+Existing #1501 now has a full-scope warning reproduction and a matched
+strict-provenance control below. The linked documentation change closes the
+analyzer-limit investigation.
 
 ## Original cohort
 
@@ -548,3 +549,26 @@ test. Focused Python tests fail if the timing arguments or exact-name selection
 disappear. Source, runtime, protocol, and client behavior do not change.
 The issue owns final review and delivery. Headroom remains monitored; a future
 lane addition must split again before the longest lane approaches the limit.
+
+## Miri provenance reproduction
+
+Existing [#1501][i1501] receives a fresh full-scope replay of the historical
+warning. The replay used source `5a356611`, test binary SHA-256 `d069cdc1`,
+lockfile SHA-256 `091accdd`, `nightly-2026-08-01`, the x86_64 Linux interpreter
+target, and all 475 exact historical test names. With
+`-Zmiri-disable-isolation -Zmiri-seed=43 -Zmiri-preemption-rate=0.1`, the named
+race test emitted the warning at `word_lock.rs:320` through `WordLock::unlock`,
+`parking_lot.rs:607` (hosted sample 624), `DashMap::retain`, and
+`InMemoryRateLimiter::cleanup`. The selection completed 459 passed, 16 ignored,
+and zero failed. Seeds 50 and 60/71/25/42, plus shuffle-first controls, did not
+reach the cast.
+
+The focused standard run passed with the warning and exited 0. The strict
+control rejected the same cast and exited 1. Warning-bearing and warning-free
+passes therefore do not establish strict provenance. No source, test,
+assertion, ignore, or CI flag changed. The tracked analyzer limit and upstream
+constraint are in the [Miri testing guide](../ci-cd-testing.md#miri-provenance-limit).
+Published `parking_lot_core` 0.10.0 still requires Rust 1.95, and DashMap 6.2.1
+and parking_lot 0.12.5 still require the 0.9 series. Existing [#1111][i1111]
+owns the compatible dependency watch. This closes the #1501 investigation and
+claims no runtime defect or new theorem.
