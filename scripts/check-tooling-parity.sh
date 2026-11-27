@@ -253,7 +253,7 @@ assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo install --locked cargo
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "cargo binstall --no-confirm --locked" "Devcontainer uses cargo-binstall for heavy cargo tools"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "Acquire::Retries=5" "Devcontainer apt operations enable retry hardening"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "download-verified.sh" "Devcontainer release-binary downloads use the verified downloader"
-assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "SIGNAL_FISH_DOWNLOAD_MAX_TIME=600" "Devcontainer release-binary downloads keep a bounded download timeout"
+assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "DOWNLOAD_VERIFIED_MAX_TIME=600" "Devcontainer release-binary downloads keep a bounded download timeout"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_NET_RETRY=10" "Devcontainer configures Cargo network retries"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" "ENV CARGO_HTTP_TIMEOUT=120" "Devcontainer configures Cargo HTTP timeout"
 assert_contains_literal "$DEVCONTAINER_DOCKERFILE" 'lychee_target="x86_64-unknown-linux-musl"' "Devcontainer uses portable x86_64 MUSL lychee binary"

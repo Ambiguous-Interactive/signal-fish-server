@@ -16,7 +16,7 @@ back to the official GitHub API asset endpoint.
 - The API fallback accepts only one exact asset name with a positive integer
   ID from the pinned release tag. The original digest still verifies the
   asset bytes.
-- `SIGNAL_FISH_DOWNLOAD_MAX_TIME` bounds each attempt. The default is 60
+- `DOWNLOAD_VERIFIED_MAX_TIME` bounds each attempt. The default is 60
   seconds; the large Godot archives use 1200 seconds.
 - Every GitHub release download in `.github/workflows`, `scripts/`, and
   `.devcontainer/Dockerfile` must name this helper. A repository test enforces
@@ -69,7 +69,7 @@ the Charon and Aeneas binaries and the pinned nightly Rust toolchain.
   layer caching reuses the completed install layer when its inputs do not
   change.
 - The large Godot archive timeout is bounded by
-  `SIGNAL_FISH_DOWNLOAD_MAX_TIME`, not by an open-ended transfer.
+  `DOWNLOAD_VERIFIED_MAX_TIME`, not by an open-ended transfer.
 
 ## Reproduction
 

@@ -71,7 +71,7 @@ RUN chmod 0755 /usr/local/bin/download-verified.sh
 # Non-Debian dev tools: install pinned upstream release binaries with checksum
 # verification. This keeps rebuilds fast and supports both linux/amd64 and linux/arm64.
 RUN set -eux; \
-    export SIGNAL_FISH_DOWNLOAD_MAX_TIME=600; \
+    export DOWNLOAD_VERIFIED_MAX_TIME=600; \
     case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
     amd64) \
     actionlint_arch="amd64"; \

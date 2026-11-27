@@ -19456,7 +19456,7 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         "checksum_command=(sha256sum)",
         "checksum_command=(sha512sum)",
         "${checksum_command[@]}\" -c - >/dev/null",
-        "${SIGNAL_FISH_DOWNLOAD_MAX_TIME:-60}",
+        "${DOWNLOAD_VERIFIED_MAX_TIME:-60}",
         "Reusing verified download",
     ] {
         assert!(
@@ -19518,7 +19518,10 @@ fn test_ci_release_downloads_use_the_verified_downloader() {
         files.extend(entries);
     }
     for file in files {
-        let name = file.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
         if name == "download-verified.sh" {
             continue;
         }
@@ -20102,8 +20105,20 @@ fi
         "3"
     );
     let calls = fs::read_to_string(&log).expect("read hax install calls");
-    assert_eq!(calls.lines().filter(|line| *line == "hax tools install").count(), 3);
-    assert_eq!(calls.lines().filter(|line| *line == "hax tools show").count(), 1);
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "hax tools install")
+            .count(),
+        3
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| *line == "hax tools show")
+            .count(),
+        1
+    );
 
     let exhausted = run(3);
     assert!(
@@ -34764,7 +34779,7 @@ fn test_fortress_wasm_interop_gate_is_exact_single_threaded_and_fail_closed() {
         "GODOT_EDITOR_SHA512:",
         "GODOT_TEMPLATES_SHA512:",
         "download-verified.sh",
-        "SIGNAL_FISH_DOWNLOAD_MAX_TIME",
+        "DOWNLOAD_VERIFIED_MAX_TIME",
         "cargo +\"$RUST_NIGHTLY\" clippy",
         "actions/upload-artifact@v7.0.2",
         "if: failure()",
@@ -35542,7 +35557,7 @@ fn test_devcontainer_uses_binstall_for_heavy_cargo_tools() {
         r#"--target "$cargo_binstall_target""#,
         "Acquire::Retries=5",
         "download-verified.sh",
-        "SIGNAL_FISH_DOWNLOAD_MAX_TIME=600",
+        "DOWNLOAD_VERIFIED_MAX_TIME=600",
         "ENV CARGO_NET_RETRY=10",
         "ENV CARGO_HTTP_TIMEOUT=120",
         "musl-tools",

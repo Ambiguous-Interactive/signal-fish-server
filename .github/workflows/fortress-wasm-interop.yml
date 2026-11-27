@@ -84,7 +84,7 @@ jobs:
       - name: Download and verify official Godot archives
         shell: bash
         env:
-          SIGNAL_FISH_DOWNLOAD_MAX_TIME: "1200"
+          DOWNLOAD_VERIFIED_MAX_TIME: "1200"
         run: |
           set -euo pipefail
           mkdir -p "$GODOT_DOWNLOADS"

@@ -13,7 +13,7 @@ readonly expected_digest="$2"
 readonly output="$3"
 readonly protocol="${4:-https}"
 readonly algorithm="${5:-sha256}"
-readonly max_time="${SIGNAL_FISH_DOWNLOAD_MAX_TIME:-60}"
+readonly max_time="${DOWNLOAD_VERIFIED_MAX_TIME:-60}"
 
 case "$protocol" in
     https | http) ;;
@@ -45,7 +45,7 @@ fi
 
 case "$max_time" in
     "" | *[!0-9]* | 0)
-        echo "ERROR: SIGNAL_FISH_DOWNLOAD_MAX_TIME must be a positive integer" >&2
+        echo "ERROR: DOWNLOAD_VERIFIED_MAX_TIME must be a positive integer" >&2
         exit 2
         ;;
 esac
