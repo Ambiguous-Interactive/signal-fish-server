@@ -995,11 +995,18 @@ impl ConnectionManager {
             .is_some_and(|client| client.addressed_binary)
     }
 
-    pub(super) fn addressed_plan_seat(
+    /// Resolve one live addressed seat and its committed room queue.
+    ///
+    /// `required_format` is `Some` for a directed send and `None` for plan
+    /// publication. Both callers must use the same eligibility predicate: a
+    /// prepared join updates `ClientConnection` before the coordinator queue
+    /// scope commits, so a room assignment alone is not a routable seat.
+    fn addressed_room_scope(
         &self,
         player_id: &PlayerId,
         room_id: &RoomId,
-    ) -> Option<(GameDataEncoding, u32)> {
+        required_format: Option<GameDataEncoding>,
+    ) -> Option<(GameDataEncoding, u32, Uuid)> {
         let (sender, format, epoch) = {
             let client = self.clients.get(player_id)?;
             if !client.addressed_binary
@@ -1007,6 +1014,7 @@ impl ConnectionManager {
                 || client.game_data_format == GameDataEncoding::Json
                 || client.room_id != Some(*room_id)
                 || client.game_data_epoch == 0
+                || required_format.is_some_and(|required| client.game_data_format != required)
             {
                 return None;
             }
@@ -1017,8 +1025,10 @@ impl ConnectionManager {
             )
         };
         // A prepared transition updates ClientConnection before the queue scope.
-        // Keep connection registry reads independent of the queue lock.
-        if !sender.has_active_room_scope(*room_id) {
+        // Keep connection registry reads independent of the queue lock. Every
+        // wire connection is classified; legacy senders exist only in test
+        // harnesses and carry no queue scope to commit.
+        if sender.classified_queue().is_some() && !sender.has_active_room_scope(*room_id) {
             return None;
         }
         let client = self.clients.get(player_id)?;
@@ -1027,8 +1037,18 @@ impl ConnectionManager {
             && client.game_data_epoch == epoch
             && client.game_data_format == format
             && client.addressed_binary
-            && client.close.requested_reason().is_none())
-        .then_some((format, epoch))
+            && client.close.requested_reason().is_none()
+            && required_format.is_none_or(|required| client.game_data_format == required))
+        .then_some((format, epoch, client.membership_generation))
+    }
+
+    pub(super) fn addressed_plan_seat(
+        &self,
+        player_id: &PlayerId,
+        room_id: &RoomId,
+    ) -> Option<(GameDataEncoding, u32)> {
+        self.addressed_room_scope(player_id, room_id, None)
+            .map(|(format, epoch, _)| (format, epoch))
     }
 
     pub(super) fn addressed_target_generation(
@@ -1037,12 +1057,8 @@ impl ConnectionManager {
         room_id: &RoomId,
         encoding: GameDataEncoding,
     ) -> Option<Uuid> {
-        let client = self.clients.get(player_id)?;
-        (client.addressed_binary
-            && client.game_data_format == encoding
-            && client.room_id == Some(*room_id)
-            && client.close.requested_reason().is_none())
-        .then_some(client.membership_generation)
+        self.addressed_room_scope(player_id, room_id, Some(encoding))
+            .map(|(_, _, generation)| generation)
     }
 
     pub(super) fn next_addressed_receipt(
