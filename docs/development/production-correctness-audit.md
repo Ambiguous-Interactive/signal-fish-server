@@ -20334,7 +20334,9 @@ the outbound contract.
 `optional_wire_fields_use_draft7_null_types_instead_of_legacy_nullable`
 pins the literal Draft 7 type declaration, accepts omitted and explicit-null
 fingerprints, rejects a numeric fingerprint, and checks both emitted
-`GoingAway` forms. It rejects an explicit-null retry hint because the server
+`GoingAway` forms. It also validates the exact documented `fingerprint:null`
+proof example from `docs/configuration-recipes.md` against the token-bound
+JSON envelope. It rejects an explicit-null retry hint because the server
 never emits one. The same test walks the whole spec and fails on any remaining
 `nullable` key. The local shape oracle no longer honors `nullable`, so the
 defect cannot pass that helper again.

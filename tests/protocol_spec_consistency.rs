@@ -573,6 +573,34 @@ fn optional_wire_fields_use_draft7_null_types_instead_of_legacy_nullable() {
     );
     assert!(!schema_shape_matches(root, proof_schema, &wrong_type));
 
+    // This is the exact example in docs/configuration-recipes.md.
+    let signed_json = mapping_path(root, &["components", "schemas", "ClientTokenBoundJson"])
+        .expect("token-bound JSON client schema");
+    let documented = json!({
+        "type": "Ping",
+        "token_binding": {
+            "version": 2,
+            "scheme": "server_nonce_hkdf_sha256",
+            "sequence": 1,
+            "signature": "BASE64_MAC",
+            "fingerprint": Value::Null
+        }
+    });
+    let mut documented_without_fingerprint = documented.clone();
+    documented_without_fingerprint["token_binding"]
+        .as_object_mut()
+        .expect("proof object")
+        .remove("fingerprint");
+    assert!(
+        schema_shape_matches(root, signed_json, &documented),
+        "the documented null-fingerprint proof must pass the token-bound JSON schema"
+    );
+    assert!(schema_shape_matches(
+        root,
+        signed_json,
+        &documented_without_fingerprint
+    ));
+
     let going_away_schema =
         mapping_path(root, &["components", "schemas", "GoingAway"]).expect("going away schema");
     let retry = mapping_path(
