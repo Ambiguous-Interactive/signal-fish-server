@@ -1,6 +1,14 @@
 use super::*;
 use rtc::data_channel::RTCDataChannelState;
 
+fn assert_event_queue_is_empty(rx: &mut mpsc::UnboundedReceiver<EngineEvent>, context: &str) {
+    match rx.try_recv() {
+        Err(mpsc::error::TryRecvError::Empty) => {}
+        Err(error) => panic!("{context}: event queue disconnected: {error:?}"),
+        Ok(_) => panic!("{context}: optional label entered the event queue"),
+    }
+}
+
 // Regression #911: a required label cannot weaken delivery guarantees.
 #[tokio::test]
 async fn required_remote_channels_reject_wrong_delivery_modes() {
@@ -159,10 +167,7 @@ async fn optional_remote_label_flood_leaves_no_application_state() {
             engine.peers[&peer].channel_tasks.is_empty(),
             "optional label started a polling task"
         );
-        assert!(
-            rx.try_recv().is_err(),
-            "optional label entered the event queue"
-        );
+        assert_event_queue_is_empty(&mut rx, "optional label flood");
     }
 
     // The direct storage entrypoint applies the same refusal before retention.
@@ -185,7 +190,7 @@ async fn optional_remote_label_flood_leaves_no_application_state() {
     ));
     assert!(engine.peers[&peer].channels.is_empty());
     assert!(engine.peers[&peer].channel_tasks.is_empty());
-    assert!(rx.try_recv().is_err());
+    assert_event_queue_is_empty(&mut rx, "direct optional channel");
     {
         let admission = engine.peers[&peer].channel_admission.lock().await;
         assert!(
