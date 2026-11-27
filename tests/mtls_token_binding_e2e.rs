@@ -363,6 +363,13 @@ fn signed_message(
         fingerprint: None,
     })
     .expect("serialize proof");
+    if fingerprint.is_none() {
+        assert_eq!(
+            proof.get("fingerprint"),
+            Some(&Value::Null),
+            "non-fingerprint proofs must carry an explicit null fingerprint on the wire"
+        );
+    }
     if let (Some(fingerprint), Some(proof)) = (fingerprint, proof.as_object_mut()) {
         proof.insert("fingerprint".to_string(), json!(fingerprint));
     }

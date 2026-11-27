@@ -44,7 +44,7 @@ audit conclusion. Findings below describe only the exact paths investigated.
 
 | Task | Implementation and operations | Invariants and experiments | Status |
 | --- | --- | --- | --- |
-| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380; relay null metadata repaired in F381 |
+| A01 | `protocol/`, AsyncAPI, wire samples | Schema, errors, optional fields, v2/v3 projections, exhaustive operation mapping | Initial; exact inbound/outbound reachability and sample-shape controls; join null mismatch repaired in F379; reconnect samples repaired in F380; relay null metadata repaired in F381; remaining legacy nullable annotations repaired in F425 |
 | A02 | `websocket/handler.rs`, `routes.rs`, `mod.rs` | Upgrade, routes, frame limits, TLS/plain entrypoint parity | Initial; HTTP/2 route rejection recorded in F13; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A03 | `auth/`, `security/`, handshake in `websocket/connection.rs` | Authenticate, app isolation, token binding, origin, admission, expiry, replay | Initial; concurrent handshake retry-budget loss recorded in F15; signed-credential response-loss history in session 412; certificate-bound partial-write history in session 413; combined tenant/certificate history in session 414; encrypted-record loss in session 415 |
 | A04 | `server/connection_manager.rs`, `websocket/connection.rs` | Identity fencing, socket ownership, reader/writer shutdown, cancellation | Initial; caller cancellation and failure cleanup repaired in F07/F10; router refusal waits released on close in F415 |
@@ -20308,3 +20308,55 @@ reset. A partition or proxy can delay or hide connection refusal, the
 advisory, or the close frame. A restarted or separate server must decline
 restore when it lacks the original recovery record. This advances A17 and
 A18. Issue #826 stays open.
+
+### F425 Legacy nullable annotations remained in the protocol schema
+
+Existing #826 owns this bounded A01 follow-up. Base:
+`2665c0c12cc8f93f63e592aed694aa27577adaea`; Linux ARM64, Rust 1.94.0.
+The hypothesis was that the two remaining `nullable` annotations can disagree
+with the wire contract because AsyncAPI 3.0 Schema Objects use JSON Schema
+Draft 7, which ignores the OpenAPI keyword.
+
+`TokenBindingProof.fingerprint` is `Option<String>`. The server accepts an
+explicit null and treats it as absent. The existing live
+`ordinary_tls_token_binding_remains_usable_without_fingerprint_binding`
+fixture already sends `"fingerprint":null` in every non-fingerprint proof.
+The original schema declares only `type: string`, so a strict Draft 7
+validator rejects a message that the server accepts. The repair declares
+`type: [string, 'null']`.
+
+`GoingAway.retry_after_secs` is `Option<u64>` with
+`skip_serializing_if = "Option::is_none"`. The server emits an integer or
+omits the field; it never emits null. The original schema also declares a
+no-op `nullable: true`. The repair removes that misleading annotation from
+the outbound contract.
+
+`optional_wire_fields_use_draft7_null_types_instead_of_legacy_nullable`
+pins the literal Draft 7 type declaration, accepts omitted and explicit-null
+fingerprints, rejects a numeric fingerprint, and checks both emitted
+`GoingAway` forms. It also validates the exact documented `fingerprint:null`
+proof example from `docs/configuration-recipes.md` against the token-bound
+JSON envelope. It rejects an explicit-null retry hint because the server
+never emits one. The same test walks the whole spec and fails on any remaining
+`nullable` key. The local shape oracle no longer honors `nullable`, so the
+defect cannot pass that helper again.
+
+Original schema red: Nextest `9646cccc`, 55.46 seconds build, 0.045 seconds
+test. The assertion identified the scalar `fingerprint` type. Repaired green:
+Nextest `7a105024`, 1.67 seconds build, 0.027 seconds test. All 37
+protocol-spec tests pass. The live token-binding control passes with the added
+explicit-null wire assertion (`9d8dc55b`). Independent Ajv 8.20.0 validation
+removes every `nullable` key to model Draft 7: the original spec fails the
+null-fingerprint case (5/6) and the repaired spec passes all six cases. The
+AsyncAPI parser reports zero errors. The repaired schema SHA-256 is
+`8693c2fbf4e2a17f9a3108cd388cb183ae7582c4b8311a8ec74eda32f6426fe9`.
+
+These are schema and serialization controls, not generated-code or recipient
+projection qualification. The server runtime bytes for non-null values do not
+change. Generated clients may change their optional fingerprint type from a
+string to a string-or-null union. The Rust client vendors this schema and
+tracks the refresh in
+[Rust client #126](https://github.com/Ambiguous-Interactive/signal-fish-client-rust/issues/126).
+The .NET and Godot clients use hand-written parsers that treat a null
+fingerprint as absent and need no change. The wider A01–A22 audit and
+historical failures remain open. Issue #826 stays open.
