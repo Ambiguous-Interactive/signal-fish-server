@@ -97,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgrade `url` to 2.5.9 across every audited dependency graph.
 - Accept null authority and response reason fields in the protocol schema (#826).
 - Accept null WebRTC SDP in the protocol schema for room joins and game starts (#826).
+- Accept null relay client IDs in the protocol schema (#826).
 - Describe raw v2 protobuf and rkyv gameplay frames in the protocol schema (#826).
 - Refuse new TCP connections on the TLS port during WebSocket shutdown grace (#826).
 - Refuse new plain TCP connections before accepted HTTP connections start draining (#826).
