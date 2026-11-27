@@ -23486,6 +23486,38 @@ fn test_ci_safety_workflow_has_required_jobs() {
     validate_workflow_has_required_jobs(&workflow_path, SAFETY_JOBS, "Advanced Safety");
 }
 
+#[test]
+fn test_ci_safety_asan_timeout_covers_measured_job_budget() {
+    // The 2026-11-27 scheduled job took 32m01s: root compile 6m08s, root suite
+    // 22m40s, and native suite 2m15s (368 passed). The historical 30-minute
+    // budget cancelled run 41376479803 at 30m16s before its native suite
+    // completed (issue #1363). Keep enough headroom for runner variance.
+    const MEASURED_JOB_MINUTES: i64 = 32;
+    const MINIMUM_BUDGET_MINUTES: i64 = 40;
+
+    let root = repo_root();
+    let workflow_path = root.join(".github/workflows/ci-safety.yml");
+    let content = read_live_file(&workflow_path);
+    let documents = Yaml::load_from_str(&content).expect("ci-safety.yml must parse as YAML");
+    let asan = documents
+        .first()
+        .and_then(|document| document.as_mapping_get("jobs"))
+        .and_then(|jobs| jobs.as_mapping_get("asan"))
+        .expect("ci-safety.yml must define the asan job");
+    let timeout = asan
+        .as_mapping_get("timeout-minutes")
+        .and_then(Yaml::as_integer)
+        .expect("asan must declare timeout-minutes");
+
+    assert!(
+        timeout >= MINIMUM_BUDGET_MINUTES,
+        "asan timeout-minutes must stay at or above {MINIMUM_BUDGET_MINUTES} \
+         minutes: the measured job used {MEASURED_JOB_MINUTES} minutes, and the \
+         historical 30-minute budget cancelled run 41376479803 at 30m16s before \
+         the native suite completed. See issue #1363."
+    );
+}
+
 fn miri_module_filter_violations(
     modules: &[String],
     lanes: &[(Vec<&str>, Vec<&str>)],
