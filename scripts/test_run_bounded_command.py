@@ -64,6 +64,7 @@ class BoundedCommandTests(unittest.TestCase):
                 directory,
                 "hang_parent.py",
                 f"""
+                import os
                 import subprocess
                 import sys
                 import time
@@ -75,7 +76,10 @@ class BoundedCommandTests(unittest.TestCase):
                     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                     "print('descendant-alive', flush=True); time.sleep(60)",
                 ])
-                Path({str(child_pid_file)!r}).write_text(str(child.pid))
+                pid_file = Path({str(child_pid_file)!r})
+                temporary = Path(str(pid_file) + ".tmp")
+                temporary.write_text(str(child.pid))
+                os.replace(temporary, pid_file)
                 print("parent-waiting", flush=True)
                 time.sleep(60)
                 """,
@@ -110,6 +114,17 @@ class BoundedCommandTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 7, completed.stderr)
         self.assertEqual(log, "")
 
+    def test_signal_status_uses_shell_convention(self):
+        completed, log = self.run_helper(
+            [
+                sys.executable,
+                "-c",
+                "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+            ]
+        )
+        self.assertEqual(completed.returncode, 143, completed.stderr)
+        self.assertEqual(log, "")
+
     def test_parent_exit_retires_background_descendant(self):
         with tempfile.TemporaryDirectory() as directory:
             child_pid_file = Path(directory) / "child.pid"
@@ -117,6 +132,7 @@ class BoundedCommandTests(unittest.TestCase):
                 directory,
                 "background_parent.py",
                 f"""
+                import os
                 import subprocess
                 import sys
                 from pathlib import Path
@@ -126,7 +142,10 @@ class BoundedCommandTests(unittest.TestCase):
                     "-c",
                     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
                 ])
-                Path({str(child_pid_file)!r}).write_text(str(child.pid))
+                pid_file = Path({str(child_pid_file)!r})
+                temporary = Path(str(pid_file) + ".tmp")
+                temporary.write_text(str(child.pid))
+                os.replace(temporary, pid_file)
                 print("parent-exits", flush=True)
                 """,
             )
@@ -147,6 +166,7 @@ class BoundedCommandTests(unittest.TestCase):
                 directory,
                 "hang_parent.py",
                 f"""
+                import os
                 import subprocess
                 import sys
                 import time
@@ -157,7 +177,10 @@ class BoundedCommandTests(unittest.TestCase):
                     "-c",
                     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
                 ])
-                Path({str(child_pid_file)!r}).write_text(str(child.pid))
+                pid_file = Path({str(child_pid_file)!r})
+                temporary = Path(str(pid_file) + ".tmp")
+                temporary.write_text(str(child.pid))
+                os.replace(temporary, pid_file)
                 print("parent-waiting", flush=True)
                 time.sleep(60)
                 """,

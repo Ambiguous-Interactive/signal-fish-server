@@ -831,14 +831,15 @@ The hosted fuzz job runs its shared build and every target through
 helper starts the command in a new process group, retains its complete log, and
 retires the whole group after the deadline.
 
-GNU `timeout` signals its direct child, not every descendant. A compiler
-descendant that ignores `SIGTERM` and inherits the step's stdout can keep the
-step output pipe open after the wrapper returns. The step then appears to run
-until the job limit, and the retained job log may be missing. The helper reaps
-the direct child before checking the group, then sends `SIGTERM` and, if
-needed, `SIGKILL` to every remaining member.
+GNU `timeout` signals the command's process group when it is not in foreground
+mode, but it can return as soon as the direct child exits, before
+`--kill-after` removes a `SIGTERM`-ignoring descendant. A compiler descendant
+that inherits the step's stdout can then keep the step output pipe open after
+the wrapper returns. The step appears to run until the job limit, and the
+retained job log may be missing. The helper signals the group, reaps the direct
+child, then waits for every remaining member before escalating to `SIGKILL`.
 
-The original PR #1608 attempt-1 job still has no recoverable internal log:
+The original PR #1607 attempt-1 job still has no recoverable internal log:
 GitHub returns BlobNotFound and the attempt archive is empty. Its source
 identity and timeout evidence remain in
 [issue #1608](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1608).

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run one command under a hard deadline and retire its whole process group.
 
-GNU timeout signals its direct child, not every descendant. A descendant that
-ignores SIGTERM and inherits the caller's stdout can keep a captured pipe open
-after timeout returns, so the wrapped step appears to hang until the job limit.
-This runner starts the command in a new session, captures its output to a log,
-and always retires the entire process group after the direct child exits.
+GNU timeout signals the command's process group when it is not in foreground
+mode. It can still return as soon as the direct child exits, before
+--kill-after removes a SIGTERM-ignoring descendant. That descendant can inherit
+the caller's stdout and keep a captured pipe open after timeout returns, so the
+wrapped step appears to hang until the job limit. This runner starts the
+command in a new session, captures its output to a log, and always retires the
+entire process group after the direct child exits.
 """
 import argparse
 import os
@@ -158,10 +160,14 @@ def main():
                     exit_code = 128 + interrupted
                 elif timed_out:
                     exit_code = 124
-                elif process.returncode is not None:
-                    exit_code = process.returncode
                 elif not retired:
                     exit_code = 137
+                elif process.returncode is not None:
+                    exit_code = (
+                        128 - process.returncode
+                        if process.returncode < 0
+                        else process.returncode
+                    )
     finally:
         signal.signal(signal.SIGTERM, previous_term)
         signal.signal(signal.SIGINT, previous_interrupt)
