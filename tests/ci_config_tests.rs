@@ -22503,6 +22503,8 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         "build.rs",
         ".llm/code-samples/protocol/**",
         ".github/scripts/run-fuzz-targets.sh",
+        "scripts/run-bounded-command.py",
+        "scripts/test_run_bounded_command.py",
     ] {
         assert!(
             pull_request_paths.contains(required_path),
@@ -22637,10 +22639,11 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         .unwrap_or_else(|| panic!("the shared fuzz build step must define `run`"));
     assert_eq!(
         shared_build,
-        "timeout --signal=TERM --kill-after=10s 600s cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu",
+        "python3 scripts/run-bounded-command.py --timeout-seconds 600 --grace-seconds 10 --log \"$RUNNER_TEMP/fuzz-logs/build.log\" -- cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu",
         "fuzz.yml must build every declared bin together so Cargo shares the production-crate \
          and libFuzzer compile prefix, while bounding a stuck best-effort prewarm below the job \
-         timeout so authoritative target runs still execute"
+         timeout so authoritative target runs still execute. The shared build must use the \
+         process-group supervisor so a descendant cannot hold the step output pipe open."
     );
     let fuzz_run_index = fuzz_steps
         .iter()
@@ -22671,9 +22674,13 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
         "read -r -a targets <<< \"$FUZZ_TARGETS\"",
         "if ((${#targets[@]} == 0))",
         "for target in \"${targets[@]}\"",
-        "timeout --signal=TERM --kill-after=10s",
+        "runner=\"$repo_root/scripts/run-bounded-command.py\"",
+        "python3 \"$runner\"",
+        "--timeout-seconds \"$watchdog_seconds\"",
+        "--grace-seconds 10",
+        "--no-print-log",
+        "--log \"$logs_dir/$target.log\"",
         "fuzz run \"$target\"",
-        ">\"$logs_dir/$target.log\" 2>&1 &",
         "pids+=(\"$!\")",
         "trap cleanup_children EXIT",
         "trap 'exit 130' INT TERM",
@@ -22757,7 +22764,7 @@ fn test_fuzz_dependency_resolution_is_locked_in_ci() {
             (
                 format!("fuzz-artifacts-{target}"),
                 format!(
-                    "fuzz/artifacts/{target}/\n${{{{ runner.temp }}}}/fuzz-logs/{target}.log\n"
+                    "fuzz/artifacts/{target}/\n${{{{ runner.temp }}}}/fuzz-logs/build.log\n${{{{ runner.temp }}}}/fuzz-logs/{target}.log\n"
                 ),
             )
         })

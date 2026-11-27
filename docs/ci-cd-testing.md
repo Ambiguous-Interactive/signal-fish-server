@@ -824,6 +824,29 @@ let item = vec.get(index).ok_or(MyError::IndexOutOfBounds)?;
 
 **Local check:** `./scripts/check-no-panics.sh`
 
+## Fuzz Supervision
+
+The hosted fuzz job runs its shared build and every target through
+[`scripts/run-bounded-command.py`](../scripts/run-bounded-command.py). The
+helper starts the command in a new process group, retains its complete log, and
+retires the whole group after the deadline.
+
+GNU `timeout` signals the command's process group when it is not in foreground
+mode, but it can return as soon as the direct child exits, before
+`--kill-after` removes a `SIGTERM`-ignoring descendant. A compiler descendant
+that inherits the step's stdout can then keep the step output pipe open after
+the wrapper returns. The step appears to run until the job limit, and the
+retained job log may be missing. The helper signals the group, reaps the direct
+child, then waits for every remaining member before escalating to `SIGKILL`.
+
+The original PR #1607 attempt-1 job still has no recoverable internal log:
+GitHub returns BlobNotFound and the attempt archive is empty. Its source
+identity and timeout evidence remain in
+[issue #1608](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1608).
+The helper and its focused controls cover the recoverable supervision boundary;
+they do not claim the exact historical event. The same-head retry from attempt 2
+passes all four targets with their unchanged budgets.
+
 ## Advanced Safety Workflow
 
 The repository includes an advanced safety analysis workflow

@@ -32,6 +32,8 @@ on:
       - ".llm/code-samples/protocol/**"
       - ".github/workflows/fuzz.yml"
       - ".github/scripts/run-fuzz-targets.sh"
+      - "scripts/run-bounded-command.py"
+      - "scripts/test_run_bounded_command.py"
       - "Cargo.toml"
       - "build.rs"
 
@@ -114,8 +116,11 @@ jobs:
         # missing or stale Rust cache can affect speed, never correctness.
         # A target-specific compile failure is re-observed by that target's
         # gating run below without preventing its independent siblings.
+        # The supervisor retires the whole process group, because GNU timeout
+        # alone can leave a SIGTERM-ignoring compiler descendant holding the
+        # step's output pipe after the wrapper returns (issue #1608).
         continue-on-error: true
-        run: timeout --signal=TERM --kill-after=10s 600s cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu
+        run: python3 scripts/run-bounded-command.py --timeout-seconds 600 --grace-seconds 10 --log "$RUNNER_TEMP/fuzz-logs/build.log" -- cargo +nightly-2026-08-01 fuzz build --target x86_64-unknown-linux-gnu
 
       - name: Fuzz all targets concurrently
         env:
@@ -138,6 +143,7 @@ jobs:
           name: fuzz-artifacts-decode_protocol
           path: |
             fuzz/artifacts/decode_protocol/
+            ${{ runner.temp }}/fuzz-logs/build.log
             ${{ runner.temp }}/fuzz-logs/decode_protocol.log
           if-no-files-found: ignore
 
@@ -148,6 +154,7 @@ jobs:
           name: fuzz-artifacts-validate_inputs
           path: |
             fuzz/artifacts/validate_inputs/
+            ${{ runner.temp }}/fuzz-logs/build.log
             ${{ runner.temp }}/fuzz-logs/validate_inputs.log
           if-no-files-found: ignore
 
@@ -158,6 +165,7 @@ jobs:
           name: fuzz-artifacts-fuzz_session_machine
           path: |
             fuzz/artifacts/fuzz_session_machine/
+            ${{ runner.temp }}/fuzz-logs/build.log
             ${{ runner.temp }}/fuzz-logs/fuzz_session_machine.log
           if-no-files-found: ignore
 
@@ -168,5 +176,6 @@ jobs:
           name: fuzz-artifacts-fuzz_reconnect_tokens
           path: |
             fuzz/artifacts/fuzz_reconnect_tokens/
+            ${{ runner.temp }}/fuzz-logs/build.log
             ${{ runner.temp }}/fuzz-logs/fuzz_reconnect_tokens.log
           if-no-files-found: ignore
