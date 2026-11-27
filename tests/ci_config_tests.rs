@@ -27858,14 +27858,18 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
     assert!(
         runner.contains("Get-ChangedFilesForPush")
             && runner.contains("\"log\", \"--format=%H\", \"--raw\"")
+            && runner.contains("Get-RemoteExclusionArgument")
+            && runner.contains("RemoteExclusionArguments")
             && runner.contains("--remotes=$RemoteName")
+            && runner.contains("Invoke-Native -FileName \"git\" -Arguments @(\"remote\")")
             && runner.contains("$logArgs + $RemoteSha + $remoteArg")
             && runner.contains("Add-ChangedFilesFromPushedCommits")
             && runner.contains("[switch]$Worktree")
             && runner.contains("Get-ChangedFilesForWorktreePreflight")
             && runner.contains("Test-WorkflowDirectScriptInvocations"),
         "pre-push runner must inspect all introduced commits for existing refs, \
-         scope new-branch discovery to the push target remote, and run fast \
+         scope new-branch discovery to a configured push target remote, exclude \
+         every remote ref for URL or unknown remote arguments, and run fast \
          workflow policy checks without invoking cargo tests. It must also expose \
          a worktree preflight mode so agents/local CI catch push-policy failures \
          before Git hooks are the last resort."
@@ -27873,7 +27877,7 @@ fn test_pre_push_hook_exists_and_runs_workflow_policy_checks() {
 }
 
 #[test]
-fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_available() {
+fn test_pre_push_remote_exclusion_handles_named_remote_url_and_force_push_when_pwsh_available() {
     let root = repo_root();
     let output = Command::new("pwsh")
         .args([
@@ -27886,11 +27890,20 @@ fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_avail
                 function Assert($condition, $message) {
                     if (-not $condition) { throw $message }
                 }
-                $script:CapturedArguments = @()
+                $script:ConfiguredRemotes = @("origin")
+                $script:CapturedLogArguments = [string[]]@()
                 function Invoke-Native {
                     param([string]$FileName, [string[]]$Arguments)
-                    $script:CapturedArguments = [string[]]$Arguments
-                    [pscustomobject]@{
+                    if ($Arguments.Count -eq 1 -and $Arguments[0] -eq "remote") {
+                        return [pscustomobject]@{
+                            ExitCode = 0
+                            Stdout = (($script:ConfiguredRemotes -join "`n") + "`n")
+                            Stderr = ""
+                            Output = ""
+                        }
+                    }
+                    $script:CapturedLogArguments = [string[]]$Arguments
+                    return [pscustomobject]@{
                         ExitCode = 0
                         Stdout = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`0`n:100644 100644 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccc M`0.githooks/pre-push`0"
                         Stderr = ""
@@ -27898,15 +27911,27 @@ fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_avail
                     }
                 }
 
-                $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
-                Add-ChangedFilesFromPushedCommits -Map $files -LocalSha "local-tip" -RemoteSha "old-remote-tip" -AllZeroSha ("0" * 40) -RemoteName "origin"
-                $expected = @("-c", "log.showSignature=false", "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root", "--no-renames", "--diff-merges=separate", "local-tip", "--not", "old-remote-tip", "--remotes=origin")
-                Assert ($files.ContainsKey(".githooks/pre-push")) "the changed file should be attributed to the introduced commit"
-                Assert (@($files[".githooks/pre-push"])[0] -eq ("a" * 40)) "the introduced commit should own the changed file"
-                Assert ($script:CapturedArguments.Count -eq $expected.Count) "git log should receive the expected argument count"
-                for ($index = 0; $index -lt $expected.Count; $index++) {
-                    Assert ($script:CapturedArguments[$index] -eq $expected[$index]) "unexpected git log argument at index $index"
+                function Test-PushArguments {
+                    param([string]$RemoteName, [string]$RemoteSha, [string[]]$ExpectedTail)
+                    $script:CapturedLogArguments = [string[]]@()
+                    $files = [System.Collections.Generic.Dictionary[string, System.Collections.Generic.HashSet[string]]]::new([System.StringComparer]::Ordinal)
+                    Add-ChangedFilesFromPushedCommits -Map $files -LocalSha "local-tip" -RemoteSha $RemoteSha -AllZeroSha ("0" * 40) -RemoteName $RemoteName
+                    $expected = @("-c", "log.showSignature=false", "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root", "--no-renames", "--diff-merges=separate", "local-tip", "--not") + $ExpectedTail
+                    Assert ($files.ContainsKey(".githooks/pre-push")) "the changed file should be attributed to the introduced commit"
+                    Assert (@($files[".githooks/pre-push"])[0] -eq ("a" * 40)) "the introduced commit should own the changed file"
+                    Assert ($script:CapturedLogArguments.Count -eq $expected.Count) "git log should receive the expected argument count for remote '$RemoteName'"
+                    for ($index = 0; $index -lt $expected.Count; $index++) {
+                        Assert ($script:CapturedLogArguments[$index] -eq $expected[$index]) "unexpected git log argument at index $index for remote '$RemoteName'"
+                    }
                 }
+
+                $allZeroSha = "0" * 40
+                Test-PushArguments "origin" $allZeroSha @("--remotes=origin")
+                Test-PushArguments "origin" "old-remote-tip" @("old-remote-tip", "--remotes=origin")
+                Test-PushArguments "https://github.com/Ambiguous-Interactive/signal-fish-server.git" $allZeroSha @("--remotes")
+                Test-PushArguments "https://github.com/Ambiguous-Interactive/signal-fish-server.git" "old-remote-tip" @("old-remote-tip", "--remotes")
+                Test-PushArguments "unknown-remote" "old-remote-tip" @("old-remote-tip", "--remotes")
+                Test-PushArguments "" $allZeroSha @("--remotes")
             "#,
         ])
         .current_dir(&root)
@@ -27919,7 +27944,8 @@ fn test_pre_push_existing_ref_excludes_commits_already_on_remote_when_pwsh_avail
 
     assert!(
         output.status.success(),
-        "pre-push reachability must exclude commits already present on the target remote.\n\
+        "pre-push reachability must exclude commits already present on a named remote, \
+         and must exclude every remote ref for URL or unknown remote names.\n\
          stdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)

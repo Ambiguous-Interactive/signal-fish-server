@@ -16,6 +16,7 @@ $script:Skipped = 0
 $script:WorktreePseudoCommit = "__WORKTREE__"
 $script:HookBudgetMs = 1000
 $script:MaxBatchedBlobBytes = 8 * 1024 * 1024
+$script:RemoteExclusionArguments = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 $script:CommitBlobTextCache = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
 $script:MissingCommitBlobCache = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
 
@@ -67,6 +68,37 @@ function Add-ChangedFile {
     [void]$Map[$File].Add($Commit)
 }
 
+function Get-RemoteExclusionArgument {
+    # Git passes the push URL as the remote argument when a push names an
+    # explicit URL. Such a value is not a configured remote, so
+    # `--remotes=<url>` matches no ref and `git log --not` walks the complete
+    # history. Resolve each name once and exclude every remote ref when the
+    # argument is not a configured remote.
+    param([AllowEmptyString()][string]$RemoteName)
+
+    if ([string]::IsNullOrWhiteSpace($RemoteName)) {
+        return "--remotes"
+    }
+
+    if ($script:RemoteExclusionArguments.ContainsKey($RemoteName)) {
+        return $script:RemoteExclusionArguments[$RemoteName]
+    }
+
+    $remoteArgument = "--remotes"
+    $result = Invoke-Native -FileName "git" -Arguments @("remote")
+    if ($result.ExitCode -eq 0) {
+        foreach ($configuredRemote in ($result.Stdout -split "`r?`n")) {
+            if ([string]::Equals($configuredRemote.Trim(), $RemoteName, [System.StringComparison]::Ordinal)) {
+                $remoteArgument = "--remotes=$RemoteName"
+                break
+            }
+        }
+    }
+
+    $script:RemoteExclusionArguments[$RemoteName] = $remoteArgument
+    $remoteArgument
+}
+
 function Add-ChangedFilesFromPushedCommits {
     # One git spawn produces the pushed commit list and every changed path.
     # The former rev-list + diff-tree --stdin pair cost two process spawns on
@@ -87,7 +119,7 @@ function Add-ChangedFilesFromPushedCommits {
         [AllowEmptyString()][string]$RemoteName = ""
     )
 
-    $remoteArg = if ([string]::IsNullOrWhiteSpace($RemoteName)) { "--remotes" } else { "--remotes=$RemoteName" }
+    $remoteArg = Get-RemoteExclusionArgument -RemoteName $RemoteName
     $logArgs = @(
         "-c", "log.showSignature=false",
         "log", "--format=%H", "--raw", "--no-abbrev", "-z", "--root",
