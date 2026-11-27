@@ -121,6 +121,8 @@ jobs:
     if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     # The scheduled run at bff212da exhausted both 45-minute interpreter lanes.
     # Keep every test, remove substring overlap, and split heavy owners.
+    # The 2026-11-26 twelve-lane cohort passed with a 39.3-minute maximum
+    # (remaining lane). Split a lane before its measured wall approaches 45.
     timeout-minutes: 45
     strategy:
       fail-fast: false
