@@ -978,6 +978,47 @@ async fn canceled_room_assignment_restores_the_previous_connection_state() {
     }
 }
 
+/// A new wrapper-style assignment holds the lifecycle gate before calling the
+/// manager. Its lock order must not deadlock with a canceled assignment's
+/// compensation, which also needs the lifecycle gate.
+#[tokio::test]
+async fn canceled_room_assignment_compensation_does_not_block_a_new_assignment() {
+    let (manager, _coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Park, true).await;
+    let lifecycle = manager.client_lifecycle(&player).expect("client lifecycle");
+    fault.armed.store(true, Ordering::Release);
+    let manager_for_canceled = Arc::clone(&manager);
+    let canceled = tokio::spawn(async move {
+        manager_for_canceled
+            .assign_client_to_room(&player, RoomId::new_v4())
+            .await;
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        fault.entered.notified(),
+    )
+    .await
+    .expect("coordinator registration parked");
+    // Match EnhancedGameServer::assign_client_to_room: the caller owns the
+    // lifecycle gate across the manager call. Hold it before cancellation so
+    // the compensation task cannot finish first.
+    let lifecycle_guard = lifecycle.lock_owned().await;
+    canceled.abort();
+    assert!(canceled
+        .await
+        .expect_err("assignment caller canceled")
+        .is_cancelled());
+
+    let new_room = RoomId::new_v4();
+    let new_assignment = manager.assign_client_to_room(&player, new_room);
+    let outcome = tokio::time::timeout(tokio::time::Duration::from_secs(5), new_assignment).await;
+    drop(lifecycle_guard);
+    outcome.expect("a new assignment must not deadlock with route compensation");
+
+    assert_eq!(manager.get_client_room(&player), Some(new_room));
+    assert_eq!(manager.assigned_room_candidates(), vec![(new_room, player)]);
+}
+
 /// A failed reassignment must restore the prior room, advanced relay seq and
 /// the exact membership and sender generations.
 #[tokio::test]
