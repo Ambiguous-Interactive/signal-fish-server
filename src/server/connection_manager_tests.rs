@@ -807,6 +807,246 @@ async fn ordinary_admission_callback_error_keeps_existing_acceptance_policy() {
     }
 }
 
+#[derive(Debug)]
+struct ConnectionSnapshot {
+    room_id: Option<RoomId>,
+    game_data_seq: u64,
+    game_data_epoch: u32,
+    membership_generation: Uuid,
+    prior_membership_generation: Option<Uuid>,
+    sender: DeliverySender,
+}
+
+fn connection_snapshot(manager: &ConnectionManager, player: &PlayerId) -> ConnectionSnapshot {
+    let client = manager.clients.get(player).expect("registered client");
+    ConnectionSnapshot {
+        room_id: client.room_id,
+        game_data_seq: client.game_data_seq,
+        game_data_epoch: client.game_data_epoch,
+        membership_generation: client.membership_generation,
+        prior_membership_generation: client.prior_membership_generation,
+        sender: client.sender.clone(),
+    }
+}
+
+fn assert_connection_snapshot(
+    manager: &ConnectionManager,
+    player: &PlayerId,
+    expected: &ConnectionSnapshot,
+) {
+    let actual = connection_snapshot(manager, player);
+    assert_eq!(actual.room_id, expected.room_id, "room assignment");
+    assert_eq!(
+        actual.game_data_seq, expected.game_data_seq,
+        "relay sequence"
+    );
+    assert_eq!(actual.game_data_epoch, expected.game_data_epoch, "epoch");
+    assert_eq!(
+        actual.membership_generation, expected.membership_generation,
+        "membership generation"
+    );
+    assert_eq!(
+        actual.prior_membership_generation, expected.prior_membership_generation,
+        "prior membership generation"
+    );
+    assert!(
+        actual.sender.same_channel(&expected.sender),
+        "sender generation"
+    );
+}
+
+async fn classified_assignment_manager(
+    behavior: AdmissionBehavior,
+    after_effect: bool,
+) -> (
+    Arc<ConnectionManager>,
+    Arc<TestCoordinator>,
+    Arc<AdmissionFault>,
+    PlayerId,
+) {
+    let (manager, coordinator, fault) = admission_fault_manager(behavior, after_effect);
+    fault.armed.store(false, Ordering::Release);
+    let (sender, _receiver) = crate::coordination::outbound_queue::channel(4, 4);
+    let player = manager
+        .register_classified_client(
+            DeliverySender::classified(sender),
+            ConnectionCloseSignal::detached(),
+            "127.0.0.1:5050".parse().unwrap(),
+            Uuid::new_v4(),
+        )
+        .await
+        .expect("classified registration succeeds");
+    (manager, coordinator, fault, player)
+}
+
+/// A failed coordinator registration must not leave local ghost membership.
+/// The connection was prepared for a room the coordinator never routes.
+#[tokio::test]
+async fn failed_room_assignment_restores_the_previous_connection_state() {
+    for after_effect in [false, true] {
+        let (manager, coordinator, fault, player) =
+            classified_assignment_manager(AdmissionBehavior::Error, after_effect).await;
+        let previous = connection_snapshot(&manager, &player);
+        let registrations_before = coordinator.registrations.lock().await.len();
+        fault.armed.store(true, Ordering::Release);
+
+        manager
+            .assign_client_to_room(&player, RoomId::new_v4())
+            .await;
+
+        assert_connection_snapshot(&manager, &player, &previous);
+        assert_eq!(
+            manager.get_client_room(&player),
+            None,
+            "a failed coordinator registration must not leave ghost room membership"
+        );
+        assert!(
+            manager.assigned_room_candidates().is_empty(),
+            "a failed assignment must not advertise a cleanup candidate"
+        );
+        assert_eq!(
+            coordinator.registrations.lock().await.len(),
+            registrations_before + usize::from(after_effect),
+            "an error before the coordinator effect must not publish a route"
+        );
+    }
+}
+
+/// Cancellation after the local prepare must restore the same snapshot as an
+/// ordinary coordinator error, including when the coordinator effect landed.
+#[tokio::test]
+async fn canceled_room_assignment_restores_the_previous_connection_state() {
+    for after_effect in [false, true] {
+        let (manager, _coordinator, fault, player) =
+            classified_assignment_manager(AdmissionBehavior::Park, after_effect).await;
+        let previous = connection_snapshot(&manager, &player);
+        fault.armed.store(true, Ordering::Release);
+        let room_id = RoomId::new_v4();
+        let manager_for_caller = Arc::clone(&manager);
+        let caller = tokio::spawn(async move {
+            manager_for_caller
+                .assign_client_to_room(&player, room_id)
+                .await;
+        });
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            fault.entered.notified(),
+        )
+        .await
+        .expect("coordinator registration parked");
+        caller.abort();
+        assert!(caller
+            .await
+            .expect_err("assignment caller canceled")
+            .is_cancelled());
+
+        assert_connection_snapshot(&manager, &player, &previous);
+        assert!(
+            manager.assigned_room_candidates().is_empty(),
+            "a canceled assignment must not advertise a cleanup candidate"
+        );
+    }
+}
+
+/// A failed reassignment must restore the prior room, advanced relay seq and
+/// the exact membership and sender generations.
+#[tokio::test]
+async fn failed_room_reassignment_restores_the_previous_room_and_stamp() {
+    let (manager, _coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Error, false).await;
+    let previous_room = RoomId::new_v4();
+    manager.assign_client_to_room(&player, previous_room).await;
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &previous_room),
+        Some(RelayStamp { seq: 1, epoch: 1 })
+    );
+    let previous = connection_snapshot(&manager, &player);
+    assert_eq!(previous.room_id, Some(previous_room));
+    assert_eq!(previous.game_data_seq, 1);
+    fault.armed.store(true, Ordering::Release);
+
+    manager
+        .assign_client_to_room(&player, RoomId::new_v4())
+        .await;
+
+    assert_connection_snapshot(&manager, &player, &previous);
+    assert_eq!(
+        manager.assigned_room_candidates(),
+        vec![(previous_room, player)],
+        "only the prior membership remains after a failed reassignment"
+    );
+}
+
+/// Cancellation of a reassignment restores the same prior room and stamp.
+#[tokio::test]
+async fn canceled_room_reassignment_restores_the_previous_room_and_stamp() {
+    let (manager, _coordinator, fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Park, false).await;
+    let previous_room = RoomId::new_v4();
+    manager.assign_client_to_room(&player, previous_room).await;
+    assert_eq!(
+        manager.next_relay_stamp_in_room(&player, &previous_room),
+        Some(RelayStamp { seq: 1, epoch: 1 })
+    );
+    let previous = connection_snapshot(&manager, &player);
+    fault.armed.store(true, Ordering::Release);
+    let next_room = RoomId::new_v4();
+    let manager_for_caller = Arc::clone(&manager);
+    let caller = tokio::spawn(async move {
+        manager_for_caller
+            .assign_client_to_room(&player, next_room)
+            .await;
+    });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(5),
+        fault.entered.notified(),
+    )
+    .await
+    .expect("coordinator registration parked");
+    caller.abort();
+    assert!(caller
+        .await
+        .expect_err("reassignment caller canceled")
+        .is_cancelled());
+
+    assert_connection_snapshot(&manager, &player, &previous);
+    assert_eq!(
+        manager.assigned_room_candidates(),
+        vec![(previous_room, player)],
+        "only the prior membership remains after a canceled reassignment"
+    );
+}
+
+/// A successful assignment commits the prepared state; the rollback guard
+/// must not run on the success path.
+#[tokio::test]
+async fn successful_room_assignment_commits_the_prepared_state() {
+    let (manager, _coordinator, _fault, player) =
+        classified_assignment_manager(AdmissionBehavior::Error, false).await;
+    let previous = connection_snapshot(&manager, &player);
+    let room_id = RoomId::new_v4();
+
+    manager.assign_client_to_room(&player, room_id).await;
+
+    let after = connection_snapshot(&manager, &player);
+    assert_eq!(after.room_id, Some(room_id));
+    assert_eq!(
+        after.game_data_epoch,
+        previous.game_data_epoch.saturating_add(1),
+        "a successful assignment keeps the advanced epoch"
+    );
+    assert_eq!(after.game_data_seq, 0, "a new membership restarts seq");
+    assert_ne!(
+        after.membership_generation, previous.membership_generation,
+        "a successful assignment keeps the fresh membership generation"
+    );
+    assert!(
+        !after.sender.same_channel(&previous.sender),
+        "a successful assignment keeps the advanced sender generation"
+    );
+    assert_eq!(manager.assigned_room_candidates(), vec![(room_id, player)]);
+}
+
 #[tokio::test]
 async fn test_coordinator_uses_unknown_routing_default() {
     let coordinator = TestCoordinator::default();

@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore the previous room assignment and relay state when `assign_client_to_room` cannot register its coordinator route (#1826).
 - Reject addressed binary game data to a target without a committed room route and return an invalid-input error (#1823).
 - Upgrade `url` to 2.5.9 across every audited dependency graph.
 - Accept null token-binding fingerprints in the protocol schema and remove a misleading nullable shutdown retry hint
