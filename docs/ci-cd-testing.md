@@ -842,7 +842,25 @@ Advanced Safety workflow red. Both upload actionable diagnostic artifacts.
 | Job | Tool | What It Detects | Timeout |
 |-----|------|-----------------|---------|
 | `miri` | Miri interpreter | Undefined behavior, uninitialized reads, data races | 45 min |
-| `asan` | AddressSanitizer | Use-after-free, buffer overflows, stack overflows, memory leaks | 30 min |
+| `asan` | AddressSanitizer | Use-after-free, buffer overflows, stack overflows, memory leaks | 45 min |
+
+### AddressSanitizer Budget
+
+The ASan job runs the root suite and the native library suite under
+AddressSanitizer. It needs more than 30 minutes on a cold cache.
+
+The 2026-11-27 scheduled [run 45926929392](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45926929392)
+completed in 32m01s:
+
+- Root compile: 6m08s.
+- Root suite: 22m40s.
+- Native suite: 2m15s, 368 passed.
+
+The old 30-minute limit cancelled the 2026-11-02 [run 41376479803](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/41376479803)
+at 30m16s. The log shows no failed test or sanitizer finding. The native suite
+had started but did not finish. The 45-minute budget leaves about 13 minutes
+for runner variance. `test_ci_safety_asan_timeout_covers_measured_job_budget`
+fails if the budget drops below 40 minutes.
 
 ### Triggers
 
@@ -992,6 +1010,7 @@ always visible.
 | `test_ci_safety_workflow_uploads_artifacts` | Output artifacts are uploaded |
 | `test_ci_safety_jobs_not_in_required_check_names` | Jobs are NOT in required check names |
 | `test_ci_safety_workflow_artifact_uploads_always_run` | Upload steps use `if: always()` |
+| `test_ci_safety_asan_timeout_covers_measured_job_budget` | ASan keeps at least the measured 40-minute budget |
 | `test_analysis_nightly_version_consistency` | Analysis workflows and the devcontainer share one nightly pin |
 
 ## Architecture Decisions
