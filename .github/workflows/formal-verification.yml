@@ -61,6 +61,7 @@ on:
       - "scripts/run-sequenced-relay-trace-validation.sh"
       - "scripts/run-z3-proofs.sh"
       - "scripts/download-verified.sh"
+      - "scripts/install-hax-tools.sh"
       - "src/**"
       - "Cargo.toml"
       - "Cargo.lock"

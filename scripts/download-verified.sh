@@ -25,12 +25,26 @@ esac
 
 case "$algorithm" in
     sha256)
-        checksum_command=(sha256sum)
         digest_length=64
+        if command -v sha256sum >/dev/null 2>&1; then
+            checksum_command=(sha256sum)
+        elif command -v shasum >/dev/null 2>&1; then
+            checksum_command=(shasum -a 256)
+        else
+            echo "ERROR: No SHA-256 checksum command is available" >&2
+            exit 2
+        fi
         ;;
     sha512)
-        checksum_command=(sha512sum)
         digest_length=128
+        if command -v sha512sum >/dev/null 2>&1; then
+            checksum_command=(sha512sum)
+        elif command -v shasum >/dev/null 2>&1; then
+            checksum_command=(shasum -a 512)
+        else
+            echo "ERROR: No SHA-512 checksum command is available" >&2
+            exit 2
+        fi
         ;;
     *)
         echo "ERROR: Unsupported checksum algorithm: $algorithm" >&2
@@ -43,12 +57,10 @@ if [[ ${#expected_digest} -ne $digest_length || ! "$expected_digest" =~ ^[a-f0-9
     exit 2
 fi
 
-case "$max_time" in
-    "" | *[!0-9]* | 0)
-        echo "ERROR: DOWNLOAD_VERIFIED_MAX_TIME must be a positive integer" >&2
-        exit 2
-        ;;
-esac
+if [[ ! "$max_time" =~ ^[0-9]+$ || ! "$max_time" =~ [1-9] ]]; then
+    echo "ERROR: DOWNLOAD_VERIFIED_MAX_TIME must be a positive integer" >&2
+    exit 2
+fi
 
 verify() {
     local candidate="$1"

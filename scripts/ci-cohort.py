@@ -35,7 +35,7 @@ def classify(paths):
         return dict.fromkeys(("lean", "proof_faults", "packaging", "fuzz", "capacity"), True)
     if any("/" not in p and p not in known_files and not p.startswith(".") for p in paths):
         return dict.fromkeys(("lean", "proof_faults", "packaging", "fuzz", "capacity"), True)
-    proof_faults = any(p.startswith(("formal/", ".cargo/")) or p in {"rust-toolchain.toml", "Cargo.toml", "Cargo.lock", ".github/workflows/formal-verification.yml", "scripts/ci-cohort.py", "scripts/download-verified.sh", "scripts/read-toml-string.sh"} for p in paths)
+    proof_faults = any(p.startswith(("formal/", ".cargo/")) or p in {"rust-toolchain.toml", "Cargo.toml", "Cargo.lock", ".github/workflows/formal-verification.yml", "scripts/ci-cohort.py", "scripts/download-verified.sh", "scripts/install-hax-tools.sh", "scripts/read-toml-string.sh"} for p in paths)
     return {
         "capacity": any(
             p.startswith(("tests/capacity_runner/", ".llm/code-samples/capacity/"))

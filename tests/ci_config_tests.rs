@@ -19455,6 +19455,8 @@ fn test_lychee_setup_is_retrying_checksum_verified_and_shared() {
         "--tlsv1.2",
         "checksum_command=(sha256sum)",
         "checksum_command=(sha512sum)",
+        "checksum_command=(shasum -a 256)",
+        "checksum_command=(shasum -a 512)",
         "${checksum_command[@]}\" -c - >/dev/null",
         "${DOWNLOAD_VERIFIED_MAX_TIME:-60}",
         "Reusing verified download",
@@ -20033,6 +20035,40 @@ cp "$DOWNLOAD_FIXTURE_PAYLOAD" "$output"
         fs::read(&output).expect("read sha512 download"),
         b"verified payload\n"
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_verified_downloader_rejects_zero_timeout_strings() {
+    let temp = unique_temp_dir("verified-zero-timeout");
+    for value in ["0", "00", "000"] {
+        let output = temp.path().join(format!("zero-{value}.bin"));
+        let result = Command::new("bash")
+            .arg(repo_root().join("scripts/download-verified.sh"))
+            .args([
+                "https://example.invalid/never-fetched.bin",
+                "62d33f34d79dd4a4590a760d9f6c6926834eadc87e48b9409e029c61e8aa37dc",
+            ])
+            .arg(&output)
+            .env("DOWNLOAD_VERIFIED_MAX_TIME", value)
+            .output()
+            .expect("run downloader with a zero timeout");
+        assert_eq!(
+            result.status.code(),
+            Some(2),
+            "zero timeout `{value}` must fail before curl: {}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("positive integer"),
+            "zero timeout `{value}` must name the positive-integer rule"
+        );
+        assert!(
+            !output.exists(),
+            "a rejected timeout must not create output"
+        );
+    }
 }
 
 #[test]
@@ -33142,6 +33178,7 @@ fn test_formal_verification_triggers_cover_modeled_sources() {
             "scripts/run-sequenced-relay-trace-validation.sh",
             "scripts/run-z3-proofs.sh",
             "scripts/download-verified.sh",
+            "scripts/install-hax-tools.sh",
             "src/**",
             "Cargo.toml",
             "Cargo.lock",

@@ -160,9 +160,14 @@ class SelectionTests(unittest.TestCase):
                 self.assertFalse(cohort.classify([source])["proof_faults"])
 
     def test_proof_harness_and_toolchain_require_fault_controls(self):
-        for source in ["formal/source-linked/lean/verify.py", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/formal-verification.yml"]:
+        for source in ["formal/source-linked/lean/verify.py", "Cargo.lock", "rust-toolchain.toml", ".github/workflows/formal-verification.yml", "scripts/download-verified.sh", "scripts/install-hax-tools.sh"]:
             with self.subTest(source=source):
                 self.assertTrue(cohort.classify([source])["proof_faults"])
+
+    def test_hax_installer_changes_require_lean_fault_controls(self):
+        result = cohort.classify(["scripts/install-hax-tools.sh"])
+        self.assertTrue(result["lean"])
+        self.assertTrue(result["proof_faults"])
 
     def test_packaging_and_privacy_inputs_cannot_skip(self):
         for source in ["Cargo.toml", "build.rs", "src/lib.rs", "src/websocket/mod.rs", "tests/ui/private.rs"]:

@@ -16,8 +16,11 @@ back to the official GitHub API asset endpoint.
 - The API fallback accepts only one exact asset name with a positive integer
   ID from the pinned release tag. The original digest still verifies the
   asset bytes.
+- `sha256sum` and `sha512sum` are preferred; `shasum -a 256` and
+  `shasum -a 512` cover macOS and other hosts without the GNU tools.
 - `DOWNLOAD_VERIFIED_MAX_TIME` bounds each attempt. The default is 60
-  seconds; the large Godot archives use 1200 seconds.
+  seconds; the large Godot archives use 1200 seconds. Zero and leading-zero
+  values are rejected before curl starts.
 - Every GitHub release download in `.github/workflows`, `scripts/`, and
   `.devcontainer/Dockerfile` must name this helper. A repository test enforces
   that rule.
