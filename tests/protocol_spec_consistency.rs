@@ -2743,10 +2743,20 @@ fn connection_metadata_variants_match_input_and_legacy_output_schemas() {
             })
             .expect("numeric metadata branch");
         let property = mapping_path(branch, &["properties", field]).expect("u16 metadata field");
-        assert_eq!(
-            property.as_mapping_get("type").and_then(Yaml::as_str),
-            Some("integer")
-        );
+        let declared_type = property
+            .as_mapping_get("type")
+            .expect("metadata field type");
+        if field == "client_id" {
+            assert_eq!(
+                declared_type
+                    .as_sequence()
+                    .map(|types| types.iter().map(Yaml::as_str).collect::<BTreeSet<_>>()),
+                Some(BTreeSet::from([Some("integer"), Some("null")])),
+                "relay.client_id must declare integer and null as Draft 7 types"
+            );
+        } else {
+            assert_eq!(declared_type.as_str(), Some("integer"));
+        }
         assert_eq!(
             property
                 .as_mapping_get("minimum")
