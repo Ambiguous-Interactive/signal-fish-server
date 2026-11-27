@@ -121,8 +121,11 @@ jobs:
     if: ${{ !cancelled() && needs.verified-head-guard.outputs.duplicate != 'true' }}
     # The scheduled run at bff212da exhausted both 45-minute interpreter lanes.
     # Keep every test, remove substring overlap, and split heavy owners.
-    # The 2026-11-26 twelve-lane cohort passed with a 39.3-minute maximum
-    # (remaining lane). Split a lane before its measured wall approaches 45.
+    # Run 45926929392 (2026-11-27) passed all twelve lanes. The remaining lane
+    # ran 37m33s of tests in a 41m50s job. Its metrics tests used 10.1 minutes,
+    # so metrics owns its own lane. Split a lane before its measured test step
+    # exceeds 35 minutes; setup and runner variance use the rest of the
+    # 45-minute job limit.
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -158,10 +161,13 @@ jobs:
             modules: "server::ready_state_tests"
           - name: websocket
             modules: "websocket"
+          # The two heaviest remaining tests used 330.4s and 190.9s here.
+          - name: metrics
+            modules: "metrics"
           - name: remaining
             modules:
-              "auth config database deadline distributed logging metrics
-              reconnection rate_limit retry security session_records trace_validation wall_time"
+              "auth config database deadline distributed logging reconnection
+              rate_limit retry security session_records trace_validation wall_time"
     env:
       CARGO_TARGET_DIR: target/miri
     steps:

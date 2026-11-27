@@ -875,6 +875,49 @@ paths, and runs exact test names. Each lane retains its selected-test manifest.
 The scope checks reject gaps and overlap; a passing lane covers only its
 selected tests and interpreted schedules.
 
+### Miri Lane Budget
+
+The first scheduled cohort with per-test timing was
+[run 45926929392](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45926929392)
+on head `5b05750ab15cfead8a2f8b4266e173d2b23561b5` (2026-11-27). All twelve
+lanes passed. This cohort replaces the unrecoverable per-test split from the
+canceled historical runs; those logs predate `--report-time`.
+
+| Lane | Test step | Longest test |
+| --- | ---: | ---: |
+| `websocket` | 5m31s | 109.3s |
+| `core` | 10m03s | 284.4s |
+| `ready-state` | 12m00s | 642.1s |
+| `room-service` | 15m07s | 107.3s |
+| `session-policy` | 15m12s | 395.5s |
+| `server` | 15m54s | 105.3s |
+| `server-maintenance` | 16m19s | 201.1s |
+| `server-delivery` | 16m35s | 124.3s |
+| `deadline-scan` | 17m27s | 1,046.9s |
+| `protocol` | 22m26s | 1,303.3s |
+| `coordination` | 28m38s | 736.2s |
+| `remaining` | 37m33s | 330.4s |
+
+The `remaining` lane was the longest: 37m33s of tests in a 41m50s job,
+leaving 3m10s under the 45-minute limit. The prior cohort
+([run 45740799990](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45740799990),
+head `df203a1e6544f3529289f3a2c6cc6107bfd78d81`) used 39m16s for the same
+lane. Its five slowest tests were:
+
+| Test | Elapsed |
+| --- | ---: |
+| `metrics::tests::test_average_matches_full_metrics_for_all_histogram_states` | 330.4s |
+| `config::security::tests::every_security_config_struct_denies_unknown_fields` | 197.6s |
+| `metrics::tests::operation_latency_range_grows_without_changing_metrics_or_limits` | 190.9s |
+| `config::validation::tests::token_binding_subprotocol_admission_covers_every_byte_class` | 144.5s |
+| `security::connect_token::tests::token_at_the_size_cap_boundary_verifies` | 122.6s |
+
+The 14 `metrics` tests used 10.1 minutes of that lane. They now own a separate
+`metrics` lane. With the same measurements, `remaining` should use about
+27.5 minutes of test step and 31.8 minutes of job wall, leaving about 13
+minutes. Split a lane before its measured test step exceeds 35 minutes;
+setup and runner variance use the rest of the 45-minute job limit.
+
 ### Miri Provenance Limit
 
 Existing [#1501](https://github.com/Ambiguous-Interactive/signal-fish-server/issues/1501)
