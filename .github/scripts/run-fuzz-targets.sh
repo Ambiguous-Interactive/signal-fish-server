@@ -25,6 +25,13 @@ if ((${#targets[@]} == 0)); then
   echo "FUZZ_TARGETS must list at least one target" >&2
   exit 64
 fi
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+runner="$repo_root/scripts/run-bounded-command.py"
+if [[ ! -f "$runner" ]]; then
+  echo "bounded command supervisor not found: $runner" >&2
+  exit 66
+fi
 logs_dir="$RUNNER_TEMP/fuzz-logs"
 mkdir -p "$logs_dir"
 
@@ -48,11 +55,14 @@ trap 'exit 130' INT TERM
 for target in "${targets[@]}"; do
   mkdir -p "fuzz/corpus/$target" "fuzz/artifacts/$target"
   : > "$logs_dir/$target.log"
-  timeout --signal=TERM --kill-after=10s "${watchdog_seconds}s" \
-    cargo +nightly-2026-08-01 fuzz run "$target" \
+  python3 "$runner" \
+    --timeout-seconds "$watchdog_seconds" \
+    --grace-seconds 10 \
+    --no-print-log \
+    --log "$logs_dir/$target.log" \
+    -- cargo +nightly-2026-08-01 fuzz run "$target" \
     --target x86_64-unknown-linux-gnu -- \
-    -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536 \
-    >"$logs_dir/$target.log" 2>&1 &
+    -max_total_time="${MAX_TOTAL_TIME}" -max_len=65536 &
   pids+=("$!")
 done
 
