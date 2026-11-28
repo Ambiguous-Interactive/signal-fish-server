@@ -126,6 +126,46 @@ verification visibility. Report remaining misses rather than declaring success
 from a single fast sample. Consider crate splitting or build archives only if
 residual measurements justify their maintenance cost.
 
+## Routine PR CI bound (#953)
+
+Issue #953 required a repeated routine-PR bound without removing checks. The
+2026-11-28 cohort covers twelve consecutive merged PR heads in the Linux
+`Nextest (ubuntu-latest)` job, plus one same-head repeat. The workflow,
+toolchain, all-feature nextest command, allocation ceilings, non-TLS control,
+and H14 control are unchanged. Cache state comes from the retained
+`Swatinem/rust-cache` log line. `none` means no exact cache key existed; those
+jobs compiled the full graph.
+
+| PR | Head | Cache | Job | Nextest step | Execution | Tests |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| [#1817](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45959806511/job/140374870424) | `1c3a6c603` | hit | 578 s | 519.8 s | 375.575 s | 3,261 |
+| [#1819](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45987646725/job/140467490957) | `eedcfc37a` | none | 559 s | 501.0 s | 361.418 s | 3,261 |
+| [#1820](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/45991637413/job/140480848138) | `8ed871496` | none | 728 s | 614.0 s | 376.388 s | 3,261 |
+| [#1821](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46041593673/job/140650557306) | `4a75e42fd` | none | 663 s | 558.3 s | 369.920 s | 3,261 |
+| [#1822](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46046061580/job/140665878841) | `e7a8ceb86` | none | 584 s | 520.7 s | 363.600 s | 3,261 |
+| [#1824](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46055104900/job/140695731478) | `6bd1abf86` | none | 645 s | 548.4 s | 369.553 s | 3,262 |
+| [#1825](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46059833716/job/140711459536) | `7f4551317` | none | 675 s | 601.1 s | 374.483 s | 3,262 |
+| [#1827](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46068436351/job/140739678424) | `57211f6e9` | none | 629 s | 555.7 s | 368.309 s | 3,269 |
+| [#1828](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46078381083/job/140771503054) | `1bd23d2a0` | hit | 570 s | 481.0 s | 368.355 s | 3,269 |
+| [#1829](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46085083623/job/140792819634) | `ca369a82e` | none | 715 s | 603.6 s | 375.148 s | 3,269 |
+| [#1830](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46090004406/job/140808616082) | `dd62e6d92` | hit | 523 s | 467.3 s | 364.325 s | 3,269 |
+| [#1831](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46105113007/job/140856127919) | `c0e787645` | hit | 537 s | 454.4 s | 363.768 s | 3,272 |
+| [#1831 attempt 2](https://github.com/Ambiguous-Interactive/signal-fish-server/actions/runs/46105113007/job/140885803873) | `c0e787645` | hit | 551 s | 489.6 s | 370.236 s | 3,272 |
+
+Every sample stays below the original 824-second job reference. The largest
+job is 728 seconds; the largest nextest step is 614.0 seconds, below the
+815-second #952 observation; the largest execution is 376.388 seconds, below
+the 453.599-second #950 observation. All samples ran at least 3,261 tests with
+47 skipped. The earlier reference heads ran 3,221–3,228 eligible tests, so this
+bound does not come from a narrower suite. The same-head repeat moved the job
+from 537 to 551 seconds, so the result is not a single fast sample.
+
+Limits: all samples use shared GitHub-hosted runners and do not expose outer
+CPU quotas. The heads differ within the comparable PR cohort, so this is not a
+broad same-source experiment. It bounds only the Linux Nextest job; macOS,
+Windows, coverage, and deep verification stay separate. Raw logs and extracted
+metadata remain under the ignored `progress/session-953-ci-runtime/` path.
+
 ## Initial implementation measurement
 
 On the existing aarch64 development container, 20 warm semantic-neutral edits
