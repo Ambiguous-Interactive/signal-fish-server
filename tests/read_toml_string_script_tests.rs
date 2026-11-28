@@ -103,6 +103,77 @@ fn test_read_toml_string_fails_closed_for_missing_section_key() {
 }
 
 #[test]
+fn test_read_toml_string_decodes_escapes_and_scalars() {
+    let toml = r#"
+description = "a \"quoted\" value"
+path = "C:\\temp"
+version = 1
+enabled = true
+"#;
+
+    for (args, expected, name) in [
+        (
+            ["sample.toml", "description"],
+            "a \"quoted\" value\n",
+            "escaped quotes",
+        ),
+        (
+            ["sample.toml", "path"],
+            "C:\\temp\n",
+            "escaped backslash",
+        ),
+        (["sample.toml", "version"], "1\n", "integer scalar"),
+        (["sample.toml", "enabled"], "true\n", "boolean scalar"),
+    ] {
+        let (exit_code, output) = run_reader(&args, toml);
+
+        assert_eq!(
+            exit_code, 0,
+            "case {name} should read the TOML value.\nOutput:\n{output}"
+        );
+        assert_eq!(
+            output, expected,
+            "case {name} should return the decoded value"
+        );
+    }
+}
+
+#[test]
+fn test_read_toml_string_fails_closed_for_invalid_toml() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "built-in-tls", "package.metadata.signal-fish-release"],
+        "[package.metadata.signal-fish-release]\nbuilt-in-tls = maybe\n",
+    );
+
+    assert_eq!(
+        exit_code, 3,
+        "invalid TOML must not look like an absent key.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Could not read TOML file"),
+        "invalid TOML should name the parse failure.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_read_toml_string_reads_dotted_section_paths() {
+    let (exit_code, output) = run_reader(
+        &[
+            "sample.toml",
+            "prepared-from",
+            "package.metadata.signal-fish-release",
+        ],
+        "[package.metadata.signal-fish-release]\nprepared-from = \"abc\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "dotted section paths must resolve nested tables.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "abc\n");
+}
+
+#[test]
 fn test_read_toml_string_array_of_tables_ends_previous_section() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "package"],
