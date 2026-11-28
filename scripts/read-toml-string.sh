@@ -97,7 +97,7 @@ def main(argv: list[str]) -> int:
     try:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
-    except (OSError, tomllib.TOMLDecodeError) as error:
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         print(f"ERROR: Could not read TOML file {file_name}: {error}", file=sys.stderr)
         return 3
 

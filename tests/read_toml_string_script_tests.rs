@@ -13,10 +13,10 @@ fn copy_reader_script(temp_root: &std::path::Path) {
     write_file(&script_dst, &script);
 }
 
-fn run_reader(args: &[&str], toml: &str) -> (i32, String) {
+fn run_reader_bytes(args: &[&str], toml: &[u8]) -> (i32, String) {
     let temp_root = unique_temp_dir("read-toml-string");
     copy_reader_script(temp_root.path());
-    write_file(&temp_root.path().join("sample.toml"), toml);
+    fs::write(temp_root.path().join("sample.toml"), toml).expect("write sample TOML bytes");
 
     let output = bash_command()
         .arg("scripts/read-toml-string.sh")
@@ -37,6 +37,10 @@ fn run_reader(args: &[&str], toml: &str) -> (i32, String) {
         output.status.code().unwrap_or(-1),
         combined.replace("\r\n", "\n"),
     )
+}
+
+fn run_reader(args: &[&str], toml: &str) -> (i32, String) {
+    run_reader_bytes(args, toml.as_bytes())
 }
 
 #[test]
@@ -152,6 +156,23 @@ fn test_read_toml_string_fails_closed_for_invalid_toml() {
     assert!(
         output.contains("Could not read TOML file"),
         "invalid TOML should name the parse failure.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_read_toml_string_fails_closed_for_invalid_utf8() {
+    let (exit_code, output) = run_reader_bytes(
+        &["sample.toml", "version", "package"],
+        b"[package]\n# invalid byte: \xff\nversion = \"0.1.0\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 3,
+        "invalid UTF-8 must not look like an absent key.\nOutput:\n{output}"
+    );
+    assert!(
+        output.contains("Could not read TOML file"),
+        "invalid UTF-8 should name the read failure.\nOutput:\n{output}"
     );
 }
 
