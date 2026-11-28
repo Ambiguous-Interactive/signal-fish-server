@@ -25,16 +25,95 @@ from typing import Any
 _HEADER = re.compile(r"^\s*\[\[?(?P<name>[^\]]+)\]\]?\s*(?:#.*)?$")
 
 
+def _split_section(section: str) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    quote: str | None = None
+    escaped = False
+    for char in section:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if quote is not None:
+            if quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            else:
+                current.append(char)
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == ".":
+            part = "".join(current).strip()
+            if part:
+                parts.append(part)
+            current = []
+        else:
+            current.append(char)
+    part = "".join(current).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _canonical(parts: list[str]) -> str:
+    return "\0".join(parts)
+
+
+def _multiline_open(line: str) -> str | None:
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if quote is not None:
+            if quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if line.startswith('"""', index):
+            close = line.find('"""', index + 3)
+            if close == -1:
+                return '"""'
+            index = close + 3
+            continue
+        if line.startswith("'''", index):
+            close = line.find("'''", index + 3)
+            if close == -1:
+                return "'''"
+            index = close + 3
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "#":
+            return None
+        index += 1
+    return None
+
+
 def _declared_sections(text: str) -> set[str]:
     sections: set[str] = set()
+    multiline: str | None = None
     for line in text.splitlines():
-        match = _HEADER.match(line)
-        if match is None:
+        if multiline is not None:
+            if multiline in line:
+                multiline = None
             continue
-        name = match.group("name").strip()
-        if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
-            name = name[1:-1]
-        sections.add(re.sub(r"\s*\.\s*", ".", name))
+        match = _HEADER.match(line)
+        if match is not None:
+            parts = _split_section(match.group("name"))
+            if parts:
+                sections.add(_canonical(parts))
+            continue
+        multiline = _multiline_open(line)
     return sections
 
 
@@ -79,14 +158,10 @@ def _section_tables(
 ) -> list[dict[str, Any]]:
     # A section exists only when the source declares a matching table header.
     # This keeps `items = [{ version = "..." }]` an array value, not a section.
-    if section not in declared:
+    parts = _split_section(section)
+    if not parts or _canonical(parts) not in declared:
         return []
-    literal = data.get(section)
-    if literal is not None:
-        tables = _tables(literal)
-        if tables:
-            return tables
-    return _resolve_sections(data, section.split("."))
+    return _resolve_sections(data, parts)
 
 
 def _lookup(

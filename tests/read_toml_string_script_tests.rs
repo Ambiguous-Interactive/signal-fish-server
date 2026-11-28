@@ -207,6 +207,35 @@ fn test_read_toml_string_reads_nested_sections_inside_array_tables() {
 }
 
 #[test]
+fn test_read_toml_string_ignores_headers_inside_multiline_strings() {
+    let toml = "items = { version = \"wrong\" }\n\ndescription = \"\"\"\n[items]\n\"\"\"\n";
+    let (exit_code, output) = run_reader(&["sample.toml", "version", "items"], toml);
+
+    assert_eq!(
+        exit_code, 1,
+        "a header-shaped line inside a multiline string is not a section.\nOutput:\n{output}"
+    );
+    assert!(
+        output.is_empty(),
+        "a multiline string must not declare a section.\nOutput:\n{output}"
+    );
+}
+
+#[test]
+fn test_read_toml_string_reads_quoted_dotted_section_paths() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "value", "parent.\"child.name\""],
+        "[parent.\"child.name\"]\nvalue = \"ok\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "periods inside quoted section keys must stay in the key.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "ok\n");
+}
+
+#[test]
 fn test_read_toml_string_ignores_inline_table_arrays() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "items"],
