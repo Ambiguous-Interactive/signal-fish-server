@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -66,6 +67,7 @@ impl BrowserFixture {
             package.join("cli.js"),
             r#"const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind:'cli',args})+'\n');
 if (args.length !== 2 || !['chromium-headless-shell','chromium','firefox'].includes(args[1])) {
@@ -74,6 +76,10 @@ if (args.length !== 2 || !['chromium-headless-shell','chromium','firefox'].inclu
 }
 const delay = Number(args[0] === 'install' ? process.env.FIXTURE_INSTALL_DELAY_MS : process.env.FIXTURE_SETUP_DELAY_MS);
 if (delay > 0) {
+  const marker = process.env.FIXTURE_CHILD_MARKER;
+  if (marker) {
+    spawn(process.execPath, ['-e', "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'alive'), 1500)", marker], {stdio: 'ignore'});
+  }
   const end = Date.now() + delay;
   while (Date.now() < end) {}
 }
@@ -143,6 +149,7 @@ module.exports = {chromium:browser('chromium'),firefox:browser('firefox')};
             .env("FIXTURE_CLOSE_FAIL", "0")
             .env("FIXTURE_INSTALL_DELAY_MS", "0")
             .env("FIXTURE_SETUP_DELAY_MS", "0")
+            .env("FIXTURE_CHILD_MARKER", "")
             .env("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", "600000")
             .envs(overrides.iter().copied())
             .output()
@@ -299,7 +306,7 @@ fn browser_installer_bounds_stalled_download_and_dependency_setup() {
     if !node_available() {
         return;
     }
-    for (name, overrides, history) in [
+    for (name, mut overrides, history) in [
         (
             "download",
             vec![
@@ -320,6 +327,9 @@ fn browser_installer_bounds_stalled_download_and_dependency_setup() {
         ),
     ] {
         let fixture = BrowserFixture::new();
+        let marker = fixture.root.path().join("child-marker");
+        let marker_text = marker.to_str().expect("fixture marker path").to_string();
+        overrides.push(("FIXTURE_CHILD_MARKER", marker_text.as_str()));
         let output = fixture.run(&["chromium-headless-shell", "--with-deps"], &overrides);
         assert!(!output.status.success(), "{name}: {output:?}");
         assert_history(&fixture.events(), &history);
@@ -327,6 +337,11 @@ fn browser_installer_bounds_stalled_download_and_dependency_setup() {
         assert!(
             stderr.contains("timed out after 1000 ms"),
             "{name} must report the bound: {stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(
+            !marker.exists(),
+            "{name} left a descendant process after the timeout"
         );
     }
 }
