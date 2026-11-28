@@ -210,8 +210,8 @@ job that builds a standalone binary per OS/arch and attaches each (with a checks
   GitHub API, count non-expired `release-binary-*` artifacts, and skip checkout/download/tag/attach
   steps when the count is zero. This needs `actions: read` plus release `contents: write`.
 - **Cross-compile the awkward targets instead of chasing runners:** build both macOS targets on
-  Apple Silicon (`macos-14`) — the native toolchain cross-compiles `x86_64` and avoids the
-  deprecating Intel runners. For Linux `aarch64`, install `gcc-aarch64-linux-gnu` **and**
+  Apple Silicon (`macos-15`) — the native toolchain cross-compiles `x86_64` and avoids the
+  retired Intel macOS 14 images. For Linux `aarch64`, install `gcc-aarch64-linux-gnu` **and**
   `libc6-dev-arm64-cross` (the latter is only a _recommends_, so `--no-install-recommends` drops it
   and linking fails with `cannot find Scrt1.o`).
 - **Ship a `.sha256` next to each archive.**

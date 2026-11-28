@@ -477,13 +477,14 @@ jobs:
             # must be named explicitly under --no-install-recommends.
             linker_pkg: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
             linker: aarch64-linux-gnu-gcc
-          # Both macOS targets build on Apple Silicon (macos-14): the native
+          # Both macOS targets build on Apple Silicon (macos-15): the native
           # Apple toolchain cross-compiles x86_64 from arm64 without extra
-          # setup, and avoids the deprecating Intel macOS runner images.
+          # setup. macOS 14 images retired on 2026-11-02, so keep this label on
+          # a supported arm64 image.
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-latest
           - target: aarch64-pc-windows-msvc

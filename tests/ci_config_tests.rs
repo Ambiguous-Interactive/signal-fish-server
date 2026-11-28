@@ -7757,6 +7757,45 @@ fn test_release_workflow_builds_all_platform_binaries() {
 }
 
 #[test]
+fn test_release_workflow_uses_supported_macos_runner_images() {
+    // GitHub retired every macOS 14 runner image on 2026-11-02. A job that
+    // names a retired label fails before its first step, so the release would
+    // publish without the macOS archives.
+    let root = repo_root();
+    let live = read_live_file(&root.join(".github/workflows/release.yml"));
+    assert!(
+        !live.contains("macos-14"),
+        "release.yml must not use the retired macOS 14 runner image; use macos-15 or later."
+    );
+
+    let documents = Yaml::load_from_str(&live).expect("release.yml must parse");
+    let include = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("build-binaries"))
+        .and_then(|job| job.as_mapping_get("strategy"))
+        .and_then(|strategy| strategy.as_mapping_get("matrix"))
+        .and_then(|matrix| matrix.as_mapping_get("include"))
+        .and_then(Yaml::as_sequence)
+        .expect("release.yml build matrix include");
+    for triple in ["x86_64-apple-darwin", "aarch64-apple-darwin"] {
+        let entry = include
+            .iter()
+            .find(|entry| entry.as_mapping_get("target").and_then(Yaml::as_str) == Some(triple))
+            .unwrap_or_else(|| {
+                panic!("release.yml build matrix must include a target entry for {triple}")
+            });
+        let image = entry
+            .as_mapping_get("os")
+            .and_then(Yaml::as_str)
+            .unwrap_or_else(|| panic!("release.yml build matrix must declare an os for {triple}"));
+        assert!(
+            matches!(image, "macos-15" | "macos-26" | "macos-latest"),
+            "release.yml must build {triple} on a supported arm64 macOS image, found {image}"
+        );
+    }
+}
+
+#[test]
 fn test_release_binary_builds_use_dispatch_tooling_with_exact_source() {
     let root = repo_root();
     let release = read_live_file(&root.join(".github/workflows/release.yml"));
