@@ -68,6 +68,8 @@ def _section_tables(data: dict[str, Any], section: str) -> list[dict[str, Any]]:
 
 def _lookup(data: dict[str, Any], key: str, section: str | None) -> Any:
     tables = [data] if section is None else _section_tables(data, section)
+    # An array-of-tables key may live in any entry. The previous line-oriented
+    # reader returned the first match, so search candidates in order.
     for table in tables:
         if key in table:
             return table[key]
