@@ -170,6 +170,20 @@ fn test_read_toml_string_reads_array_of_table_sections() {
 }
 
 #[test]
+fn test_read_toml_string_reads_nested_sections_inside_array_tables() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "bin.metadata"],
+        "[[bin]]\nname = \"first\"\n\n[bin.metadata]\nversion = \"0.1\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "nested sections inside an array-of-tables entry must stay readable.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "0.1\n");
+}
+
+#[test]
 fn test_read_toml_string_reads_dotted_section_paths() {
     let (exit_code, output) = run_reader(
         &[

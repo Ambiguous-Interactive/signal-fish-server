@@ -64,7 +64,8 @@ def _section_table(data: dict[str, Any], section: str) -> dict[str, Any]:
 
     table: Any = data
     for part in section.split("."):
-        if not isinstance(table, dict) or part not in table:
+        table = _as_table(table)
+        if table is None or part not in table:
             raise KeyError(section)
         table = table[part]
     resolved = _as_table(table)
