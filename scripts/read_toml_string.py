@@ -162,8 +162,8 @@ def _multiline_open(line: str) -> str | None:
     return None
 
 
-def _declared_sections(text: str) -> dict[str, tuple[list[str], int] | None]:
-    declared: dict[str, tuple[list[str], int] | None] = {}
+def _declared_sections(text: str) -> dict[str, tuple[list[str], list[int]] | None]:
+    declared: dict[str, tuple[list[str], list[int]] | None] = {}
     array_counts: dict[str, int] = {}
     multiline: str | None = None
     for line in text.splitlines():
@@ -182,14 +182,23 @@ def _declared_sections(text: str) -> dict[str, tuple[list[str], int] | None]:
                 array_counts[canonical] = array_counts.get(canonical, 0) + 1
                 declared.setdefault(canonical, None)
             else:
-                owner = None
+                owner_prefix = None
+                owner_index = None
                 for length in range(len(parts) - 1, 0, -1):
                     prefix = parts[:length]
                     prefix_canonical = _canonical(prefix)
                     if prefix_canonical in array_counts:
-                        owner = (prefix, array_counts[prefix_canonical] - 1)
+                        owner_prefix = prefix
+                        owner_index = array_counts[prefix_canonical] - 1
                         break
-                declared.setdefault(canonical, owner)
+                if owner_prefix is None:
+                    declared.setdefault(canonical, None)
+                elif canonical not in declared:
+                    declared[canonical] = (owner_prefix, [owner_index])
+                else:
+                    existing = declared[canonical]
+                    if existing is not None and existing[0] == owner_prefix:
+                        existing[1].append(owner_index)
             continue
         multiline = _multiline_open(line)
     return declared
@@ -234,7 +243,7 @@ def _resolve_sections(value: Any, parts: list[str]) -> list[dict[str, Any]]:
 def _section_tables(
     data: dict[str, Any],
     section: str,
-    declared: dict[str, tuple[list[str], int] | None],
+    declared: dict[str, tuple[list[str], list[int]] | None],
 ) -> list[dict[str, Any]]:
     # A section exists only when the source declares a matching table header.
     # This keeps `items = [{ version = "..." }]` an array value, not a section.
@@ -247,18 +256,21 @@ def _section_tables(
     owner = declared[canonical]
     if owner is None:
         return _resolve_sections(data, parts)
-    prefix, index = owner
+    prefix, indices = owner
     entries = _resolve_sections(data, prefix)
-    if index >= len(entries):
-        return []
-    return _resolve_sections(entries[index], parts[len(prefix) :])
+    suffix = parts[len(prefix) :]
+    tables: list[dict[str, Any]] = []
+    for index in indices:
+        if index < len(entries):
+            tables.extend(_resolve_sections(entries[index], suffix))
+    return tables
 
 
 def _lookup(
     data: dict[str, Any],
     key: str,
     section: str | None,
-    declared: dict[str, tuple[list[str], int] | None],
+    declared: dict[str, tuple[list[str], list[int]] | None],
 ) -> Any:
     tables = [data] if section is None else _section_tables(data, section, declared)
     # An array-of-tables key may live in any entry. The previous line-oriented
