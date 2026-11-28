@@ -236,6 +236,20 @@ fn test_read_toml_string_reads_quoted_dotted_section_paths() {
 }
 
 #[test]
+fn test_read_toml_string_reads_repeated_nested_sections_in_array_tables() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "second", "bin.metadata"],
+        "[[bin]]\n[bin.metadata]\nfirst = \"a\"\n\n[[bin]]\n[bin.metadata]\nsecond = \"b\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "a key may appear in a later repeated nested section.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "b\n");
+}
+
+#[test]
 fn test_read_toml_string_keeps_nested_declarations_with_their_array_entry() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "bin.metadata"],
