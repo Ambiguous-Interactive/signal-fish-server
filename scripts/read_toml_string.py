@@ -15,18 +15,63 @@ and missing-file errors.
 from __future__ import annotations
 
 import datetime
-import re
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any
 
 
-_HEADER = re.compile(r"^\s*\[\[?(?P<name>[^\]]+)\]\]?\s*(?:#.*)?$")
+def _header_content(line: str) -> str | None:
+    stripped = line.lstrip()
+    if not stripped.startswith("["):
+        return None
+    array = stripped.startswith("[[")
+    open_len = 2 if array else 1
+    quote: str | None = None
+    escaped = False
+    index = open_len
+    while index < len(stripped):
+        char = stripped[index]
+        if escaped:
+            escaped = False
+        elif quote is not None:
+            if quote == '"' and char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+        elif char == "]":
+            if array:
+                if stripped.startswith("]]", index):
+                    content = stripped[open_len:index]
+                    after = index + 2
+                    break
+            else:
+                content = stripped[open_len:index]
+                after = index + 1
+                break
+        index += 1
+    else:
+        return None
+    rest = stripped[after:].strip()
+    if rest and not rest.startswith("#"):
+        return None
+    return content
+
+
+def _decode_key(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        try:
+            return tomllib.loads(f"key = {raw}")["key"]
+        except (tomllib.TOMLDecodeError, KeyError):
+            return raw[1:-1]
+    return raw
 
 
 def _split_section(section: str) -> list[str]:
-    parts: list[str] = []
+    raw_parts: list[str] = []
     current: list[str] = []
     quote: str | None = None
     escaped = False
@@ -36,30 +81,48 @@ def _split_section(section: str) -> list[str]:
             escaped = False
             continue
         if quote is not None:
+            current.append(char)
             if quote == '"' and char == "\\":
                 escaped = True
             elif char == quote:
                 quote = None
-            else:
-                current.append(char)
             continue
         if char in "\"'":
             quote = char
+            current.append(char)
         elif char == ".":
             part = "".join(current).strip()
             if part:
-                parts.append(part)
+                raw_parts.append(part)
             current = []
         else:
             current.append(char)
     part = "".join(current).strip()
     if part:
-        parts.append(part)
-    return parts
+        raw_parts.append(part)
+    return [_decode_key(part) for part in raw_parts]
 
 
 def _canonical(parts: list[str]) -> str:
     return "\0".join(parts)
+
+
+def _multiline_close(line: str, delimiter: str) -> int | None:
+    if delimiter == "'''":
+        return line.find("'''")
+    index = 0
+    while True:
+        index = line.find('"""', index)
+        if index == -1:
+            return None
+        backslashes = 0
+        probe = index - 1
+        while probe >= 0 and line[probe] == "\\":
+            backslashes += 1
+            probe -= 1
+        if backslashes % 2 == 0:
+            return index
+        index += 1
 
 
 def _multiline_open(line: str) -> str | None:
@@ -80,10 +143,10 @@ def _multiline_open(line: str) -> str | None:
             index += 1
             continue
         if line.startswith('"""', index):
-            close = line.find('"""', index + 3)
-            if close == -1:
+            close = _multiline_close(line[index + 3 :], '"""')
+            if close is None:
                 return '"""'
-            index = close + 3
+            index = index + 3 + close + 3
             continue
         if line.startswith("'''", index):
             close = line.find("'''", index + 3)
@@ -104,12 +167,12 @@ def _declared_sections(text: str) -> set[str]:
     multiline: str | None = None
     for line in text.splitlines():
         if multiline is not None:
-            if multiline in line:
+            if _multiline_close(line, multiline) is not None:
                 multiline = None
             continue
-        match = _HEADER.match(line)
-        if match is not None:
-            parts = _split_section(match.group("name"))
+        content = _header_content(line)
+        if content is not None:
+            parts = _split_section(content)
             if parts:
                 sections.add(_canonical(parts))
             continue

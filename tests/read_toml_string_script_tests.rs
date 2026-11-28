@@ -236,6 +236,50 @@ fn test_read_toml_string_reads_quoted_dotted_section_paths() {
 }
 
 #[test]
+fn test_read_toml_string_reads_quoted_keys_with_closing_brackets() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "value", "parent.\"child]name\""],
+        "[parent.\"child]name\"]\nvalue = \"ok\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "closing brackets inside quoted section keys must stay in the key.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "ok\n");
+}
+
+#[test]
+fn test_read_toml_string_decodes_quoted_section_key_escapes() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "value", "parent.\"child\\u002ename\""],
+        "[parent.\"child\\u002ename\"]\nvalue = \"ok\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "quoted section keys must decode TOML escapes.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "ok\n");
+}
+
+#[test]
+fn test_read_toml_string_multiline_close_ignores_escaped_quotes() {
+    let toml =
+        "items = { version = \"wrong\" }\n\ndescription = \"\"\"\n\\\"\"\"\n[items]\n\"\"\"\n";
+    let (exit_code, output) = run_reader(&["sample.toml", "version", "items"], toml);
+
+    assert_eq!(
+        exit_code, 1,
+        "escaped quotes must not end multiline-string tracking.\nOutput:\n{output}"
+    );
+    assert!(
+        output.is_empty(),
+        "an escaped multiline quote must not declare a section.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_read_toml_string_ignores_inline_table_arrays() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "items"],
