@@ -47,9 +47,19 @@ def _format_scalar(value: Any) -> str:
     raise TypeError(f"expected a TOML scalar, found {type(value).__name__}")
 
 
+def _as_table(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        return value
+    # TOML parses [[table]] as a list of tables. The previous reader returned
+    # the first table's value, so keep that first-entry behavior.
+    if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+        return value[0]
+    return None
+
+
 def _section_table(data: dict[str, Any], section: str) -> dict[str, Any]:
-    literal = data.get(section)
-    if isinstance(literal, dict):
+    literal = _as_table(data.get(section))
+    if literal is not None:
         return literal
 
     table: Any = data
@@ -57,9 +67,10 @@ def _section_table(data: dict[str, Any], section: str) -> dict[str, Any]:
         if not isinstance(table, dict) or part not in table:
             raise KeyError(section)
         table = table[part]
-    if not isinstance(table, dict):
+    resolved = _as_table(table)
+    if resolved is None:
         raise KeyError(section)
-    return table
+    return resolved
 
 
 def _lookup(data: dict[str, Any], key: str, section: str | None) -> Any:

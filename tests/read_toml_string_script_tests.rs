@@ -156,6 +156,20 @@ fn test_read_toml_string_fails_closed_for_invalid_toml() {
 }
 
 #[test]
+fn test_read_toml_string_reads_array_of_table_sections() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "bin"],
+        "[[bin]]\nversion = \"0.1.0\"\n\n[[bin]]\nversion = \"0.2.0\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "an array-of-tables section must keep its first table readable.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "0.1.0\n");
+}
+
+#[test]
 fn test_read_toml_string_reads_dotted_section_paths() {
     let (exit_code, output) = run_reader(
         &[
