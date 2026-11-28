@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 
@@ -66,11 +67,21 @@ impl BrowserFixture {
             package.join("cli.js"),
             r#"const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.FIXTURE_EVENTS, JSON.stringify({kind:'cli',args})+'\n');
 if (args.length !== 2 || !['chromium-headless-shell','chromium','firefox'].includes(args[1])) {
   console.error('fixture rejected installer arguments');
   process.exit(98);
+}
+const delay = Number(args[0] === 'install' ? process.env.FIXTURE_INSTALL_DELAY_MS : process.env.FIXTURE_SETUP_DELAY_MS);
+if (delay > 0) {
+  const marker = process.env.FIXTURE_CHILD_MARKER;
+  if (marker) {
+    spawn(process.execPath, ['-e', "setTimeout(() => require('node:fs').writeFileSync(process.argv[1], 'alive'), 1500)", marker], {stdio: 'ignore'});
+  }
+  const end = Date.now() + delay;
+  while (Date.now() < end) {}
 }
 if (args[0] === 'install') {
   const status = Number(process.env.FIXTURE_DOWNLOAD_STATUS);
@@ -136,6 +147,10 @@ module.exports = {chromium:browser('chromium'),firefox:browser('firefox')};
             .env("FIXTURE_MISSING_DEPS", "0")
             .env("FIXTURE_ALWAYS_FAIL", "0")
             .env("FIXTURE_CLOSE_FAIL", "0")
+            .env("FIXTURE_INSTALL_DELAY_MS", "0")
+            .env("FIXTURE_SETUP_DELAY_MS", "0")
+            .env("FIXTURE_CHILD_MARKER", "")
+            .env("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", "600000")
             .envs(overrides.iter().copied())
             .output()
             .expect("run browser installer with Node")
@@ -282,6 +297,100 @@ fn browser_installer_preserves_download_and_dependency_setup_exit_codes() {
         let output = fixture.run(&["chromium-headless-shell", "--with-deps"], &overrides);
         assert_eq!(output.status.code(), Some(code), "{name}: {output:?}");
         assert_history(&fixture.events(), &history);
+    }
+}
+
+#[test]
+/// A stalled download or host setup must fail at the configured bound, not wait for the job limit.
+fn browser_installer_bounds_stalled_download_and_dependency_setup() {
+    if !node_available() {
+        return;
+    }
+    for (name, mut overrides, history) in [
+        (
+            "download",
+            vec![
+                ("FIXTURE_INSTALL_DELAY_MS", "5000"),
+                ("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", "1000"),
+            ],
+            vec!["install"],
+        ),
+        (
+            "host setup",
+            vec![
+                ("FIXTURE_MISSING_DEPS", "1"),
+                ("FIXTURE_SETUP_STATUS", "0"),
+                ("FIXTURE_SETUP_DELAY_MS", "5000"),
+                ("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", "1000"),
+            ],
+            vec!["install", "launch", "install-deps"],
+        ),
+    ] {
+        let fixture = BrowserFixture::new();
+        let marker = fixture.root.path().join("child-marker");
+        let marker_text = marker.to_str().expect("fixture marker path").to_string();
+        overrides.push(("FIXTURE_CHILD_MARKER", marker_text.as_str()));
+        let output = fixture.run(&["chromium-headless-shell", "--with-deps"], &overrides);
+        assert!(!output.status.success(), "{name}: {output:?}");
+        assert_history(&fixture.events(), &history);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("timed out after 1000 ms"),
+            "{name} must report the bound: {stderr}"
+        );
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(
+            !marker.exists(),
+            "{name} left a descendant process after the timeout"
+        );
+    }
+}
+
+#[test]
+/// A command that completes below the bound must still install, launch and close.
+fn browser_installer_allows_commands_within_the_configured_timeout() {
+    if !node_available() {
+        return;
+    }
+    let fixture = BrowserFixture::new();
+    let output = fixture.run(
+        &["chromium-headless-shell", "--with-deps"],
+        &[
+            ("FIXTURE_MISSING_DEPS", "1"),
+            ("FIXTURE_SETUP_STATUS", "0"),
+            ("FIXTURE_SETUP_DELAY_MS", "50"),
+            ("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", "5000"),
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_history(
+        &fixture.events(),
+        &["install", "launch", "install-deps", "launch", "close"],
+    );
+}
+
+#[test]
+/// Invalid bounds must fail before any command or browser operation.
+fn browser_installer_rejects_invalid_timeouts_before_side_effects() {
+    if !node_available() {
+        return;
+    }
+    for timeout in ["", "0", "-1", "1.5", "not-a-number", "2147483648"] {
+        let fixture = BrowserFixture::new();
+        let output = fixture.run(
+            &["chromium"],
+            &[("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS", timeout)],
+        );
+        assert!(!output.status.success(), "timeout={timeout:?}: {output:?}");
+        assert!(
+            fixture.events().is_empty(),
+            "timeout={timeout:?} must fail before side effects"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS must be an integer between 1 and 2147483647 milliseconds"),
+            "timeout={timeout:?} must report the valid range: {stderr}"
+        );
     }
 }
 

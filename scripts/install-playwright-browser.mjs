@@ -3,13 +3,49 @@
 // Use the browser client's locked Playwright package from any working directory.
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 /** Preserve a failed Playwright command's exit status. */
 class InstallCommandError extends Error {
   constructor(message, exitCode) {
     super(message);
     this.exitCode = exitCode;
+  }
+}
+
+const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const MAX_COMMAND_TIMEOUT_MS = 2_147_483_647;
+const COMMAND_TIMEOUT_ENV = 'SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS';
+
+/** Bound network-backed Playwright commands so a stalled mirror cannot consume the job limit. */
+function commandTimeoutMs() {
+  const configured = process.env[COMMAND_TIMEOUT_ENV];
+  if (configured === undefined) return DEFAULT_COMMAND_TIMEOUT_MS;
+  const timeout = Number(configured);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_COMMAND_TIMEOUT_MS) {
+    throw new Error(
+      `${COMMAND_TIMEOUT_ENV} must be an integer between 1 and ${MAX_COMMAND_TIMEOUT_MS} milliseconds.`,
+    );
+  }
+  return timeout;
+}
+
+/** Kill the command and every descendant so a stalled package step leaves no locks behind. */
+function killProcessTree(child) {
+  if (process.platform === 'win32') {
+    const result = spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+      stdio: 'ignore',
+    });
+    if (result.error) child.kill('SIGKILL');
+    return;
+  }
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (error) {
+    if (error.code !== 'ESRCH') {
+      console.error(`Could not terminate the Playwright process group: ${error.message}`);
+      child.kill('SIGKILL');
+    }
   }
 }
 
@@ -25,20 +61,45 @@ async function main() {
   const require = createRequire(new URL('../clients/browser/package.json', import.meta.url));
   const cli = join(dirname(require.resolve('playwright-core/package.json')), 'cli.js');
   const { chromium, firefox } = require('playwright-core');
+  const timeoutMs = commandTimeoutMs();
 
   /** Run the pinned CLI and keep download and package setup failures fatal. */
   function runCli(args) {
-    const result = spawnSync(process.execPath, [cli, ...args], { stdio: 'inherit' });
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new InstallCommandError(
-        `Playwright ${args.join(' ')} failed${result.signal ? ` (${result.signal})` : ''}.`,
-        result.status ?? 1,
-      );
-    }
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, [cli, ...args], {
+        stdio: 'inherit',
+        detached: process.platform !== 'win32',
+      });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        killProcessTree(child);
+      }, timeoutMs);
+
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on('close', (code, signal) => {
+        clearTimeout(timer);
+        if (timedOut) {
+          reject(new InstallCommandError(
+            `Playwright ${args.join(' ')} timed out after ${timeoutMs} ms.`,
+            1,
+          ));
+        } else if (code !== 0) {
+          reject(new InstallCommandError(
+            `Playwright ${args.join(' ')} failed${signal ? ` (${signal})` : ''}.`,
+            code ?? 1,
+          ));
+        } else {
+          resolve();
+        }
+      });
+    });
   }
 
-  runCli(['install', target]);
+  await runCli(['install', target]);
   const browserType = target === 'firefox' ? firefox : chromium;
   const options = { headless: true, timeout: 30_000 };
   // Fortress uses full Chromium; the browser reference client uses the shell.
@@ -51,7 +112,7 @@ async function main() {
     if (flags.length === 0) throw error;
     console.error(`Browser startup failed: ${error.message}`);
     console.error('Install OS dependencies and try browser startup once more.');
-    runCli(['install-deps', target]);
+    await runCli(['install-deps', target]);
     browser = await browserType.launch(options);
   }
   // A close failure is fatal and does not trigger package installation.
