@@ -13,6 +13,20 @@ class InstallCommandError extends Error {
   }
 }
 
+const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const COMMAND_TIMEOUT_ENV = 'SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS';
+
+/** Bound network-backed Playwright commands so a stalled mirror cannot consume the job limit. */
+function commandTimeoutMs() {
+  const configured = process.env[COMMAND_TIMEOUT_ENV];
+  if (configured === undefined) return DEFAULT_COMMAND_TIMEOUT_MS;
+  const timeout = Number(configured);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0) {
+    throw new Error(`${COMMAND_TIMEOUT_ENV} must be a positive integer number of milliseconds.`);
+  }
+  return timeout;
+}
+
 /** Download the requested browser and prove that its executable can start. */
 async function main() {
   const [target, ...flags] = process.argv.slice(2);
@@ -25,10 +39,21 @@ async function main() {
   const require = createRequire(new URL('../clients/browser/package.json', import.meta.url));
   const cli = join(dirname(require.resolve('playwright-core/package.json')), 'cli.js');
   const { chromium, firefox } = require('playwright-core');
+  const timeoutMs = commandTimeoutMs();
 
   /** Run the pinned CLI and keep download and package setup failures fatal. */
   function runCli(args) {
-    const result = spawnSync(process.execPath, [cli, ...args], { stdio: 'inherit' });
+    const result = spawnSync(process.execPath, [cli, ...args], {
+      stdio: 'inherit',
+      timeout: timeoutMs,
+      killSignal: 'SIGKILL',
+    });
+    if (result.error?.code === 'ETIMEDOUT') {
+      throw new InstallCommandError(
+        `Playwright ${args.join(' ')} timed out after ${timeoutMs} ms.`,
+        1,
+      );
+    }
     if (result.error) throw result.error;
     if (result.status !== 0) {
       throw new InstallCommandError(
