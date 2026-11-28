@@ -207,6 +207,20 @@ fn test_read_toml_string_reads_nested_sections_inside_array_tables() {
 }
 
 #[test]
+fn test_read_toml_string_reads_direct_keys_from_later_array_tables() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "bin"],
+        "[[bin]]\nname = \"a\"\n\n[[bin]]\nversion = \"0.2\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "a direct key may belong to a later array-of-tables entry.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "0.2\n");
+}
+
+#[test]
 fn test_read_toml_string_reads_nested_sections_in_later_array_tables() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "bin.metadata"],

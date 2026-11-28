@@ -31,53 +31,47 @@ def _format_scalar(value: Any) -> str:
     raise TypeError(f"expected a TOML scalar, found {type(value).__name__}")
 
 
-def _as_table(value: Any) -> dict[str, Any] | None:
+def _tables(value: Any) -> list[dict[str, Any]]:
     if isinstance(value, dict):
-        return value
-    # TOML parses [[table]] as a list of tables. A direct section lookup keeps
-    # the previous reader's first-table behavior.
+        return [value]
+    # TOML parses [[table]] as a list of tables. Search every entry in order:
+    # the previous reader returned the first matching header or key.
     if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-        return value[0]
-    return None
+        return list(value)
+    return []
 
 
-def _resolve_section(value: Any, parts: list[str]) -> dict[str, Any] | None:
+def _resolve_sections(value: Any, parts: list[str]) -> list[dict[str, Any]]:
     if not parts:
-        return _as_table(value)
+        return _tables(value)
     part = parts[0]
     if isinstance(value, dict):
         if part in value:
-            resolved = _resolve_section(value[part], parts[1:])
-            if resolved is not None:
-                return resolved
-        return None
+            return _resolve_sections(value[part], parts[1:])
+        return []
     if isinstance(value, list):
-        # A nested section attaches to the last array-table entry in TOML,
-        # but the previous reader returned the first matching header. Search
-        # entries in order for the first one that contains the nested table.
+        resolved: list[dict[str, Any]] = []
         for item in value:
-            resolved = _resolve_section(item, parts)
-            if resolved is not None:
-                return resolved
-    return None
+            resolved.extend(_resolve_sections(item, parts))
+        return resolved
+    return []
 
 
-def _section_table(data: dict[str, Any], section: str) -> dict[str, Any]:
-    literal = _as_table(data.get(section))
+def _section_tables(data: dict[str, Any], section: str) -> list[dict[str, Any]]:
+    literal = data.get(section)
     if literal is not None:
-        return literal
-
-    resolved = _resolve_section(data, section.split("."))
-    if resolved is None:
-        raise KeyError(section)
-    return resolved
+        tables = _tables(literal)
+        if tables:
+            return tables
+    return _resolve_sections(data, section.split("."))
 
 
 def _lookup(data: dict[str, Any], key: str, section: str | None) -> Any:
-    table = data if section is None else _section_table(data, section)
-    if key not in table:
-        raise KeyError(key)
-    return table[key]
+    tables = [data] if section is None else _section_tables(data, section)
+    for table in tables:
+        if key in table:
+            return table[key]
+    raise KeyError(key)
 
 
 def main(argv: list[str]) -> int:
