@@ -7768,27 +7768,28 @@ fn test_release_workflow_uses_supported_macos_runner_images() {
         "release.yml must not use the retired macOS 14 runner image; use macos-15 or later."
     );
 
+    let documents = Yaml::load_from_str(&live).expect("release.yml must parse");
+    let include = documents[0]
+        .as_mapping_get("jobs")
+        .and_then(|jobs| jobs.as_mapping_get("build-binaries"))
+        .and_then(|job| job.as_mapping_get("strategy"))
+        .and_then(|strategy| strategy.as_mapping_get("matrix"))
+        .and_then(|matrix| matrix.as_mapping_get("include"))
+        .and_then(Yaml::as_sequence)
+        .expect("release.yml build matrix include");
     for triple in ["x86_64-apple-darwin", "aarch64-apple-darwin"] {
-        let mut image = None;
-        let mut in_target = false;
-        for line in live.lines() {
-            let trimmed = line.trim();
-            if let Some(target) = trimmed.strip_prefix("- target:") {
-                in_target = target.trim() == triple;
-                continue;
-            }
-            if !in_target {
-                continue;
-            }
-            if let Some(value) = trimmed.strip_prefix("os:") {
-                image = Some(value.trim().to_string());
-                break;
-            }
-        }
-        let image = image
+        let entry = include
+            .iter()
+            .find(|entry| entry.as_mapping_get("target").and_then(Yaml::as_str) == Some(triple))
+            .unwrap_or_else(|| {
+                panic!("release.yml build matrix must include a target entry for {triple}")
+            });
+        let image = entry
+            .as_mapping_get("os")
+            .and_then(Yaml::as_str)
             .unwrap_or_else(|| panic!("release.yml build matrix must declare an os for {triple}"));
         assert!(
-            matches!(image.as_str(), "macos-15" | "macos-26" | "macos-latest"),
+            matches!(image, "macos-15" | "macos-26" | "macos-latest"),
             "release.yml must build {triple} on a supported arm64 macOS image, found {image}"
         );
     }
