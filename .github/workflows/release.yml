@@ -142,6 +142,7 @@ jobs:
             scripts/check-clean-release-worktree.sh
             scripts/check-crates-io-release.sh
             scripts/read-toml-string.sh
+            scripts/read_toml_string.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -261,6 +262,7 @@ jobs:
             scripts/check-clean-release-worktree.sh
             scripts/check-github-release.sh
             scripts/read-toml-string.sh
+            scripts/read_toml_string.py
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -501,6 +503,7 @@ jobs:
           path: publication-tools
           sparse-checkout: |
             scripts/read-toml-string.sh
+            scripts/read_toml_string.py
             scripts/release-binary-features.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
