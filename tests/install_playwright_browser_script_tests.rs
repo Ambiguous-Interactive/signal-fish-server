@@ -375,7 +375,7 @@ fn browser_installer_rejects_invalid_timeouts_before_side_effects() {
     if !node_available() {
         return;
     }
-    for timeout in ["", "0", "-1", "1.5", "not-a-number"] {
+    for timeout in ["", "0", "-1", "1.5", "not-a-number", "2147483648"] {
         let fixture = BrowserFixture::new();
         let output = fixture.run(
             &["chromium"],
@@ -385,6 +385,11 @@ fn browser_installer_rejects_invalid_timeouts_before_side_effects() {
         assert!(
             fixture.events().is_empty(),
             "timeout={timeout:?} must fail before side effects"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS must be an integer between 1 and 2147483647 milliseconds"),
+            "timeout={timeout:?} must report the valid range: {stderr}"
         );
     }
 }

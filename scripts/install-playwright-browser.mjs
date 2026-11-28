@@ -14,6 +14,7 @@ class InstallCommandError extends Error {
 }
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 10 * 60_000;
+const MAX_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const COMMAND_TIMEOUT_ENV = 'SIGNAL_FISH_PLAYWRIGHT_TIMEOUT_MS';
 
 /** Bound network-backed Playwright commands so a stalled mirror cannot consume the job limit. */
@@ -21,8 +22,10 @@ function commandTimeoutMs() {
   const configured = process.env[COMMAND_TIMEOUT_ENV];
   if (configured === undefined) return DEFAULT_COMMAND_TIMEOUT_MS;
   const timeout = Number(configured);
-  if (!Number.isSafeInteger(timeout) || timeout <= 0) {
-    throw new Error(`${COMMAND_TIMEOUT_ENV} must be a positive integer number of milliseconds.`);
+  if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_COMMAND_TIMEOUT_MS) {
+    throw new Error(
+      `${COMMAND_TIMEOUT_ENV} must be an integer between 1 and ${MAX_COMMAND_TIMEOUT_MS} milliseconds.`,
+    );
   }
   return timeout;
 }
