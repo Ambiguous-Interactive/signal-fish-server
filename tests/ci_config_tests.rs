@@ -7785,9 +7785,8 @@ fn test_release_workflow_uses_supported_macos_runner_images() {
                 break;
             }
         }
-        let image = image.unwrap_or_else(|| {
-            panic!("release.yml build matrix must declare an os for {triple}")
-        });
+        let image = image
+            .unwrap_or_else(|| panic!("release.yml build matrix must declare an os for {triple}"));
         assert!(
             matches!(image.as_str(), "macos-15" | "macos-26" | "macos-latest"),
             "release.yml must build {triple} on a supported arm64 macOS image, found {image}"
