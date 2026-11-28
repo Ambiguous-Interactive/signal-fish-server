@@ -121,11 +121,7 @@ enabled = true
             "a \"quoted\" value\n",
             "escaped quotes",
         ),
-        (
-            ["sample.toml", "path"],
-            "C:\\temp\n",
-            "escaped backslash",
-        ),
+        (["sample.toml", "path"], "C:\\temp\n", "escaped backslash"),
         (["sample.toml", "version"], "1\n", "integer scalar"),
         (["sample.toml", "enabled"], "true\n", "boolean scalar"),
     ] {
@@ -145,7 +141,11 @@ enabled = true
 #[test]
 fn test_read_toml_string_fails_closed_for_invalid_toml() {
     let (exit_code, output) = run_reader(
-        &["sample.toml", "built-in-tls", "package.metadata.signal-fish-release"],
+        &[
+            "sample.toml",
+            "built-in-tls",
+            "package.metadata.signal-fish-release",
+        ],
         "[package.metadata.signal-fish-release]\nbuilt-in-tls = maybe\n",
     );
 
