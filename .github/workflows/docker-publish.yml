@@ -118,6 +118,7 @@ jobs:
           sparse-checkout: |
             scripts/find-release-version-introduction.sh
             scripts/read-toml-string.sh
+            scripts/read_toml_string.py
             scripts/reuse-verified-image.sh
             scripts/verify-release-image.sh
           sparse-checkout-cone-mode: false
@@ -278,6 +279,7 @@ jobs:
           sparse-checkout: |
             .github/actions/setup-docker-builder
             scripts/read-toml-string.sh
+            scripts/read_toml_string.py
             scripts/reuse-verified-image.sh
             scripts/update-container-alias.sh
             scripts/verify-release-image.sh

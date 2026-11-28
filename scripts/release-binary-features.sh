@@ -14,8 +14,19 @@ if [ ! -f "$1" ]; then
 fi
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# Exit 1 is an absent marker (historical releases keep the default feature
+# contract). Any other failure (usage, missing file, invalid TOML, non-scalar)
+# must stop the selector instead of silently disabling the marker.
+set +e
 MARKER=$(bash "$SCRIPT_DIR/read-toml-string.sh" \
-    "$1" built-in-tls package.metadata.signal-fish-release || true)
+    "$1" built-in-tls package.metadata.signal-fish-release)
+STATUS=$?
+set -e
+if [ "$STATUS" -eq 1 ]; then
+    MARKER=""
+elif [ "$STATUS" -ne 0 ]; then
+    exit "$STATUS"
+fi
 
 case "$MARKER" in
     true)

@@ -4,8 +4,9 @@
 # Usage:
 #   bash scripts/read-toml-string.sh <file> <key> [section]
 #
-# This helper is intentionally small and dependency-free for CI bootstrap steps
-# that need values before Rust or taplo are installed.
+# This entrypoint needs no Rust or taplo install for CI bootstrap steps. The
+# parser is the standalone typed Python reader next to this file; the shell
+# entrypoint keeps the original usage and missing-file errors.
 
 set -euo pipefail
 
@@ -23,44 +24,12 @@ if [ ! -f "$FILE" ]; then
     exit 2
 fi
 
-awk -v key="$KEY" -v section="$SECTION" '
-    function trim(value) {
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
-        return value
-    }
-    function unquote_or_strip_comment(value,    quote, quote_end) {
-        value = trim(value)
-        quote = substr(value, 1, 1)
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+for python in python3 python; do
+    if command -v "$python" >/dev/null 2>&1 && "$python" -c 'import tomllib' >/dev/null 2>&1; then
+        exec "$python" "$SCRIPT_DIR/read_toml_string.py" "$FILE" "$KEY" "$SECTION"
+    fi
+done
 
-        if (quote == "\"" || quote == sprintf("%c", 39)) {
-            value = substr(value, 2)
-            quote_end = index(value, quote)
-            if (quote_end > 0) {
-                value = substr(value, 1, quote_end - 1)
-            }
-        } else {
-            sub(/[[:space:]]+#.*$/, "", value)
-            value = trim(value)
-        }
-
-        return value
-    }
-    /^[[:space:]]*(#|$)/ { next }
-    /^[[:space:]]*\[\[?[^]]+\]\]?[[:space:]]*(#.*)?$/ {
-        current = $0
-        sub(/[[:space:]]*#.*$/, "", current)
-        gsub(/^[[:space:]]*\[\[?|\]\]?[[:space:]]*$/, "", current)
-        next
-    }
-    (section == "" && current == "") || current == section {
-        line = $0
-        sub(/^[[:space:]]*/, "", line)
-        if (line ~ "^" key "[[:space:]]*=") {
-            sub(/^[^=]*=/, "", line)
-            print unquote_or_strip_comment(line)
-            found = 1
-            exit
-        }
-    }
-    END { exit found == 1 ? 0 : 1 }
-' "$FILE"
+echo "ERROR: Python 3.11 or newer is required to read TOML values." >&2
+exit 2

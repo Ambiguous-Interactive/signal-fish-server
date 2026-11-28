@@ -20,6 +20,8 @@ if [ -n "${READ_TOML_SCRIPT:-}" ]; then
     readonly READ_TOML_SCRIPT
 else
     cp scripts/read-toml-string.sh "${resolver_scratch}/read-toml-string.sh"
+    reader_script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+    cp "$reader_script_dir/read_toml_string.py" "${resolver_scratch}/read_toml_string.py"
     readonly READ_TOML_SCRIPT="${resolver_scratch}/read-toml-string.sh"
 fi
 finder_source=${FIND_RELEASE_VERSION_INTRODUCTION_SCRIPT:-"$(dirname "${BASH_SOURCE[0]}")/find-release-version-introduction.sh"}
