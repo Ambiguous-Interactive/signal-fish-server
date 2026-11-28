@@ -15,10 +15,27 @@ and missing-file errors.
 from __future__ import annotations
 
 import datetime
+import re
 import sys
 import tomllib
 from pathlib import Path
 from typing import Any
+
+
+_HEADER = re.compile(r"^\s*\[\[?(?P<name>[^\]]+)\]\]?\s*(?:#.*)?$")
+
+
+def _declared_sections(text: str) -> set[str]:
+    sections: set[str] = set()
+    for line in text.splitlines():
+        match = _HEADER.match(line)
+        if match is None:
+            continue
+        name = match.group("name").strip()
+        if len(name) >= 2 and name[0] == name[-1] and name[0] in "\"'":
+            name = name[1:-1]
+        sections.add(re.sub(r"\s*\.\s*", ".", name))
+    return sections
 
 
 def _format_scalar(value: Any) -> str:
@@ -57,7 +74,13 @@ def _resolve_sections(value: Any, parts: list[str]) -> list[dict[str, Any]]:
     return []
 
 
-def _section_tables(data: dict[str, Any], section: str) -> list[dict[str, Any]]:
+def _section_tables(
+    data: dict[str, Any], section: str, declared: set[str]
+) -> list[dict[str, Any]]:
+    # A section exists only when the source declares a matching table header.
+    # This keeps `items = [{ version = "..." }]` an array value, not a section.
+    if section not in declared:
+        return []
     literal = data.get(section)
     if literal is not None:
         tables = _tables(literal)
@@ -66,8 +89,10 @@ def _section_tables(data: dict[str, Any], section: str) -> list[dict[str, Any]]:
     return _resolve_sections(data, section.split("."))
 
 
-def _lookup(data: dict[str, Any], key: str, section: str | None) -> Any:
-    tables = [data] if section is None else _section_tables(data, section)
+def _lookup(
+    data: dict[str, Any], key: str, section: str | None, declared: set[str]
+) -> Any:
+    tables = [data] if section is None else _section_tables(data, section, declared)
     # An array-of-tables key may live in any entry. The previous line-oriented
     # reader returned the first match, so search candidates in order.
     for table in tables:
@@ -90,14 +115,14 @@ def main(argv: list[str]) -> int:
         return 2
 
     try:
-        with path.open("rb") as handle:
-            data = tomllib.load(handle)
+        text = path.read_text(encoding="utf-8")
+        data = tomllib.loads(text)
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
         print(f"ERROR: Could not read TOML file {file_name}: {error}", file=sys.stderr)
         return 3
 
     try:
-        value = _lookup(data, key, section)
+        value = _lookup(data, key, section, _declared_sections(text))
     except KeyError:
         return 1
 

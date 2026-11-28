@@ -207,6 +207,23 @@ fn test_read_toml_string_reads_nested_sections_inside_array_tables() {
 }
 
 #[test]
+fn test_read_toml_string_ignores_inline_table_arrays() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "items"],
+        "items = [{ version = \"wrong\" }]\n",
+    );
+
+    assert_eq!(
+        exit_code, 1,
+        "an inline-table array is a value, not a table section.\nOutput:\n{output}"
+    );
+    assert!(
+        output.is_empty(),
+        "an inline-table array must not return a section value.\nOutput:\n{output}"
+    );
+}
+
+#[test]
 fn test_read_toml_string_reads_direct_keys_from_later_array_tables() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "version", "bin"],
