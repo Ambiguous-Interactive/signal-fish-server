@@ -6,11 +6,13 @@ use common::{bash_command, repo_root, unique_temp_dir, write_file};
 use std::fs;
 
 fn copy_reader_script(temp_root: &std::path::Path) {
-    let script_src = repo_root().join("scripts/read-toml-string.sh");
-    let script_dst = temp_root.join("scripts/read-toml-string.sh");
-    let script = fs::read_to_string(&script_src)
-        .unwrap_or_else(|e| panic!("Failed to read {}: {e}", script_src.display()));
-    write_file(&script_dst, &script);
+    for name in ["read-toml-string.sh", "read_toml_string.py"] {
+        let source = repo_root().join("scripts").join(name);
+        let destination = temp_root.join("scripts").join(name);
+        let contents = fs::read_to_string(&source)
+            .unwrap_or_else(|e| panic!("Failed to read {}: {e}", source.display()));
+        write_file(&destination, &contents);
+    }
 }
 
 fn run_reader_bytes(args: &[&str], toml: &[u8]) -> (i32, String) {
@@ -202,6 +204,20 @@ fn test_read_toml_string_reads_nested_sections_inside_array_tables() {
         "nested sections inside an array-of-tables entry must stay readable.\nOutput:\n{output}"
     );
     assert_eq!(output, "0.1\n");
+}
+
+#[test]
+fn test_read_toml_string_reads_nested_sections_in_later_array_tables() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "bin.metadata"],
+        "[[bin]]\nname = \"first\"\n\n[[bin]]\nname = \"second\"\n\n[bin.metadata]\nversion = \"0.2\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "a nested section may belong to a later array-of-tables entry.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "0.2\n");
 }
 
 #[test]

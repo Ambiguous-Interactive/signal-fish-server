@@ -17,7 +17,11 @@ const STANDALONE_MANIFESTS: [&str; 4] = [
 ];
 
 fn copy_msrv_script(temp_root: &std::path::Path) {
-    for script_name in ["check-msrv-consistency.sh", "read-toml-string.sh"] {
+    for script_name in [
+        "check-msrv-consistency.sh",
+        "read-toml-string.sh",
+        "read_toml_string.py",
+    ] {
         let script_src = repo_root().join("scripts").join(script_name);
         let script_dst = temp_root.join("scripts").join(script_name);
         let script = fs::read_to_string(&script_src)
