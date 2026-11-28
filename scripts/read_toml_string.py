@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 
-def _header_content(line: str) -> str | None:
+def _header_content(line: str) -> tuple[str, bool] | None:
     stripped = line.lstrip()
     if not stripped.startswith("["):
         return None
@@ -57,7 +57,7 @@ def _header_content(line: str) -> str | None:
     rest = stripped[after:].strip()
     if rest and not rest.startswith("#"):
         return None
-    return content
+    return content, array
 
 
 def _decode_key(raw: str) -> str:
@@ -162,22 +162,37 @@ def _multiline_open(line: str) -> str | None:
     return None
 
 
-def _declared_sections(text: str) -> set[str]:
-    sections: set[str] = set()
+def _declared_sections(text: str) -> dict[str, tuple[list[str], int] | None]:
+    declared: dict[str, tuple[list[str], int] | None] = {}
+    array_counts: dict[str, int] = {}
     multiline: str | None = None
     for line in text.splitlines():
         if multiline is not None:
             if _multiline_close(line, multiline) is not None:
                 multiline = None
             continue
-        content = _header_content(line)
-        if content is not None:
+        header = _header_content(line)
+        if header is not None:
+            content, array = header
             parts = _split_section(content)
-            if parts:
-                sections.add(_canonical(parts))
+            if not parts:
+                continue
+            canonical = _canonical(parts)
+            if array:
+                array_counts[canonical] = array_counts.get(canonical, 0) + 1
+                declared.setdefault(canonical, None)
+            else:
+                owner = None
+                for length in range(len(parts) - 1, 0, -1):
+                    prefix = parts[:length]
+                    prefix_canonical = _canonical(prefix)
+                    if prefix_canonical in array_counts:
+                        owner = (prefix, array_counts[prefix_canonical] - 1)
+                        break
+                declared.setdefault(canonical, owner)
             continue
         multiline = _multiline_open(line)
-    return sections
+    return declared
 
 
 def _format_scalar(value: Any) -> str:
@@ -217,18 +232,33 @@ def _resolve_sections(value: Any, parts: list[str]) -> list[dict[str, Any]]:
 
 
 def _section_tables(
-    data: dict[str, Any], section: str, declared: set[str]
+    data: dict[str, Any],
+    section: str,
+    declared: dict[str, tuple[list[str], int] | None],
 ) -> list[dict[str, Any]]:
     # A section exists only when the source declares a matching table header.
     # This keeps `items = [{ version = "..." }]` an array value, not a section.
     parts = _split_section(section)
-    if not parts or _canonical(parts) not in declared:
+    if not parts:
         return []
-    return _resolve_sections(data, parts)
+    canonical = _canonical(parts)
+    if canonical not in declared:
+        return []
+    owner = declared[canonical]
+    if owner is None:
+        return _resolve_sections(data, parts)
+    prefix, index = owner
+    entries = _resolve_sections(data, prefix)
+    if index >= len(entries):
+        return []
+    return _resolve_sections(entries[index], parts[len(prefix) :])
 
 
 def _lookup(
-    data: dict[str, Any], key: str, section: str | None, declared: set[str]
+    data: dict[str, Any],
+    key: str,
+    section: str | None,
+    declared: dict[str, tuple[list[str], int] | None],
 ) -> Any:
     tables = [data] if section is None else _section_tables(data, section, declared)
     # An array-of-tables key may live in any entry. The previous line-oriented

@@ -236,6 +236,20 @@ fn test_read_toml_string_reads_quoted_dotted_section_paths() {
 }
 
 #[test]
+fn test_read_toml_string_keeps_nested_declarations_with_their_array_entry() {
+    let (exit_code, output) = run_reader(
+        &["sample.toml", "version", "bin.metadata"],
+        "[[bin]]\nmetadata = { version = \"wrong\" }\n\n[[bin]]\n[bin.metadata]\nversion = \"0.2\"\n",
+    );
+
+    assert_eq!(
+        exit_code, 0,
+        "a nested declaration belongs to its owning array-of-tables entry.\nOutput:\n{output}"
+    );
+    assert_eq!(output, "0.2\n");
+}
+
+#[test]
 fn test_read_toml_string_reads_quoted_keys_with_closing_brackets() {
     let (exit_code, output) = run_reader(
         &["sample.toml", "value", "parent.\"child]name\""],
